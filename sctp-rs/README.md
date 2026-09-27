@@ -55,11 +55,11 @@ This section captures the current support for `SCTP` features with [RFC 6458](ht
 | 6.1.11 | no | |
 | 6.2.1 | N/A | |
 | 6.2.2 | yes | |
-| 8.1.1 | no | |
+| 8.1.1 | yes | |
 | 8.1.2 | no | |
-| 8.1.3 | no | |
+| 8.1.3 | yes | |
 | 8.1.4 | no | |
-| 8.1.5 | no | |
+| 8.1.5 | yes | |
 | 8.1.6 | no | |
 | 8.1.7 | no | |
 | 8.1.8 | no | |

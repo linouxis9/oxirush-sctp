@@ -115,11 +115,56 @@ async fn listening_socket_one2many_connected_peeloff_success() {
     };
 }
 
-// Tests for `sctp_getpaddrs` for Listening Socket.
-// TODO:
+// Tests for `sctp_getpaddrs` and `sctp_getladdrs` for Listening Socket.
+#[tokio::test]
+async fn listening_getladdrs_and_getpaddrs_of_many_addresses() {
+    for v4 in [true, false] {
+        let socket = if v4 {
+            Socket::new_v4(SocketToAssociation::OneToOne).unwrap()
+        } else {
+            Socket::new_v6(SocketToAssociation::OneToOne).unwrap()
+        };
+        // Loopback addresses: 127.0.0.0/8 is local.
+        let first: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        socket.bind(first).unwrap();
+        let port = {
+            let listener = socket.listen(10).unwrap();
+            let port = listener.sctp_getladdrs(0).unwrap()[0].port();
+            let more: Vec<SocketAddr> = (2..=20)
+                .map(|i| SocketAddr::from(([127, 0, 0, i], port)))
+                .collect();
+            listener.sctp_bindx(&more, BindxFlags::Add).unwrap();
 
-// Tests for `sctp_getladdrs` for Listening Socket.
-// TODO:
+            let mut laddrs = listener.sctp_getladdrs(0).unwrap();
+            assert_eq!(laddrs.len(), 20, "{:?}", laddrs);
+            laddrs.sort();
+            // IPv6 sockets report IPv4 addresses as IPv4-mapped IPv6 addresses.
+            let expected: Vec<SocketAddr> = (1..=20)
+                .map(|i| {
+                    let ip = std::net::Ipv4Addr::new(127, 0, 0, i);
+                    if v4 {
+                        SocketAddr::from((ip, port))
+                    } else {
+                        SocketAddr::from((ip.to_ipv6_mapped(), port))
+                    }
+                })
+                .collect();
+            assert_eq!(laddrs, expected);
+
+            let client = create_client_socket(SocketToAssociation::OneToOne, true);
+            let (connected, _) = client
+                .sctp_connectx(&[SocketAddr::from(([127, 0, 0, 1], port))])
+                .await
+                .unwrap();
+            let (accepted, _) = listener.accept().await.unwrap();
+            let paddrs = connected.sctp_getpaddrs(0).unwrap();
+            assert_eq!(paddrs.len(), 20, "{:?}", paddrs);
+            assert_eq!(accepted.sctp_getladdrs(0).unwrap().len(), 20);
+            port
+        };
+        assert_ne!(port, 0);
+    }
+}
 
 // Tests for `sctp_recv` for Listening Socket.
 // TODO:

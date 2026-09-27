@@ -20,20 +20,12 @@ impl PeeloffArg {
     }
 }
 
-// Structure used by `sctp_getpaddrs` and `sctp_getladdrs` (Section 9.3 and Section 9.4)
-//
-// This structure will always be used for 'getting' the values from the kernel.
+// Structure used by `sctp_peeloff` with flags for the new descriptor
 #[repr(C)]
-#[derive(Debug)]
-pub(crate) struct GetAddrs {
-    pub(crate) assoc_id: AssociationId,
-    pub(crate) addr_count: libc::c_int,
-    // Following type is just used as a place holder. The way this structure is 'always' used it is
-    // we allocate memory and use that memory as a pointer to the structure and use the following
-    // field to get the address of the following field and then use it as a `libc::sockaddr` and
-    // iterate through those (see `getaddrs_internal`) and since this is never used as a part of
-    // public API, our users don't have to worry about it.
-    pub(crate) addrs: u8,
+#[derive(Default, Debug)]
+pub(crate) struct PeeloffFlagsArg {
+    pub(crate) p_arg: PeeloffArg,
+    pub(crate) flags: libc::c_uint,
 }
 
 // Structure used for Subscribing to SCTP Events
@@ -139,7 +131,7 @@ impl TryFrom<PeerAddrInternal> for PeerAddress {
 }
 
 impl TryFrom<ConnStatusInternal> for ConnStatus {
-    type Error = std::convert::Infallible;
+    type Error = std::io::Error;
 
     fn try_from(val: ConnStatusInternal) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -151,7 +143,7 @@ impl TryFrom<ConnStatusInternal> for ConnStatus {
             instreams: val.instreams,
             outstreams: val.outstreams,
             fragmentation_pt: val.fragmentation_pt,
-            peer_primary: val.peer_primary.try_into().unwrap(),
+            peer_primary: val.peer_primary.try_into()?,
         })
     }
 }

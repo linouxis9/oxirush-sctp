@@ -1,7 +1,8 @@
 //! Listening SCTP Socket
 
 use std::net::SocketAddr;
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::sync::Mutex;
 
 use tokio::io::unix::AsyncFd;
 
@@ -9,7 +10,7 @@ use tokio::io::unix::AsyncFd;
 use crate::internal::*;
 use crate::{
     types::AssociationId, BindxFlags, ConnStatus, ConnectedSocket, Event, NotificationOrData,
-    SendData, SubscribeEventAssocId,
+    RtoInfo, SendData, SubscribeEventAssocId,
 };
 
 /// A structure representing a socket that is listening for incoming SCTP Connections.
@@ -19,7 +20,9 @@ use crate::{
 /// [`Socket`][crate::Socket] is consumed when this structure is created. See
 /// [`Socket::listen`][crate::Socket::listen] for more details.
 pub struct Listener {
-    inner: AsyncFd<RawFd>,
+    inner: AsyncFd<OwnedFd>,
+    // The part of a message `sctp_recv` has received so far.
+    partial: Mutex<Option<PartialMessage>>,
 }
 
 impl Listener {
@@ -69,14 +72,34 @@ impl Listener {
     /// without explicitly 'accept'ing or 'peeling off' the socket. The internal API used to
     /// receive the data is also the API used to receive notifications. This function returns
     /// either the notification (which the user should have subscribed for) or the data.
+    ///
+    /// Each call returns a whole message (or notification), however many reads it takes: the
+    /// kernel returns a message longer than the read buffer, or than the receive window, in
+    /// several parts. A message longer than 4 MiB is discarded and reported as an
+    /// [`InvalidData`][std::io::ErrorKind::InvalidData] error, and the next call returns the next
+    /// message. The `RcvInfo` is that of the first part of the message and the `NxtInfo` that of
+    /// the last. This assumes the default `SCTP_FRAGMENT_INTERLEAVE` level 0, where the parts of
+    /// a message are not interleaved with other messages.
+    ///
+    /// Cancel safe: if the returned future is dropped before it completes, the part of a message
+    /// received so far is kept for the next call.
+    ///
+    /// When the delivery of a message is aborted (e.g. its association is aborted), the part
+    /// received so far is dropped if a notification follows (subscribe to
+    /// [`Event::PartialDelivery`] for one) or, with `RcvInfo` requested (see
+    /// [`sctp_request_rcvinfo`][Self::sctp_request_rcvinfo]), a message of another association
+    /// or stream.
     pub async fn sctp_recv(&self) -> std::io::Result<NotificationOrData> {
-        sctp_recvmsg_internal(&self.inner).await
+        sctp_recvmsg_internal(&self.inner, &self.partial).await
     }
 
     /// Send Data and Anciliary data if any on the SCTP Socket.
     ///
     /// SCTP supports sending the actual SCTP message together with sending any anciliary data on
     /// the SCTP association. The anciliary data is optional.
+    ///
+    /// Waits while the send buffer is full. The message is sent whole, or not at all if the
+    /// returned future is dropped before it completes.
     pub async fn sctp_send(&self, to: SocketAddr, data: SendData) -> std::io::Result<()> {
         sctp_sendmsg_internal(&self.inner, Some(to), data).await
     }
@@ -195,17 +218,55 @@ impl Listener {
         sctp_get_status_internal(&self.inner, assoc_id)
     }
 
+    /// Enables or disables `SCTP_NODELAY` (Section 8.1.5 of RFC 6458).
+    ///
+    /// Like Nagle's algorithm in TCP, the Linux SCTP stack holds back a small message while data
+    /// sent earlier is unacknowledged, to bundle it with the next ones. As the peer delays its
+    /// acknowledgements (by up to 200 ms by default), a request can wait that long for no gain.
+    /// With `nodelay` set, messages are sent as soon as the congestion window allows.
+    ///
+    /// On Linux, sockets accepted from a listening socket or peeled off it inherit its setting.
+    pub fn set_nodelay(&self, nodelay: bool) -> std::io::Result<()> {
+        sctp_set_nodelay_internal(&self.inner, nodelay)
+    }
+
+    /// Whether `SCTP_NODELAY` is set. See [`set_nodelay`][Self::set_nodelay].
+    pub fn nodelay(&self) -> std::io::Result<bool> {
+        sctp_nodelay_internal(&self.inner)
+    }
+
+    /// Set the retransmission timeout parameters (`SCTP_RTOINFO`, Section 8.1.1 of RFC 6458) of
+    /// the association `rto_info.assoc_id`, or with 0 the defaults of the socket.
+    pub fn sctp_set_rto_info(&self, rto_info: RtoInfo) -> std::io::Result<()> {
+        sctp_set_rto_info_internal(&self.inner, rto_info)
+    }
+
+    /// Get the retransmission timeout parameters of the association `assoc_id`, or with 0 the
+    /// defaults of the socket. See [`sctp_set_rto_info`][Self::sctp_set_rto_info].
+    pub fn sctp_get_rto_info(&self, assoc_id: AssociationId) -> std::io::Result<RtoInfo> {
+        sctp_get_rto_info_internal(&self.inner, assoc_id)
+    }
+
     // functions not part of public APIs
-    pub(crate) fn from_rawfd(fd: RawFd) -> std::io::Result<Self> {
-        Ok(Self {
-            inner: AsyncFd::new(fd)?,
-        })
+    pub(crate) fn from_async_fd(inner: AsyncFd<OwnedFd>) -> Self {
+        Self {
+            inner,
+            partial: Mutex::new(None),
+        }
     }
 }
 
-impl Drop for Listener {
-    // Drop for `Listener`. We close the `inner` RawFd
-    fn drop(&mut self) {
-        close_internal(&self.inner);
+/// The descriptor stays owned by the socket and must stay non-blocking. It allows setting socket
+/// options that are not wrapped here, e.g. with `socket2::SockRef` or `libc::setsockopt`.
+impl AsRawFd for Listener {
+    fn as_raw_fd(&self) -> RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
+/// Borrows the descriptor, under the same conditions as [`AsRawFd`].
+impl AsFd for Listener {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.inner.get_ref().as_fd()
     }
 }

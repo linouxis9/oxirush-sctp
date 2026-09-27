@@ -7,17 +7,16 @@ use tokio::io::unix::AsyncFd;
 
 use std::convert::TryInto;
 use std::net::SocketAddr;
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::sync::{Mutex, PoisonError};
 
 use os_socketaddr::OsSocketAddr;
 
-use crate::types::internal::{
-    ConnStatusInternal, ConnectxParam, GetAddrs, InitMsg, SubscribeEvent,
-};
+use crate::types::internal::{ConnStatusInternal, ConnectxParam, InitMsg, SubscribeEvent};
 use crate::{
     AssocChangeState, AssociationChange, AssociationId, BindxFlags, CmsgType, ConnStatus,
     ConnectedSocket, Event, Listener, Notification, NotificationOrData, NxtInfo, RcvInfo,
-    ReceivedData, SendData, SendInfo, Shutdown, SubscribeEventAssocId,
+    ReceivedData, RtoInfo, SendData, SendInfo, Shutdown, SubscribeEventAssocId,
 };
 
 #[allow(unused)]
@@ -27,7 +26,7 @@ static SOL_SCTP: libc::c_int = 132;
 
 // Implementation of `sctp_bindx` using `libc::setsockopt`
 pub(crate) fn sctp_bindx_internal(
-    fd: &AsyncFd<RawFd>,
+    fd: &AsyncFd<OwnedFd>,
     addrs: &[SocketAddr],
     flags: BindxFlags,
 ) -> std::io::Result<()> {
@@ -59,7 +58,7 @@ pub(crate) fn sctp_bindx_internal(
     // to raw data is valid.
     unsafe {
         let result = libc::setsockopt(
-            *fd.get_ref(),
+            fd.as_raw_fd(),
             SOL_SCTP,
             flags,
             addrs_u8.as_ptr() as *const _ as *const libc::c_void,
@@ -80,15 +79,25 @@ pub(crate) fn sctp_bindx_internal(
 
 // Implementation of `sctp_peeloff` using `libc::getsockopt`
 pub(crate) fn sctp_peeloff_internal(
-    fd: &AsyncFd<RawFd>,
+    fd: &AsyncFd<OwnedFd>,
     assoc_id: AssociationId,
 ) -> std::io::Result<ConnectedSocket> {
     log::debug!("Peeling off socket for Association ID: {:?}", assoc_id);
 
-    use crate::types::internal::PeeloffArg;
+    use crate::types::internal::{PeeloffArg, PeeloffFlagsArg};
 
-    let mut peeloff_arg = PeeloffArg::from_assoc_id(assoc_id);
-    let mut peeloff_size: libc::socklen_t = std::mem::size_of::<PeeloffArg>() as libc::socklen_t;
+    // The peeled off socket is non-blocking, and closed on `exec`.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let flags = (libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC) as libc::c_uint;
+
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let flags = 0;
+
+    let mut peeloff_arg = PeeloffFlagsArg {
+        p_arg: PeeloffArg::from_assoc_id(assoc_id),
+        flags,
+    };
+    let mut peeloff_size = std::mem::size_of::<PeeloffFlagsArg>() as libc::socklen_t;
 
     // Safety: Pointer to `peeloff_arg` and `peeloff_size` is valid as the variable is still in the
     // scope
@@ -96,9 +105,9 @@ pub(crate) fn sctp_peeloff_internal(
         let peeloff_arg_ptr = std::ptr::addr_of_mut!(peeloff_arg);
         let peeloff_size_ptr = std::ptr::addr_of_mut!(peeloff_size);
         let result = libc::getsockopt(
-            *fd.get_ref(),
+            fd.as_raw_fd(),
             SOL_SCTP,
-            SCTP_SOCKOPT_PEELOFF,
+            SCTP_SOCKOPT_PEELOFF_FLAGS,
             peeloff_arg_ptr as *mut _ as *mut libc::c_void,
             peeloff_size_ptr as *mut _ as *mut libc::socklen_t,
         );
@@ -109,12 +118,13 @@ pub(crate) fn sctp_peeloff_internal(
             );
             Err(std::io::Error::last_os_error())
         } else {
-            let rawfd = peeloff_arg.sd.as_raw_fd();
+            // Safety: the kernel returned a new descriptor, which nothing else owns.
+            let fd = OwnedFd::from_raw_fd(peeloff_arg.p_arg.sd);
 
-            log::debug!("Setting peeled off socket to non-blocking.");
-            set_fd_non_blocking(rawfd)?;
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            set_fd_non_blocking_cloexec(fd.as_raw_fd())?;
 
-            ConnectedSocket::from_rawfd(rawfd)
+            ConnectedSocket::from_owned_fd(fd)
         }
     }
 }
@@ -126,30 +136,44 @@ pub(crate) fn sctp_peeloff_internal(
 pub(crate) fn sctp_socket_internal(
     domain: libc::c_int,
     assoc: crate::SocketToAssociation,
-) -> std::io::Result<RawFd> {
+) -> std::io::Result<OwnedFd> {
+    let socket_type = match assoc {
+        crate::SocketToAssociation::OneToOne => {
+            log::debug!("Creating TCP Style Socket.");
+            libc::SOCK_STREAM
+        }
+        crate::SocketToAssociation::OneToMany => {
+            log::debug!("Creating UDP Style Socket.");
+            libc::SOCK_SEQPACKET
+        }
+    };
+    // The socket is non-blocking, and closed on `exec` so that child processes do not keep its
+    // associations open.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let socket_type = socket_type | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC;
+
     unsafe {
-        let rawfd = match assoc {
-            crate::SocketToAssociation::OneToOne => {
-                log::debug!("Creating TCP Style Socket.");
-                libc::socket(domain, libc::SOCK_STREAM, libc::IPPROTO_SCTP)
-            }
-            crate::SocketToAssociation::OneToMany => {
-                log::debug!("Creating UDP Style Socket.");
-                libc::socket(domain, libc::SOCK_SEQPACKET, libc::IPPROTO_SCTP)
-            }
-        };
+        let rawfd = libc::socket(domain, socket_type, libc::IPPROTO_SCTP);
+        if rawfd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // Safety: `socket` returned a new descriptor, which nothing else owns.
+        let fd = OwnedFd::from_raw_fd(rawfd);
 
-        log::debug!("Setting 'socket' to Non-blocking socket.");
-        set_fd_non_blocking(rawfd)?;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        set_fd_non_blocking_cloexec(fd.as_raw_fd())?;
 
-        Ok(rawfd)
+        Ok(fd)
     }
 }
 
 // Implementation of `listen` using `libc::listen`
-pub(crate) fn sctp_listen_internal(fd: AsyncFd<RawFd>, backlog: i32) -> std::io::Result<Listener> {
+pub(crate) fn sctp_listen_internal(
+    fd: AsyncFd<OwnedFd>,
+    backlog: i32,
+) -> std::io::Result<Listener> {
     unsafe {
-        let rawfd = *fd.get_ref();
+        let rawfd = fd.as_raw_fd();
         let result = libc::listen(rawfd, backlog);
 
         if result < 0 {
@@ -159,25 +183,25 @@ pub(crate) fn sctp_listen_internal(fd: AsyncFd<RawFd>, backlog: i32) -> std::io:
             );
             Err(std::io::Error::last_os_error())
         } else {
-            Listener::from_rawfd(fd.into_inner())
+            Ok(Listener::from_async_fd(fd))
         }
     }
 }
 
 // Implmentation of `sctp_getpaddrs` using `libc::getsockopt`
 pub(crate) fn sctp_getpaddrs_internal(
-    fd: &AsyncFd<RawFd>,
+    fd: &AsyncFd<OwnedFd>,
     assoc_id: AssociationId,
 ) -> std::io::Result<Vec<SocketAddr>> {
-    sctp_getaddrs_internal(*fd.get_ref(), SCTP_GET_PEER_ADDRS, assoc_id)
+    sctp_getaddrs_internal(fd.as_raw_fd(), SCTP_GET_PEER_ADDRS, assoc_id)
 }
 
 // Implmentation of `sctp_getladdrs` using `libc::getsockopt`
 pub(crate) fn sctp_getladdrs_internal(
-    fd: &AsyncFd<RawFd>,
+    fd: &AsyncFd<OwnedFd>,
     assoc_id: AssociationId,
 ) -> std::io::Result<Vec<SocketAddr>> {
-    sctp_getaddrs_internal(*fd.get_ref(), SCTP_GET_LOCAL_ADDRS, assoc_id)
+    sctp_getaddrs_internal(fd.as_raw_fd(), SCTP_GET_LOCAL_ADDRS, assoc_id)
 }
 
 // Actual function performing `sctp_getpaddrs` or `sctp_getladdrs`
@@ -197,82 +221,96 @@ fn sctp_getaddrs_internal(
         assoc_id
     );
 
-    let capacity = 256_usize;
-    let mut addrs_buff: Vec<u8> = vec![0; capacity];
-    let mut getaddrs_size: libc::socklen_t = capacity as libc::socklen_t;
+    // `struct sctp_getaddrs` is the association ID, the number of addresses and the packed
+    // addresses. The kernel fails with `ENOMEM` if they do not fit: the buffer then grows.
+    const HEADER_SIZE: usize = 8;
+    const MAX_BUFFER_SIZE: usize = 1 << 20;
+    let mut capacity = 4096_usize;
+    loop {
+        let mut addrs_buff: Vec<u8> = vec![0; capacity];
+        addrs_buff[0..4].copy_from_slice(&assoc_id.to_ne_bytes());
+        let mut getaddrs_size = capacity as libc::socklen_t;
 
-    // Safety: `addrs_buff` has a reserved capacity of 4K bytes which should normally be sufficient
-    // for most of the calls to get local or peer addresses. Even if it is not sufficient, the call
-    // to `getsockopt` would return an error, thus the memory won't be overwritten.
-    unsafe {
-        let getaddrs_ptr = addrs_buff.as_mut_ptr() as *mut GetAddrs;
-        (*getaddrs_ptr).assoc_id = assoc_id;
-        let getaddrs_size_ptr = std::ptr::addr_of_mut!(getaddrs_size);
-        let result = libc::getsockopt(
-            fd,
-            SOL_SCTP,
-            flags,
-            getaddrs_ptr as *mut _ as *mut libc::c_void,
-            getaddrs_size_ptr as *mut _ as *mut libc::socklen_t,
-        );
+        // Safety: `addrs_buff` is valid for writes of `getaddrs_size` octets during the call.
+        let result = unsafe {
+            libc::getsockopt(
+                fd,
+                SOL_SCTP,
+                flags,
+                addrs_buff.as_mut_ptr() as *mut libc::c_void,
+                &mut getaddrs_size,
+            )
+        };
         if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ENOMEM) && capacity < MAX_BUFFER_SIZE {
+                capacity *= 2;
+                continue;
+            }
             log::error!(
                 "Error: {} while getting {} addresses using  `getsockopt`.",
-                addr_type,
-                std::io::Error::last_os_error()
+                error,
+                addr_type
             );
-            Err(std::io::Error::last_os_error())
-        } else {
-            let mut peeraddrs = vec![];
-
-            // The call succeeded, we need to do a lot of ugly pointer arithmetic, first we get the
-            // number of addresses of the peer `addr_count` written to by the call to `getsockopt`.
-            let addr_count = (*getaddrs_ptr).addr_count;
-            log::trace!("Got {} addresses", addr_count);
-
-            let mut sockaddr_ptr = std::ptr::addr_of!((*getaddrs_ptr).addrs);
-            for _ in 0..addr_count {
-                // Now for each of the 'addresses', we try to get the family and then interpret
-                // each of the addresses accordingly and update the pointer.
-                let sa_family = (*(sockaddr_ptr as *const _ as *const libc::sockaddr)).sa_family;
-                if sa_family as i32 == libc::AF_INET {
-                    let os_socketaddr = OsSocketAddr::copy_from_raw(
-                        sockaddr_ptr as *const _ as *const libc::sockaddr,
-                        std::mem::size_of::<libc::sockaddr_in>().try_into().unwrap(),
-                    );
-                    let socketaddr = os_socketaddr.into_addr().unwrap();
-                    log::trace!("Got IPv4 Address: {:#?}", socketaddr);
-                    peeraddrs.push(socketaddr);
-                    sockaddr_ptr = sockaddr_ptr
-                        .offset(std::mem::size_of::<libc::sockaddr_in>().try_into().unwrap());
-                } else if sa_family as i32 == libc::AF_INET6 {
-                    let os_socketaddr = OsSocketAddr::copy_from_raw(
-                        sockaddr_ptr as *const _ as *const libc::sockaddr,
-                        std::mem::size_of::<libc::sockaddr_in6>()
-                            .try_into()
-                            .unwrap(),
-                    );
-                    let socketaddr = os_socketaddr.into_addr().unwrap();
-                    log::trace!("Got IPv6 Address: {:#?}", socketaddr);
-                    peeraddrs.push(socketaddr);
-                    sockaddr_ptr = sockaddr_ptr.offset(
-                        std::mem::size_of::<libc::sockaddr_in6>()
-                            .try_into()
-                            .unwrap(),
-                    );
-                } else {
-                    // Unsupported Family - should never come here.
-                    return Err(std::io::Error::from_raw_os_error(22));
-                }
-            }
-            Ok(peeraddrs)
+            return Err(error);
         }
+
+        // For the local addresses, the kernel returns the length of the addresses only.
+        let returned_size = if flags == SCTP_GET_LOCAL_ADDRS {
+            HEADER_SIZE + getaddrs_size as usize
+        } else {
+            getaddrs_size as usize
+        };
+        let returned = &addrs_buff[..returned_size.min(capacity)];
+        if returned.len() < HEADER_SIZE {
+            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        let addr_count = u32::from_ne_bytes(returned[4..8].try_into().unwrap());
+        log::trace!("Got {} addresses", addr_count);
+
+        // Now for each of the 'addresses', we get the family and then interpret each of the
+        // addresses accordingly, checking that it is within what the kernel returned.
+        let mut peeraddrs = vec![];
+        let mut offset = HEADER_SIZE;
+        for _ in 0..addr_count {
+            let rest = &returned[offset..];
+            if rest.len() < std::mem::size_of::<libc::sockaddr>() {
+                return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+            }
+            // Safety: `rest` holds at least a `sockaddr`, read without alignment requirement.
+            let sa_family =
+                unsafe { std::ptr::read_unaligned(rest.as_ptr() as *const libc::sockaddr) }
+                    .sa_family;
+            let len = match sa_family as i32 {
+                libc::AF_INET => std::mem::size_of::<libc::sockaddr_in>(),
+                libc::AF_INET6 => std::mem::size_of::<libc::sockaddr_in6>(),
+                // Unsupported Family - should never come here.
+                _ => return Err(std::io::Error::from_raw_os_error(libc::EINVAL)),
+            };
+            if rest.len() < len {
+                return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+            }
+            // Safety: `rest` holds `len` octets, which `copy_from_raw` copies.
+            let os_socketaddr = unsafe {
+                OsSocketAddr::copy_from_raw(
+                    rest.as_ptr() as *const libc::sockaddr,
+                    len as libc::socklen_t,
+                )
+            };
+            let socketaddr = os_socketaddr
+                .into_addr()
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+            log::trace!("Got Address: {:#?}", socketaddr);
+            peeraddrs.push(socketaddr);
+            offset += len;
+        }
+        return Ok(peeraddrs);
     }
 }
 
 // Implementation of `sctp_connectx` using `getsockopt` and new API using `SCTP_SOCKOPT_CONNECTX3`.
 pub(crate) async fn sctp_connectx_internal(
-    fd: AsyncFd<RawFd>,
+    fd: AsyncFd<OwnedFd>,
     addrs: &[SocketAddr],
 ) -> std::io::Result<(ConnectedSocket, AssociationId)> {
     let mut addrs_u8: Vec<u8> = vec![];
@@ -287,10 +325,11 @@ pub(crate) async fn sctp_connectx_internal(
 
     let addrs_len = addrs_u8.len();
 
-    let raw_fd = *fd.get_ref();
+    let raw_fd = fd.as_raw_fd();
     // Safety: The passed vector is valid during the function call and hence the passed reference
-    // to raw data is valid.
-    unsafe {
+    // to raw data is valid. `params` holds a raw pointer, which must not live across the `await`
+    // below, or the future would not be `Send`.
+    let assoc_id = unsafe {
         let mut params = ConnectxParam {
             assoc_id: 0,
             addrs_size: addrs_len.try_into().unwrap(),
@@ -314,58 +353,57 @@ pub(crate) async fn sctp_connectx_internal(
                     "Error: '{}' while connecting using `getsockopt`.",
                     std::io::Error::last_os_error()
                 );
-                // if we get here, `fd` won't be consumed by a `ConnectedSocket` and thus
-                // won't be closed on drop. Need to manually close here to avoid leaving
-                // sockets behind if the application does not exit.
-                close_internal(&fd);
                 return Err(last_error);
             }
         }
+        params.assoc_id
+    };
 
-        log::trace!("Waiting to connect...");
-        let _guard = fd.writable().await?;
-        log::trace!("Connected...");
+    log::trace!("Waiting to connect...");
+    let _guard = fd.writable().await?;
 
-        let sctp_status = sctp_get_status_internal(&fd, params.assoc_id);
-        if let Err(e) = sctp_status {
-            let err = if e.raw_os_error() != Some(libc::EINVAL) {
-                e
-            } else {
-                log::error!("Received `EINVAL`, while getting status, returning `ECONNREFUSED`.");
-                std::io::Error::from_raw_os_error(libc::ECONNREFUSED)
-            };
-            // if we get here, `fd` won't be consumed by a `ConnectedSocket` and thus
-            // won't be closed on drop. Need to manually close here to avoid leaving
-            // sockets behind if the application does not exit.
-            close_internal(&fd);
-            return Err(err);
-        }
-
-        log::debug!(
-            "Socket State for Assoc ID: {},  {:#?}",
-            params.assoc_id,
-            sctp_status.unwrap().state
-        );
-
-        // We can (and should) now 'consume' the passed `fd` or else 'registration' of next
-        // `ConnectedSocket` (during `AsyncFd::new` would fail. Consuming the `AsyncFd` would
-        // de-register.)
-        // Also, since this `fd` is the 'original' created with `socket` call, no need to set it to
-        // non-blocking again.
-        let rawfd = fd.into_inner();
-
-        Ok((ConnectedSocket::from_rawfd(rawfd)?, params.assoc_id))
+    // One-to-one sockets report why the association could not start (e.g. `ETIMEDOUT` when the
+    // INIT was never answered, `ECONNREFUSED` for an ABORT) in `SO_ERROR`.
+    // Safety: every value is a valid `c_int`.
+    let so_error: libc::c_int =
+        unsafe { getsockopt_internal(&fd, libc::SOL_SOCKET, libc::SO_ERROR, 0)? };
+    if so_error != 0 {
+        let err = std::io::Error::from_raw_os_error(so_error);
+        log::error!("Error: '{}' while connecting.", err);
+        return Err(err);
     }
+    log::trace!("Connected...");
+
+    let sctp_status = sctp_get_status_internal(&fd, assoc_id);
+    if let Err(e) = sctp_status {
+        let err = if e.raw_os_error() != Some(libc::EINVAL) {
+            e
+        } else {
+            log::error!("Received `EINVAL`, while getting status, returning `ECONNREFUSED`.");
+            std::io::Error::from_raw_os_error(libc::ECONNREFUSED)
+        };
+        return Err(err);
+    }
+
+    log::debug!(
+        "Socket State for Assoc ID: {},  {:#?}",
+        assoc_id,
+        sctp_status.unwrap().state
+    );
+
+    // The `ConnectedSocket` takes over the registered `fd`. Also, since this `fd` is the
+    // 'original' created with `socket` call, no need to set it to non-blocking again.
+    Ok((ConnectedSocket::from_async_fd(fd), assoc_id))
 }
 
 // Implementation of `accept` - we just call the `libc::accept` allowing it to fail if the socket
 // type is not the right one (UDP Style `SOCK_SEQPACKET`).
 pub(crate) async fn accept_internal(
-    fd: &AsyncFd<RawFd>,
+    fd: &AsyncFd<OwnedFd>,
 ) -> std::io::Result<(ConnectedSocket, SocketAddr)> {
     // Safety: Both `addrs_buff` and `addrs_len` are in the scope and hence are valid pointers.
     unsafe {
-        let raw_fd = *fd.get_ref();
+        let raw_fd = fd.as_raw_fd();
 
         // This is ugly for the following reasons - On the `SEQPACKET` sockets, we do not get
         // `readable` ready at all for the `accept`.  (Why not sure? Even when tried after sending
@@ -377,17 +415,29 @@ pub(crate) async fn accept_internal(
             // this should be enough to `accept` a connection normally `sockaddr`s maximum size is
             // 28 for the `sa_family` we care about.
             let mut addrs_buff: Vec<u8> = vec![0; 32];
-            let mut addrs_len = addrs_buff.len();
+            let mut addrs_len = addrs_buff.len() as libc::socklen_t;
 
             let result = {
                 let addrs_len_ptr = std::ptr::addr_of_mut!(addrs_len);
                 let addrs_buff_ptr = addrs_buff.as_mut_ptr();
 
-                libc::accept(
+                // The accepted socket is non-blocking, and closed on `exec`.
+                #[cfg(any(target_os = "linux", target_os = "android"))]
+                let result = libc::accept4(
                     raw_fd,
                     addrs_buff_ptr as *mut _ as *mut libc::sockaddr,
                     addrs_len_ptr as *mut _ as *mut libc::socklen_t,
-                )
+                    libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+                );
+
+                #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                let result = libc::accept(
+                    raw_fd,
+                    addrs_buff_ptr as *mut _ as *mut libc::sockaddr,
+                    addrs_len_ptr as *mut _ as *mut libc::socklen_t,
+                );
+
+                result
             };
 
             if result < 0 {
@@ -403,9 +453,11 @@ pub(crate) async fn accept_internal(
                 // We got an `EWOULDBLOCK` let's wait.
                 fd.readable().await?.clear_ready();
             } else {
+                // Safety: `accept` returned a new descriptor, which nothing else owns.
+                let accepted = OwnedFd::from_raw_fd(result);
                 let os_socketaddr = OsSocketAddr::copy_from_raw(
                     addrs_buff.as_ptr() as *const _ as *const libc::sockaddr,
-                    addrs_len.try_into().unwrap(),
+                    addrs_len,
                 );
                 log::trace!(
                     "fd: {}, result: {},  addrs_len: {}, addrs_u8: {:?}",
@@ -416,10 +468,10 @@ pub(crate) async fn accept_internal(
                 );
                 let socketaddr = os_socketaddr.into_addr().unwrap();
 
-                log::debug!("Setting 'accepted' socket to non-blocking.");
-                set_fd_non_blocking(result as RawFd)?;
+                #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                set_fd_non_blocking_cloexec(accepted.as_raw_fd())?;
 
-                return Ok((ConnectedSocket::from_rawfd(result as RawFd)?, socketaddr));
+                return Ok((ConnectedSocket::from_owned_fd(accepted)?, socketaddr));
             }
         }
     }
@@ -427,7 +479,7 @@ pub(crate) async fn accept_internal(
 
 // Shutdown implementation for `Listener` and `ConnectedSocket`.
 pub(crate) fn shutdown_internal(
-    fd: &AsyncFd<RawFd>,
+    fd: &AsyncFd<OwnedFd>,
     how: std::net::Shutdown,
 ) -> std::io::Result<()> {
     use std::net::Shutdown;
@@ -442,7 +494,7 @@ pub(crate) fn shutdown_internal(
     // Safety: No real undefined behavior as long as fd is a valid fd and if fd is not a valid fd
     // the underlying systemcall will error.
     unsafe {
-        let result = libc::shutdown(*fd.get_ref(), flags);
+        let result = libc::shutdown(fd.as_raw_fd(), flags);
         if result < 0 {
             Err(std::io::Error::last_os_error())
         } else {
@@ -452,135 +504,287 @@ pub(crate) fn shutdown_internal(
 }
 
 // Implementation for the receive side for SCTP.
-// TODO: Handle Control Message Header
+//
+// Returns whole messages: `recvmsg` returns at most the size of its buffer and the kernel delivers
+// messages longer than the receive window in several parts. The part received so far stays in
+// `partial` when there is nothing more to read yet, including when the returned future is dropped.
 pub(crate) async fn sctp_recvmsg_internal(
-    fd: &AsyncFd<RawFd>,
+    fd: &AsyncFd<OwnedFd>,
+    partial: &Mutex<Option<PartialMessage>>,
 ) -> std::io::Result<NotificationOrData> {
     log::debug!("Receiving Message on the socket.");
 
-    //
-    // Safety: recvmsg_hdr is valid in the current scope.
-    unsafe {
-        let rawfd = *fd.get_ref();
-
-        let mut recv_buffer = vec![0_u8; 4096];
-        let msg_control_size = libc::CMSG_SPACE(
-            std::mem::size_of::<RcvInfo>() as u32 + std::mem::size_of::<NxtInfo>() as u32,
-        );
-        let mut msg_control = vec![0u8; msg_control_size.try_into().unwrap()];
-        let mut from_buffer = vec![0u8; 256];
-
-        loop {
-            let mut guard = fd.readable().await?;
-
-            recv_buffer.fill(0_u8);
-            let mut recv_iov = libc::iovec {
-                iov_base: recv_buffer.as_mut_ptr() as *mut _ as *mut libc::c_void,
-                iov_len: recv_buffer.len(),
-            };
-
-            msg_control.fill(0);
-            from_buffer.fill(0);
-            #[cfg(target_os = "macos")]
-            let msg_controllen = msg_control_size as u32;
-
-            #[cfg(not(target_os = "macos"))]
-            let msg_controllen = msg_control_size as usize;
-
-            let mut recvmsg_header = libc::msghdr {
-                msg_name: from_buffer.as_mut_ptr() as *mut _ as *mut libc::c_void,
-                msg_namelen: from_buffer.len() as u32,
-                msg_iov: &mut recv_iov,
-                msg_iovlen: 1,
-                msg_control: msg_control.as_mut_ptr() as *mut _ as *mut libc::c_void,
-                msg_controllen,
-                msg_flags: 0,
-            };
-
-            let flags = 0 as libc::c_int;
-            let result = libc::recvmsg(rawfd, &mut recvmsg_header as *mut libc::msghdr, flags);
-            if result < 0 {
-                let last_error = std::io::Error::last_os_error();
-                if last_error.kind() == std::io::ErrorKind::WouldBlock {
-                    guard.clear_ready();
-                } else {
-                    return Err(last_error);
-                }
-            } else {
-                let received_flags: u32 = recvmsg_header.msg_flags.try_into().unwrap();
-                recv_buffer.truncate(result as usize);
-
-                if received_flags & MSG_NOTIFICATION != 0 {
-                    log::debug!("Received Notification.");
-                    return Ok(NotificationOrData::Notification(notification_from_message(
-                        &recv_buffer,
-                    )));
-                } else {
-                    let mut rcv_info = None;
-                    let mut nxt_info = None;
-                    let mut cmsghdr = libc::CMSG_FIRSTHDR(&mut recvmsg_header as *mut libc::msghdr);
-                    loop {
-                        if cmsghdr.is_null() {
-                            break;
-                        }
-                        if (*cmsghdr).cmsg_level != libc::IPPROTO_SCTP {
-                            log::warn!("cmsg_level is not SCTP");
-                            continue;
-                        }
-
-                        if (*cmsghdr).cmsg_type == CmsgType::RcvInfo as i32 {
-                            let mut recv_info_internal = RcvInfo::default();
-                            let cmsg_data = libc::CMSG_DATA(cmsghdr);
-                            std::ptr::copy(
-                                cmsg_data,
-                                &mut recv_info_internal as *mut _ as *mut u8,
-                                std::mem::size_of::<RcvInfo>(),
-                            );
-                            log::debug!("Received: RcvInfo: {:#?}", recv_info_internal);
-                            rcv_info = Some(recv_info_internal);
-                        }
-
-                        if (*cmsghdr).cmsg_type == CmsgType::NxtInfo as i32 {
-                            let mut nxt_info_internal = NxtInfo::default();
-                            let cmsg_data = libc::CMSG_DATA(cmsghdr);
-                            std::ptr::copy(
-                                cmsg_data,
-                                &mut nxt_info_internal as *mut _ as *mut u8,
-                                std::mem::size_of::<NxtInfo>(),
-                            );
-                            log::debug!("Received: NxtInfo: {:#?}", nxt_info_internal);
-                            nxt_info = Some(nxt_info_internal);
-                        }
-
-                        cmsghdr = libc::CMSG_NXTHDR(
-                            msg_control.as_mut_ptr() as *mut _ as *mut libc::msghdr,
-                            cmsghdr,
-                        );
-                    }
-
-                    log::debug!("Received Data.");
-                    return Ok(NotificationOrData::Data(ReceivedData {
-                        payload: recv_buffer,
-                        rcv_info,
-                        nxt_info,
-                    }));
-                }
-            }
+    loop {
+        // `try_io` clears the readiness when `recvmsg` fails with `EWOULDBLOCK`, so that we wait
+        // for the socket to become readable again.
+        let mut guard = fd.readable().await?;
+        if let Ok(result) = guard.try_io(|inner| {
+            let mut partial = partial.lock().unwrap_or_else(PoisonError::into_inner);
+            sctp_recvmsg_whole(inner.as_raw_fd(), &mut partial)
+        }) {
+            return result;
         }
     }
 }
 
+// Messages longer than this are discarded, so that a peer cannot make us buffer without bound.
+pub(crate) const MAX_MESSAGE_SIZE: usize = 4 << 20;
+
+// Initial size of the buffer of a message. It doubles for longer messages.
+const RECV_BUFFER_SIZE: usize = 4096;
+
+// Size of the reads that discard a message longer than `MAX_MESSAGE_SIZE`.
+const DISCARD_BUFFER_SIZE: usize = 65536;
+
+// The part of a message received so far.
+#[derive(Default)]
+pub(crate) struct PartialMessage {
+    notification: bool,
+    payload: Vec<u8>,
+    rcv_info: Option<RcvInfo>,
+    // Octets received, also those discarded once the message is longer than `MAX_MESSAGE_SIZE`.
+    received: usize,
+}
+
+// Without the payload, which can be long.
+impl std::fmt::Debug for PartialMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PartialMessage")
+            .field("notification", &self.notification)
+            .field("rcv_info", &self.rcv_info)
+            .field("received", &self.received)
+            .finish()
+    }
+}
+
+// One part of a message, as returned by `recvmsg`.
+struct Piece {
+    len: usize,
+    notification: bool,
+    end_of_record: bool,
+    rcv_info: Option<RcvInfo>,
+    nxt_info: Option<NxtInfo>,
+}
+
+// Reads the next message up to its end (`MSG_EOR`), or fails with `EWOULDBLOCK` after keeping the
+// part received so far in `partial`.
+//
+// With the default `SCTP_FRAGMENT_INTERLEAVE` level 0, the parts of a message are not interleaved
+// with other messages. The kernel only delivers something else after a part when it aborts the
+// delivery of the message, e.g. because the association is aborted.
+fn sctp_recvmsg_whole(
+    rawfd: RawFd,
+    partial: &mut Option<PartialMessage>,
+) -> std::io::Result<NotificationOrData> {
+    loop {
+        let mut message = partial.take().unwrap_or_default();
+        let discarding = message.received > MAX_MESSAGE_SIZE;
+        if discarding {
+            message.payload.clear();
+        }
+        let start = message.payload.len();
+        let room = if discarding {
+            DISCARD_BUFFER_SIZE
+        } else {
+            start.max(RECV_BUFFER_SIZE)
+        };
+        message.payload.resize(start + room, 0);
+
+        let piece = sctp_recvmsg_once(rawfd, &mut message.payload[start..]);
+        let piece = match piece {
+            Ok(piece) => piece,
+            Err(e) => {
+                message.payload.truncate(start);
+                if e.kind() == std::io::ErrorKind::WouldBlock && message.received > 0 {
+                    *partial = Some(message);
+                }
+                return Err(e);
+            }
+        };
+        message.payload.truncate(start + piece.len);
+
+        if piece.len == 0 && !piece.notification {
+            if message.received > 0 {
+                log::warn!(
+                    "End of stream after {} octets of a message.",
+                    message.received
+                );
+            }
+            log::debug!("Received end of stream.");
+            return Ok(NotificationOrData::Data(ReceivedData {
+                payload: vec![],
+                rcv_info: None,
+                nxt_info: None,
+            }));
+        }
+
+        let continued = message.received > 0;
+        let same_stream = match (&message.rcv_info, &piece.rcv_info) {
+            (Some(first), Some(next)) => first.assoc_id == next.assoc_id && first.sid == next.sid,
+            _ => true,
+        };
+        if continued && (piece.notification != message.notification || !same_stream) {
+            log::warn!(
+                "Dropping {} octets of a message whose delivery was aborted.",
+                message.received
+            );
+            message.payload.drain(..start);
+            message.received = 0;
+        }
+        if message.received == 0 {
+            message.notification = piece.notification;
+            message.rcv_info = piece.rcv_info;
+        }
+        message.received += piece.len;
+
+        if !piece.end_of_record {
+            *partial = Some(message);
+            continue;
+        }
+        if message.received > MAX_MESSAGE_SIZE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "discarded a message of {} octets, longer than {}",
+                    message.received, MAX_MESSAGE_SIZE
+                ),
+            ));
+        }
+        if message.notification {
+            log::debug!("Received Notification.");
+            return Ok(NotificationOrData::Notification(notification_from_message(
+                &message.payload,
+            )));
+        }
+        log::debug!("Received Data.");
+        return Ok(NotificationOrData::Data(ReceivedData {
+            payload: message.payload,
+            rcv_info: message.rcv_info,
+            nxt_info: piece.nxt_info,
+        }));
+    }
+}
+
+// A single `recvmsg` call into `buffer`.
+fn sctp_recvmsg_once(rawfd: RawFd, buffer: &mut [u8]) -> std::io::Result<Piece> {
+    // Safety: all the pointers in `recvmsg_header` point to buffers valid during the call, of the
+    // lengths given with them.
+    unsafe {
+        let mut recv_iov = libc::iovec {
+            iov_base: buffer.as_mut_ptr() as *mut libc::c_void,
+            iov_len: buffer.len(),
+        };
+        let mut msg_control = CmsgBuffer::new();
+
+        // Some platforms have private fields in `msghdr`.
+        let mut recvmsg_header: libc::msghdr = std::mem::zeroed();
+        recvmsg_header.msg_iov = &mut recv_iov;
+        recvmsg_header.msg_iovlen = 1;
+        recvmsg_header.msg_control = msg_control.as_mut_ptr();
+        recvmsg_header.msg_controllen = CMSG_BUFFER_SIZE as _;
+
+        let flags = 0 as libc::c_int;
+        let result = libc::recvmsg(rawfd, &mut recvmsg_header as *mut libc::msghdr, flags);
+        if result < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let (rcv_info, nxt_info) = rcvinfo_nxtinfo_from_cmsgs(&recvmsg_header);
+        Ok(Piece {
+            len: result as usize,
+            notification: recvmsg_header.msg_flags as u32 & MSG_NOTIFICATION != 0,
+            end_of_record: recvmsg_header.msg_flags & libc::MSG_EOR != 0,
+            rcv_info,
+            nxt_info,
+        })
+    }
+}
+
+// Size of the buffer for control messages. It has room for those `recvmsg` can return for SCTP,
+// `SCTP_NXTINFO`, `SCTP_RCVINFO` and `SCTP_SNDRCV` (with the data I/O event), after `SOL_SOCKET`
+// ones enabled on the socket, such as timestamps.
+const CMSG_BUFFER_SIZE: usize = 256;
+
+// A buffer for control messages, aligned for `cmsghdr`.
+#[repr(C)]
+struct CmsgBuffer {
+    _align: [libc::cmsghdr; 0],
+    bytes: [u8; CMSG_BUFFER_SIZE],
+}
+
+impl CmsgBuffer {
+    fn new() -> Self {
+        Self {
+            _align: [],
+            bytes: [0; CMSG_BUFFER_SIZE],
+        }
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut libc::c_void {
+        self.bytes.as_mut_ptr() as *mut libc::c_void
+    }
+}
+
+// Gets the `RcvInfo` and `NxtInfo` from the control messages `recvmsg` returned in `msghdr`.
+//
+// Safety: `msghdr.msg_control` must point to `msghdr.msg_controllen` initialized bytes, aligned
+// for `cmsghdr`, as after a successful `recvmsg` into a `CmsgBuffer`.
+unsafe fn rcvinfo_nxtinfo_from_cmsgs(msghdr: &libc::msghdr) -> (Option<RcvInfo>, Option<NxtInfo>) {
+    if msghdr.msg_flags & libc::MSG_CTRUNC != 0 {
+        log::warn!("Control messages truncated, `RcvInfo` or `NxtInfo` may be missing.");
+    }
+
+    let mut rcv_info = None;
+    let mut nxt_info = None;
+    let mut cmsghdr = libc::CMSG_FIRSTHDR(msghdr);
+    while !cmsghdr.is_null() {
+        // The kernel shortens the last control message if the buffer is too small for it.
+        let data_len = ((*cmsghdr).cmsg_len as usize).saturating_sub(libc::CMSG_LEN(0) as usize);
+        let cmsg_data = libc::CMSG_DATA(cmsghdr);
+        if (*cmsghdr).cmsg_level != libc::IPPROTO_SCTP {
+            log::trace!(
+                "Skipping a control message of level {}.",
+                (*cmsghdr).cmsg_level
+            );
+        } else if (*cmsghdr).cmsg_type == CmsgType::RcvInfo as i32
+            && data_len >= std::mem::size_of::<RcvInfo>()
+        {
+            let recv_info_internal = std::ptr::read_unaligned(cmsg_data as *const RcvInfo);
+            log::debug!("Received: RcvInfo: {:#?}", recv_info_internal);
+            rcv_info = Some(recv_info_internal);
+        } else if (*cmsghdr).cmsg_type == CmsgType::NxtInfo as i32
+            && data_len >= std::mem::size_of::<NxtInfo>()
+        {
+            let nxt_info_internal = std::ptr::read_unaligned(cmsg_data as *const NxtInfo);
+            log::debug!("Received: NxtInfo: {:#?}", nxt_info_internal);
+            nxt_info = Some(nxt_info_internal);
+        }
+
+        cmsghdr = libc::CMSG_NXTHDR(msghdr, cmsghdr);
+    }
+    (rcv_info, nxt_info)
+}
+
 // Implementation of the Send side for SCTP.
 pub(crate) async fn sctp_sendmsg_internal(
-    fd: &AsyncFd<RawFd>,
+    fd: &AsyncFd<OwnedFd>,
     to: Option<SocketAddr>,
     data: SendData,
 ) -> std::io::Result<()> {
+    loop {
+        // `try_io` clears the readiness when `sendmsg` fails with `EWOULDBLOCK`, so that we wait
+        // for the socket to become writable again instead of failing.
+        let mut guard = fd.writable().await?;
+        if let Ok(result) = guard.try_io(|inner| sctp_sendmsg_once(inner.as_raw_fd(), to, &data)) {
+            return result;
+        }
+    }
+}
+
+// A single `sendmsg` call.
+fn sctp_sendmsg_once(rawfd: RawFd, to: Option<SocketAddr>, data: &SendData) -> std::io::Result<()> {
     // Safety: All the pointers are valid because they are within the current scope.
     // Also, this is just a wrapper over `libc` call.
     unsafe {
-        let _ = fd.writable().await?;
-
         let mut send_iov = libc::iovec {
             iov_base: data.payload.as_ptr() as *mut libc::c_void,
             iov_len: data.payload.len(),
@@ -597,15 +801,14 @@ pub(crate) async fn sctp_sendmsg_internal(
             (std::ptr::null::<OsSocketAddr>() as *mut libc::c_void, 0)
         };
         // TODO: Support copy and other send info as well.
-        let msg_control_size = libc::CMSG_SPACE(std::mem::size_of::<SendInfo>() as u32);
-        let mut msg_control_buffer = vec![0u8; msg_control_size.try_into().unwrap()];
+        let mut msg_control_buffer = CmsgBuffer::new();
 
         let (msg_control, msg_control_size) = if data.snd_info.is_some() {
             // Safety: wrapper over `libc` call. the size of the structures are wellknown.
 
             (
-                msg_control_buffer.as_mut_ptr() as *mut libc::c_void,
-                msg_control_size as usize,
+                msg_control_buffer.as_mut_ptr(),
+                libc::CMSG_SPACE(std::mem::size_of::<SendInfo>() as u32) as usize,
             )
         } else {
             (
@@ -613,21 +816,15 @@ pub(crate) async fn sctp_sendmsg_internal(
                 0_usize,
             )
         };
-        #[cfg(target_os = "macos")]
-        let msg_controllen = msg_control_size as u32;
 
-        #[cfg(not(target_os = "macos"))]
-        let msg_controllen = msg_control_size;
-
-        let mut sendmsg_header = libc::msghdr {
-            msg_name: to_buffer,
-            msg_namelen: to_buffer_len,
-            msg_iov: &mut send_iov,
-            msg_iovlen: 1,
-            msg_control,
-            msg_controllen,
-            msg_flags: 0,
-        };
+        // Some platforms have private fields in `msghdr`.
+        let mut sendmsg_header: libc::msghdr = std::mem::zeroed();
+        sendmsg_header.msg_name = to_buffer;
+        sendmsg_header.msg_namelen = to_buffer_len;
+        sendmsg_header.msg_iov = &mut send_iov;
+        sendmsg_header.msg_iovlen = 1;
+        sendmsg_header.msg_control = msg_control;
+        sendmsg_header.msg_controllen = msg_control_size as _;
 
         let cmsg_hdr = libc::CMSG_FIRSTHDR(&sendmsg_header);
         if !cmsg_hdr.is_null() {
@@ -638,16 +835,19 @@ pub(crate) async fn sctp_sendmsg_internal(
                     .try_into()
                     .unwrap();
 
-            let snd_info = data.snd_info.unwrap();
+            let snd_info = data.snd_info.as_ref().unwrap();
             std::ptr::copy(
-                std::ptr::addr_of!(snd_info) as *const _,
+                snd_info as *const SendInfo as *const u8,
                 libc::CMSG_DATA(cmsg_hdr),
                 std::mem::size_of::<SendInfo>(),
             );
         }
 
-        let rawfd = *fd.get_ref();
+        // Report a closed association as `EPIPE` without raising `SIGPIPE`.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let flags = libc::MSG_NOSIGNAL;
 
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         let flags = 0 as libc::c_int;
 
         let result = libc::sendmsg(rawfd, &mut sendmsg_header as *mut libc::msghdr, flags);
@@ -660,12 +860,12 @@ pub(crate) async fn sctp_sendmsg_internal(
 }
 
 pub(crate) fn sctp_set_default_sendinfo_internal(
-    fd: &AsyncFd<RawFd>,
+    fd: &AsyncFd<OwnedFd>,
     sendinfo: SendInfo,
 ) -> std::io::Result<()> {
     unsafe {
         let result = libc::setsockopt(
-            *fd.get_ref(),
+            fd.as_raw_fd(),
             SOL_SCTP,
             SCTP_DEFAULT_SNDINFO,
             &sendinfo as *const _ as *const libc::c_void,
@@ -680,6 +880,14 @@ pub(crate) fn sctp_set_default_sendinfo_internal(
 }
 
 fn notification_from_message(data: &[u8]) -> Notification {
+    // `struct sctp_assoc_change` without `sac_info` and `struct sctp_shutdown_event`.
+    const ASSOC_CHANGE_LEN: usize = 20;
+    const SHUTDOWN_LEN: usize = 12;
+
+    if data.len() < 2 {
+        log::warn!("Notification of {} octets.", data.len());
+        return Notification::Unsupported;
+    }
     let notification_type = u16::from_ne_bytes(data[0..2].try_into().unwrap());
     log::trace!(
         "notification_type: {:x}, SCTP_ASSOC_CHANGE: {:x}",
@@ -687,7 +895,7 @@ fn notification_from_message(data: &[u8]) -> Notification {
         SCTP_ASSOC_CHANGE
     );
     match notification_type {
-        SCTP_ASSOC_CHANGE => {
+        SCTP_ASSOC_CHANGE if data.len() >= ASSOC_CHANGE_LEN => {
             log::debug!("SCTP_ASSOC_CHANGE Notification Received.");
             let assoc_change = AssociationChange {
                 ev_type: Event::from_u16(u16::from_ne_bytes(data[0..2].try_into().unwrap())),
@@ -704,7 +912,7 @@ fn notification_from_message(data: &[u8]) -> Notification {
             };
             Notification::AssociationChange(assoc_change)
         }
-        SCTP_SHUTDOWN => {
+        SCTP_SHUTDOWN if data.len() >= SHUTDOWN_LEN => {
             log::debug!("SCTP_SHUTDOWN Notification Received.");
             let shutdown = Shutdown {
                 ev_type: Event::from_u16(u16::from_ne_bytes(data[0..2].try_into().unwrap())),
@@ -715,7 +923,11 @@ fn notification_from_message(data: &[u8]) -> Notification {
             Notification::Shutdown(shutdown)
         }
         _ => {
-            log::debug!("Unsupported notification received.");
+            log::debug!(
+                "Unsupported notification received: type {:x}, {} octets.",
+                notification_type,
+                data.len()
+            );
             Notification::Unsupported
         }
     }
@@ -723,7 +935,7 @@ fn notification_from_message(data: &[u8]) -> Notification {
 
 // Implementation of Event Subscription
 pub(crate) fn sctp_subscribe_event_internal(
-    fd: &AsyncFd<RawFd>,
+    fd: &AsyncFd<OwnedFd>,
     event: Event,
     assoc_id: SubscribeEventAssocId,
     on: bool,
@@ -736,7 +948,7 @@ pub(crate) fn sctp_subscribe_event_internal(
 
     unsafe {
         let result = libc::setsockopt(
-            *fd.get_ref(),
+            fd.as_raw_fd(),
             SOL_SCTP,
             SCTP_EVENT,
             &subscriber as *const _ as *const libc::c_void,
@@ -752,7 +964,7 @@ pub(crate) fn sctp_subscribe_event_internal(
 
 // Setup initiation parameters
 pub(crate) fn sctp_setup_init_params_internal(
-    fd: &AsyncFd<RawFd>,
+    fd: &AsyncFd<OwnedFd>,
     ostreams: u16,
     istreams: u16,
     retries: u16,
@@ -768,7 +980,7 @@ pub(crate) fn sctp_setup_init_params_internal(
 
     unsafe {
         let result = libc::setsockopt(
-            *fd.get_ref(),
+            fd.as_raw_fd(),
             SOL_SCTP,
             SCTP_INITMSG,
             &init_params as *const _ as *const libc::c_void,
@@ -783,7 +995,7 @@ pub(crate) fn sctp_setup_init_params_internal(
 }
 
 // Enable/Disable reception of `RcvInfo` actual call.
-pub(crate) fn request_rcvinfo_internal(fd: &AsyncFd<RawFd>, on: bool) -> std::io::Result<()> {
+pub(crate) fn request_rcvinfo_internal(fd: &AsyncFd<OwnedFd>, on: bool) -> std::io::Result<()> {
     log::debug!("Requesting `rcv_info` along with received data on the socket.");
 
     let enable: libc::socklen_t = u32::from(on);
@@ -791,7 +1003,7 @@ pub(crate) fn request_rcvinfo_internal(fd: &AsyncFd<RawFd>, on: bool) -> std::io
 
     unsafe {
         let result = libc::setsockopt(
-            *fd.get_ref(),
+            fd.as_raw_fd(),
             SOL_SCTP,
             SCTP_RECVRCVINFO,
             &enable as *const _ as *const libc::c_void,
@@ -807,7 +1019,7 @@ pub(crate) fn request_rcvinfo_internal(fd: &AsyncFd<RawFd>, on: bool) -> std::io
 }
 
 // Enable/Disable reception of `NxtInfo` actual call.
-pub(crate) fn request_nxtinfo_internal(fd: &AsyncFd<RawFd>, on: bool) -> std::io::Result<()> {
+pub(crate) fn request_nxtinfo_internal(fd: &AsyncFd<OwnedFd>, on: bool) -> std::io::Result<()> {
     log::debug!("Requesting `nxt_info` along with received data on the socket.");
 
     let enable: libc::socklen_t = u32::from(on);
@@ -815,7 +1027,7 @@ pub(crate) fn request_nxtinfo_internal(fd: &AsyncFd<RawFd>, on: bool) -> std::io
 
     unsafe {
         let result = libc::setsockopt(
-            *fd.get_ref(),
+            fd.as_raw_fd(),
             SOL_SCTP,
             SCTP_RECVNXTINFO,
             &enable as *const _ as *const libc::c_void,
@@ -830,37 +1042,140 @@ pub(crate) fn request_nxtinfo_internal(fd: &AsyncFd<RawFd>, on: bool) -> std::io
     }
 }
 
+// Enable/Disable `SCTP_NODELAY` actual call.
+pub(crate) fn sctp_set_nodelay_internal(
+    fd: &AsyncFd<OwnedFd>,
+    nodelay: bool,
+) -> std::io::Result<()> {
+    log::debug!("Setting `SCTP_NODELAY` to {}.", nodelay);
+    setsockopt_internal(fd, SOL_SCTP, SCTP_NODELAY, &libc::c_int::from(nodelay))
+}
+
+// Get `SCTP_NODELAY` actual call.
+pub(crate) fn sctp_nodelay_internal(fd: &AsyncFd<OwnedFd>) -> std::io::Result<bool> {
+    // Safety: every value is a valid `c_int`.
+    let nodelay: libc::c_int = unsafe { getsockopt_internal(fd, SOL_SCTP, SCTP_NODELAY, 0)? };
+    Ok(nodelay != 0)
+}
+
+// Set `SCTP_RTOINFO` actual call.
+pub(crate) fn sctp_set_rto_info_internal(
+    fd: &AsyncFd<OwnedFd>,
+    rto_info: RtoInfo,
+) -> std::io::Result<()> {
+    log::debug!("Setting `SCTP_RTOINFO` to {:?}.", rto_info);
+    setsockopt_internal(fd, SOL_SCTP, SCTP_RTOINFO, &rto_info)
+}
+
+// Get `SCTP_RTOINFO` actual call.
+pub(crate) fn sctp_get_rto_info_internal(
+    fd: &AsyncFd<OwnedFd>,
+    assoc_id: AssociationId,
+) -> std::io::Result<RtoInfo> {
+    let rto_info = RtoInfo {
+        assoc_id,
+        ..Default::default()
+    };
+    // Safety: `RtoInfo` holds integers only, so any bytes are a valid value.
+    unsafe { getsockopt_internal(fd, SOL_SCTP, SCTP_RTOINFO, rto_info) }
+}
+
+// Enable/Disable `SO_REUSEADDR` actual call.
+pub(crate) fn set_reuseaddr_internal(
+    fd: &AsyncFd<OwnedFd>,
+    reuseaddr: bool,
+) -> std::io::Result<()> {
+    log::debug!("Setting `SO_REUSEADDR` to {}.", reuseaddr);
+    setsockopt_internal(
+        fd,
+        libc::SOL_SOCKET,
+        libc::SO_REUSEADDR,
+        &libc::c_int::from(reuseaddr),
+    )
+}
+
+// Get `SO_REUSEADDR` actual call.
+pub(crate) fn reuseaddr_internal(fd: &AsyncFd<OwnedFd>) -> std::io::Result<bool> {
+    // Safety: every value is a valid `c_int`.
+    let reuseaddr: libc::c_int =
+        unsafe { getsockopt_internal(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, 0)? };
+    Ok(reuseaddr != 0)
+}
+
+// Sets the option `name` at `level` to `value` using `libc::setsockopt`.
+fn setsockopt_internal<T>(
+    fd: &AsyncFd<OwnedFd>,
+    level: libc::c_int,
+    name: libc::c_int,
+    value: &T,
+) -> std::io::Result<()> {
+    // Safety: `value` is valid for reads of its size during the call and is only read.
+    let result = unsafe {
+        libc::setsockopt(
+            fd.as_raw_fd(),
+            level,
+            name,
+            value as *const T as *const libc::c_void,
+            std::mem::size_of::<T>() as libc::socklen_t,
+        )
+    };
+    if result < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+// Gets the option `name` at `level` using `libc::getsockopt`. `value` holds the input of the
+// options that take one (such as an association ID); the kernel must fill all of it.
+//
+// Safety: any bytes must make a valid `T`.
+unsafe fn getsockopt_internal<T>(
+    fd: &AsyncFd<OwnedFd>,
+    level: libc::c_int,
+    name: libc::c_int,
+    mut value: T,
+) -> std::io::Result<T> {
+    let size = std::mem::size_of::<T>();
+    let mut len = size as libc::socklen_t;
+    let result = libc::getsockopt(
+        fd.as_raw_fd(),
+        level,
+        name,
+        &mut value as *mut T as *mut libc::c_void,
+        &mut len,
+    );
+    if result < 0 {
+        Err(std::io::Error::last_os_error())
+    } else if len as usize != size {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("`getsockopt` returned {} bytes instead of {}", len, size),
+        ))
+    } else {
+        Ok(value)
+    }
+}
+
 // Get the status for the given Assoc ID
 pub(crate) fn sctp_get_status_internal(
-    fd: &AsyncFd<RawFd>,
+    fd: &AsyncFd<OwnedFd>,
     assoc_id: AssociationId,
 ) -> std::io::Result<ConnStatus> {
     log::debug!("Calling `sctp_get_status_internal`.");
 
-    let status_ptr = std::mem::MaybeUninit::<ConnStatusInternal>::zeroed();
-    let mut status_size = std::mem::size_of::<ConnStatusInternal>();
-
-    unsafe {
-        let mut sctp_status = status_ptr.assume_init();
+    // Safety: `ConnStatusInternal` holds integers only, so any bytes are a valid value.
+    let sctp_status = unsafe {
+        let mut sctp_status = std::mem::MaybeUninit::<ConnStatusInternal>::zeroed().assume_init();
         sctp_status.assoc_id = assoc_id;
-
-        let result = libc::getsockopt(
-            *fd.get_ref(),
-            SOL_SCTP,
-            SCTP_STATUS,
-            &mut sctp_status as *mut _ as *mut libc::c_void,
-            &mut status_size as *mut _ as *mut libc::socklen_t,
-        );
-
-        if result < 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(sctp_status.try_into().unwrap())
-        }
-    }
+        getsockopt_internal(fd, SOL_SCTP, SCTP_STATUS, sctp_status)?
+    };
+    sctp_status.try_into()
 }
 
-fn set_fd_non_blocking(fd: RawFd) -> std::io::Result<()> {
+// Where the descriptor cannot be created non-blocking and closed on `exec` at once.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn set_fd_non_blocking_cloexec(fd: RawFd) -> std::io::Result<()> {
     // Set Non Blocking
     unsafe {
         let result = libc::fcntl(fd, libc::F_GETFL, 0);
@@ -870,6 +1185,10 @@ fn set_fd_non_blocking(fd: RawFd) -> std::io::Result<()> {
         let flags = result | libc::O_NONBLOCK;
         let result = libc::fcntl(fd, libc::F_SETFL, flags);
         if result < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let result = libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        if result < 0 {
             Err(std::io::Error::last_os_error())
         } else {
             Ok(())
@@ -877,10 +1196,60 @@ fn set_fd_non_blocking(fd: RawFd) -> std::io::Result<()> {
     }
 }
 
-// Close the socket
-#[inline(always)]
-pub(crate) fn close_internal(fd: &AsyncFd<RawFd>) {
+// Takes ownership of `fd`, after checking that it is open.
+pub(crate) fn owned_fd_from_raw(fd: RawFd) -> std::io::Result<OwnedFd> {
+    // Safety: `F_GETFD` only queries `fd`. Whether the caller may give up `fd` is part of the
+    // contract of the public API that calls this function.
     unsafe {
-        _ = libc::close(*fd.get_ref());
+        if libc::fcntl(fd, libc::F_GETFD) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(OwnedFd::from_raw_fd(fd))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_notifications_are_unsupported_instead_of_panicking() {
+        let assoc_change = SCTP_ASSOC_CHANGE.to_ne_bytes();
+        let shutdown = SCTP_SHUTDOWN.to_ne_bytes();
+        for data in [
+            &[][..],
+            &[0x80][..],
+            &assoc_change[..],
+            &[&assoc_change[..], &[0; 17]].concat()[..],
+            &[&shutdown[..], &[0; 9]].concat()[..],
+        ] {
+            assert_eq!(notification_from_message(data), Notification::Unsupported);
+        }
+
+        let mut shutdown_event = shutdown.to_vec();
+        shutdown_event.extend_from_slice(&0_u16.to_ne_bytes());
+        shutdown_event.extend_from_slice(&12_u32.to_ne_bytes());
+        shutdown_event.extend_from_slice(&7_i32.to_ne_bytes());
+        assert!(matches!(
+            notification_from_message(&shutdown_event),
+            Notification::Shutdown(Shutdown { assoc_id: 7, .. })
+        ));
+    }
+
+    #[test]
+    fn cmsg_buffer_holds_the_sctp_control_messages() {
+        // Safety: `CMSG_SPACE` only computes a size.
+        let sctp_cmsgs = unsafe {
+            libc::CMSG_SPACE(std::mem::size_of::<NxtInfo>() as u32)
+                + libc::CMSG_SPACE(std::mem::size_of::<RcvInfo>() as u32)
+                // `struct sctp_sndrcvinfo`
+                + libc::CMSG_SPACE(32)
+        };
+        // Half of the buffer is left for `SOL_SOCKET` control messages.
+        assert!((sctp_cmsgs as usize) <= CMSG_BUFFER_SIZE / 2);
+        assert_eq!(
+            std::mem::align_of::<CmsgBuffer>(),
+            std::mem::align_of::<libc::cmsghdr>()
+        );
     }
 }

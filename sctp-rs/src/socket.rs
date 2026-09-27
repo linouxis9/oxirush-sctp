@@ -1,13 +1,13 @@
 //! SCTP Socket: An unconnected SCTP Socket
 
 use std::net::SocketAddr;
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 
 use tokio::io::unix::AsyncFd;
 
 use crate::{
-    AssociationId, BindxFlags, ConnStatus, ConnectedSocket, Event, Listener, SocketToAssociation,
-    SubscribeEventAssocId,
+    AssociationId, BindxFlags, ConnStatus, ConnectedSocket, Event, Listener, RtoInfo,
+    SocketToAssociation, SubscribeEventAssocId,
 };
 
 #[allow(unused)]
@@ -19,7 +19,7 @@ use super::internal::*;
 /// get a [`ConnectedSocket`] (This is like `TCPStream` but since this can have multiple
 /// associations, we are calling it a 'connected' socket).
 pub struct Socket {
-    inner: AsyncFd<RawFd>,
+    inner: AsyncFd<OwnedFd>,
 }
 
 impl Socket {
@@ -69,7 +69,8 @@ impl Socket {
 
     /// Connect to SCTP Server.
     ///
-    /// The successful operation returns [`ConnectedSocket`] consuming this structure.
+    /// The successful operation returns [`ConnectedSocket`] consuming this structure. See
+    /// [`sctp_connectx`][Self::sctp_connectx] for when it completes.
     pub async fn connect(
         self,
         addr: SocketAddr,
@@ -96,6 +97,12 @@ impl Socket {
     /// [connected socket][`ConnectedSocket`] and an [associaton ID][`AssociationId`]. In
     /// the case of One-to-many sockets, this association ID can be used for subscribing to SCTP
     /// events and requesting additional anciliary control data on the socket.
+    ///
+    /// For a One-to-one socket, this completes when the association is established, or fails
+    /// with the reason it could not be, e.g. `ETIMEDOUT` when the INIT was not answered or
+    /// `ECONNREFUSED` when the peer aborted it. For a One-to-many socket, this completes while
+    /// the association is being set up: an [`AssociationChange`][crate::AssociationChange]
+    /// notification tells how that ends. Dropping the returned future closes the socket.
     pub async fn sctp_connectx(
         self,
         addrs: &[SocketAddr],
@@ -215,5 +222,63 @@ impl Socket {
     /// Get the status of the connection associated with the association ID.
     pub fn sctp_get_status(&self, assoc_id: AssociationId) -> std::io::Result<ConnStatus> {
         sctp_get_status_internal(&self.inner, assoc_id)
+    }
+
+    /// Enables or disables `SCTP_NODELAY` (Section 8.1.5 of RFC 6458).
+    ///
+    /// Like Nagle's algorithm in TCP, the Linux SCTP stack holds back a small message while data
+    /// sent earlier is unacknowledged, to bundle it with the next ones. As the peer delays its
+    /// acknowledgements (by up to 200 ms by default), a request can wait that long for no gain.
+    /// With `nodelay` set, messages are sent as soon as the congestion window allows.
+    ///
+    /// On Linux, sockets accepted from a listening socket or peeled off it inherit its setting.
+    pub fn set_nodelay(&self, nodelay: bool) -> std::io::Result<()> {
+        sctp_set_nodelay_internal(&self.inner, nodelay)
+    }
+
+    /// Whether `SCTP_NODELAY` is set. See [`set_nodelay`][Self::set_nodelay].
+    pub fn nodelay(&self) -> std::io::Result<bool> {
+        sctp_nodelay_internal(&self.inner)
+    }
+
+    /// Set the retransmission timeout parameters (`SCTP_RTOINFO`, Section 8.1.1 of RFC 6458) of
+    /// the association `rto_info.assoc_id`, or with 0 the defaults of the socket.
+    pub fn sctp_set_rto_info(&self, rto_info: RtoInfo) -> std::io::Result<()> {
+        sctp_set_rto_info_internal(&self.inner, rto_info)
+    }
+
+    /// Get the retransmission timeout parameters of the association `assoc_id`, or with 0 the
+    /// defaults of the socket. See [`sctp_set_rto_info`][Self::sctp_set_rto_info].
+    pub fn sctp_get_rto_info(&self, assoc_id: AssociationId) -> std::io::Result<RtoInfo> {
+        sctp_get_rto_info_internal(&self.inner, assoc_id)
+    }
+
+    /// Enables or disables `SO_REUSEADDR`, before [`bind`][Self::bind].
+    ///
+    /// With it, the socket can bind an address that sockets which also have it set are bound to,
+    /// as long as none of them listens, e.g. while the associations of a previous instance of a
+    /// server are still shutting down.
+    pub fn set_reuseaddr(&self, reuseaddr: bool) -> std::io::Result<()> {
+        set_reuseaddr_internal(&self.inner, reuseaddr)
+    }
+
+    /// Whether `SO_REUSEADDR` is set. See [`set_reuseaddr`][Self::set_reuseaddr].
+    pub fn reuseaddr(&self) -> std::io::Result<bool> {
+        reuseaddr_internal(&self.inner)
+    }
+}
+
+/// The descriptor stays owned by the socket and must stay non-blocking. It allows setting socket
+/// options that are not wrapped here, e.g. with `socket2::SockRef` or `libc::setsockopt`.
+impl AsRawFd for Socket {
+    fn as_raw_fd(&self) -> RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
+/// Borrows the descriptor, under the same conditions as [`AsRawFd`].
+impl AsFd for Socket {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.inner.get_ref().as_fd()
     }
 }

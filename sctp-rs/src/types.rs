@@ -72,6 +72,10 @@ pub struct SendInfo {
     pub flags: u16,
 
     /// Application Protocol ID to be used while sending the data.
+    ///
+    /// It is sent as is, without byte order conversion (RFC 6458, Section 5.3.4): for the
+    /// payload protocol identifiers assigned by IANA, use network byte order, e.g.
+    /// `60_u32.to_be()` for NGAP.
     pub ppid: u32,
 
     /// Opaque context to be used while sending the data.
@@ -79,6 +83,26 @@ pub struct SendInfo {
 
     /// Association ID of the SCTP Association to be used while sending the data.
     pub assoc_id: AssociationId,
+}
+
+/// Retransmission timeout parameters (`SCTP_RTOINFO`, see Section 8.1.1 of RFC 6458).
+///
+/// The times are in milliseconds. When setting them, a 0 leaves the value unchanged.
+#[repr(C)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RtoInfo {
+    /// Association ID of the association, or 0 for the defaults of the socket, which new
+    /// associations start with. It is ignored for the association of a One-to-one socket.
+    pub assoc_id: AssociationId,
+
+    /// Initial retransmission timeout, also of the INIT.
+    pub initial: u32,
+
+    /// Maximum retransmission timeout.
+    pub max: u32,
+
+    /// Minimum retransmission timeout.
+    pub min: u32,
 }
 
 /// Structure Representing Ancillary Receive Information (See Section 5.3.5 of RFC 6458)
@@ -94,7 +118,8 @@ pub struct RcvInfo {
     /// Flags for the received data.
     pub flags: u16,
 
-    /// Application Protocol ID used by the sender while sending the data.
+    /// Application Protocol ID used by the sender while sending the data, as received, without
+    /// byte order conversion (see [`SendInfo::ppid`]).
     pub ppid: u32,
 
     /// Transaction sequence number.
@@ -120,7 +145,7 @@ pub struct NxtInfo {
     /// Flags for the next received data.
     pub flags: u16,
 
-    /// Application protocol ID.
+    /// Application protocol ID, without byte order conversion (see [`SendInfo::ppid`]).
     pub ppid: u32,
 
     /// Length of the message to be used in the next `sctp_recv` call.

@@ -322,3 +322,54 @@ async fn test_connect_no_listen_failure() {
     let err = result.err().unwrap();
     assert_eq!(err.raw_os_error(), Some(libc::ECONNREFUSED));
 }
+
+/// In a new network namespace (see `connect_reports_why_the_association_did_not_start`), where
+/// nothing answers the INIT.
+#[tokio::test]
+#[ignore]
+async fn connect_in_network_namespace_times_out() {
+    if std::env::var_os("SCTP_RS_TEST_IN_NETNS").is_none() {
+        return;
+    }
+    let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
+    // One INIT, given up after 100 ms.
+    client_socket.sctp_setup_init_params(1, 1, 1, 100).unwrap();
+    client_socket
+        .sctp_set_rto_info(RtoInfo {
+            assoc_id: 0,
+            initial: 100,
+            max: 100,
+            min: 100,
+        })
+        .unwrap();
+    // Routed to the loopback interface, which drops the INIT: it is not a local address.
+    let connect_addr: SocketAddr = "10.99.0.2:8080".parse().unwrap();
+
+    let result = client_socket.connect(connect_addr).await;
+    let err = result.err().unwrap();
+    assert_eq!(err.raw_os_error(), Some(libc::ETIMEDOUT), "{}", err);
+}
+
+#[test]
+fn connect_reports_why_the_association_did_not_start() {
+    let status = std::process::Command::new("unshare")
+        .args(["--user", "--map-root-user", "--net", "--", "sh", "-c"])
+        .arg(
+            "ip link set lo up && ip address add 10.98.0.1/32 dev lo \
+             && ip route add 10.99.0.0/16 dev lo src 10.98.0.1 && exec \"$0\" \"$@\"",
+        )
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "socket::connect_in_network_namespace_times_out",
+            "--ignored",
+        ])
+        .env("SCTP_RS_TEST_IN_NETNS", "1")
+        .status();
+    match status.map(|status| status.code()) {
+        Ok(Some(0)) => {}
+        // The test harness exits with 101 when a test fails.
+        Ok(Some(101)) => panic!("`connect_in_network_namespace_times_out` failed"),
+        other => eprintln!("no network namespace with `ip` ({:?}); skipping", other),
+    }
+}

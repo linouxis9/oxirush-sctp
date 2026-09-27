@@ -43,4 +43,6 @@ fn create_client_socket(association: SocketToAssociation, v4: bool) -> Socket {
 
 mod connected_socket;
 mod listener;
+#[cfg(target_os = "linux")]
+mod options;
 mod socket;
