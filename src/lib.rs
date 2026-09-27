@@ -22,7 +22,7 @@
 //! # async fn main() -> std::io::Result<()> {
 //!
 //! // Create a TCP Style (Socket-to-association is 1-1) socket.
-//! let client = sctp_rs::Socket::new_v4(sctp_rs::SocketToAssociation::OneToOne)?;
+//! let client = oxirush_sctp::Socket::new_v4(oxirush_sctp::SocketToAssociation::OneToOne)?;
 //!
 //! let bind_addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
 //! client.bind(bind_addr)?;
@@ -37,10 +37,10 @@
 //! loop {
 //!     let notification_or_data = accepted.sctp_recv().await?;
 //!     match notification_or_data {
-//!         sctp_rs::NotificationOrData::Notification(notification) => {
+//!         oxirush_sctp::NotificationOrData::Notification(notification) => {
 //!             // Process Notification
 //!         },
-//!         sctp_rs::NotificationOrData::Data(data) => {
+//!         oxirush_sctp::NotificationOrData::Data(data) => {
 //!             // Process Data
 //!         }
 //!     }

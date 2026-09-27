@@ -8,7 +8,7 @@ use clap::{Arg, Command};
 async fn main() -> std::io::Result<()> {
     eprintln!("pong");
 
-    let app = Command::new("sctp-rs pong example")
+    let app = Command::new("oxirush-sctp pong example")
         .author("Abhijit Gadgil <gabhijit@iitbombay.org>")
         .arg(Arg::new("bind").num_args(1).required(true).long("bind"));
 
@@ -21,8 +21,8 @@ async fn main() -> std::io::Result<()> {
     let server_address = matches.get_one::<String>("bind").unwrap();
     let server_address: std::net::SocketAddr = server_address.parse().unwrap();
 
-    let server_socket = sctp_rs::Socket::new_v4(sctp_rs::SocketToAssociation::OneToOne)?;
-    server_socket.sctp_bindx(&[server_address], sctp_rs::BindxFlags::Add)?;
+    let server_socket = oxirush_sctp::Socket::new_v4(oxirush_sctp::SocketToAssociation::OneToOne)?;
+    server_socket.sctp_bindx(&[server_address], oxirush_sctp::BindxFlags::Add)?;
 
     let server_socket = server_socket.listen(10)?;
 
@@ -30,13 +30,13 @@ async fn main() -> std::io::Result<()> {
 
     loop {
         let received = accepted.sctp_recv().await?;
-        if let sctp_rs::NotificationOrData::Data(data) = received {
+        if let oxirush_sctp::NotificationOrData::Data(data) = received {
             eprintln!("received: {:#?}", data);
             if data.payload.is_empty() {
                 break;
             }
             let response = format!("pong: {}", String::from_utf8(data.payload).unwrap());
-            let send_data = sctp_rs::SendData {
+            let send_data = oxirush_sctp::SendData {
                 payload: response.as_bytes().to_vec(),
                 snd_info: None,
             };

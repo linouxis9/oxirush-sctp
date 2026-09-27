@@ -8,7 +8,7 @@ use clap::{Arg, Command};
 async fn main() -> std::io::Result<()> {
     eprintln!("ping");
 
-    let app = Command::new("sctp-rs ping example")
+    let app = Command::new("oxirush-sctp ping example")
         .author("Abhijit Gadgil <gabhijit@iitbombay.org>")
         .arg(Arg::new("server").num_args(1).required(true).long("server"));
 
@@ -21,14 +21,14 @@ async fn main() -> std::io::Result<()> {
     let server_address = matches.get_one::<String>("server").unwrap();
     let server_address: std::net::SocketAddr = server_address.parse().unwrap();
 
-    let client_socket = sctp_rs::Socket::new_v4(sctp_rs::SocketToAssociation::OneToOne)?;
+    let client_socket = oxirush_sctp::Socket::new_v4(oxirush_sctp::SocketToAssociation::OneToOne)?;
 
     let (connected, assoc_id) = client_socket.sctp_connectx(&[server_address]).await?;
     eprintln!("conected: {:#?}, assoc_id: {}", connected, assoc_id);
 
     for i in 0..10 {
-        let message = format!("sctp-rs ping : {}", i);
-        let send_data = sctp_rs::SendData {
+        let message = format!("oxirush-sctp ping : {}", i);
+        let send_data = oxirush_sctp::SendData {
             payload: message.as_bytes().to_vec(),
             snd_info: None,
         };

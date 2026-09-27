@@ -2,7 +2,7 @@
 
 static TEST_PORT_NO: AtomicU16 = AtomicU16::new(8080);
 
-use sctp_rs::{Listener, Socket, SocketToAssociation};
+use oxirush_sctp::{Listener, Socket, SocketToAssociation};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU16, Ordering};
 
