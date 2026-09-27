@@ -1,4 +1,4 @@
-use sctp_rs::*;
+use oxirush_sctp::*;
 
 use crate::{create_client_socket, create_socket_bind_and_listen};
 

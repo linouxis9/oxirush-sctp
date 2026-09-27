@@ -3,7 +3,7 @@
 //! These checks count the process's open file descriptors, so they live in their own test binary
 //! and in a single test function: no other test may open or close descriptors meanwhile.
 
-use sctp_rs::{Socket, SocketToAssociation};
+use oxirush_sctp::{Socket, SocketToAssociation};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::task::Poll;

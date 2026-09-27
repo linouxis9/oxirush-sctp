@@ -1,5 +1,5 @@
 use crate::{create_client_socket, create_socket_bind_and_listen};
-use sctp_rs::*;
+use oxirush_sctp::*;
 use std::net::SocketAddr;
 
 // Tests for `accept` API for Listening Socket.

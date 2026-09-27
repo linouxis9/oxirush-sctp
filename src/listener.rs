@@ -1,113 +1,107 @@
-//! SCTP Socket: An unconnected SCTP Socket
+//! Listening SCTP Socket
 
 use std::net::SocketAddr;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::sync::Mutex;
 
 use tokio::io::unix::AsyncFd;
 
+#[allow(unused)]
+use crate::internal::*;
 use crate::{
-    AssociationId, BindxFlags, ConnStatus, ConnectedSocket, Event, Listener, RtoInfo,
-    SocketToAssociation, SubscribeEventAssocId,
+    types::AssociationId, BindxFlags, ConnStatus, ConnectedSocket, Event, NotificationOrData,
+    RtoInfo, SendData, SubscribeEventAssocId,
 };
 
-#[allow(unused)]
-use super::internal::*;
-
-/// A structure representing an unconnected SCTP Socket.
+/// A structure representing a socket that is listening for incoming SCTP Connections.
 ///
-/// When we `listen` on this socket, we get an [`Listener`] on which we can `accept` to
-/// get a [`ConnectedSocket`] (This is like `TCPStream` but since this can have multiple
-/// associations, we are calling it a 'connected' socket).
-pub struct Socket {
+/// This structure is created by an [`Socket`][crate::Socket] when it is bound to local address(es)
+/// and is waiting for incoming connections by calling the `listen` on the socket. The original
+/// [`Socket`][crate::Socket] is consumed when this structure is created. See
+/// [`Socket::listen`][crate::Socket::listen] for more details.
+pub struct Listener {
     inner: AsyncFd<OwnedFd>,
+    // The part of a message `sctp_recv` has received so far.
+    partial: Mutex<Option<PartialMessage>>,
 }
 
-impl Socket {
-    /// Create a New IPv4 family socket.
-    ///
-    /// [`SocketToAssociation`] determines the type of the socket created. For a TCP style
-    /// socket use [`OneToOne`][`SocketToAssociation::OneToOne`] and for a UDP style socket use
-    /// [`OneToMany`][`SocketToAssociation::OneToMany`]. The socket created is set to a
-    /// non-blocking socket and is registered for polling for read-write events.
-    /// For any potentially blocking I/O operations, whether the socket is 'readable' or
-    /// 'writable' is handled internally.
-    pub fn new_v4(assoc: SocketToAssociation) -> std::io::Result<Self> {
-        Ok(Self {
-            inner: AsyncFd::new(sctp_socket_internal(libc::AF_INET, assoc)?)?,
-        })
+impl Listener {
+    /// Accept on a given socket (valid only for `OneToOne` type sockets).
+    pub async fn accept(&self) -> std::io::Result<(ConnectedSocket, SocketAddr)> {
+        accept_internal(&self.inner).await
     }
 
-    /// Create a New IPv6 family socket.
-    ///
-    /// [`SocketToAssociation`] determines the type of the socket created. For a TCP style
-    /// socket use [`SocketToAssociation::OneToOne`] and for a UDP style socket use
-    /// [`SocketToAssociation::OneToMany`]. The socket created is set to a non-blocking
-    /// socket and is registered for polling for read-write events. For any potentially blocking
-    /// I/O operations, whether the socket is 'readable' or 'writable' is handled internally.
-    pub fn new_v6(assoc: SocketToAssociation) -> std::io::Result<Self> {
-        Ok(Self {
-            inner: AsyncFd::new(sctp_socket_internal(libc::AF_INET6, assoc)?)?,
-        })
+    /// Shutdown on the socket
+    pub fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
+        shutdown_internal(&self.inner, how)
     }
 
-    /// Bind a socket to a given IP Address.
+    /// Binds to one or more local addresses. See: Section 9.1 RFC 6458
     ///
-    /// The passed IP address can be an IPv4 or an IPv6, IP address. For the IPv6 family sockets,
-    /// it is possible to bind to both IPv4 and IPv6 addresses. IPv4 family sockets can be bound
-    /// only to IPv4 addresses only.
-    pub fn bind(&self, addr: SocketAddr) -> std::io::Result<()> {
-        self.sctp_bindx(&[addr], BindxFlags::Add)
-    }
-
-    /// Listen on a given socket.
-    ///
-    /// This successful operation  returns [`Listener`] consuming this structure. The `backlog`
-    /// parameter determines the length of the listen queue.
-    pub fn listen(self, backlog: i32) -> std::io::Result<Listener> {
-        sctp_listen_internal(self.inner, backlog)
-    }
-
-    /// Connect to SCTP Server.
-    ///
-    /// The successful operation returns [`ConnectedSocket`] consuming this structure. See
-    /// [`sctp_connectx`][Self::sctp_connectx] for when it completes.
-    pub async fn connect(
-        self,
-        addr: SocketAddr,
-    ) -> std::io::Result<(ConnectedSocket, AssociationId)> {
-        sctp_connectx_internal(self.inner, &[addr]).await
-    }
-
-    /// SCTP Specific extension for binding to multiple addresses on a given socket. See Section
-    /// 9.1 RFC 6458.
-    ///
-    /// `sctp_bindx` API can be used to add or remove additional addresses to an unbound (ie newly
-    /// created socket) or a socket that is already bound to address(es) (flag
-    /// [`Add`][`BindxFlags::Add`]).  It is also possible to 'remove' bound addresses from the
-    /// socket using the same API (flag [`Remove`][`BindxFlags::Remove`]). See the section 9.1
-    /// for more details about the semantics of which addresses are acceptable for addition or
-    /// removoal using the `sctp_bindx` API.
+    /// It is possible to call `sctp_bindx` on an already 'bound' (that is 'listen'ing socket.)
     pub fn sctp_bindx(&self, addrs: &[SocketAddr], flags: BindxFlags) -> std::io::Result<()> {
         sctp_bindx_internal(&self.inner, addrs, flags)
     }
 
-    /// Connect to a multi-homed Peer. See Section 9.9 RFC 6458
+    /// Peels off a connected SCTP association from the listening socket. See: Section 9.2 RFC 6458
     ///
-    /// An Unbound socket when connected to a remote end would return a tuple containing a
-    /// [connected socket][`ConnectedSocket`] and an [associaton ID][`AssociationId`]. In
-    /// the case of One-to-many sockets, this association ID can be used for subscribing to SCTP
-    /// events and requesting additional anciliary control data on the socket.
+    /// This call is successful only for UDP style one to many sockets. This is like
+    /// `[Listener::accept`] where peeled off socket behaves like a stand alone
+    /// one-to-one socket.
+    pub fn sctp_peeloff(&self, assoc_id: AssociationId) -> std::io::Result<ConnectedSocket> {
+        sctp_peeloff_internal(&self.inner, assoc_id)
+    }
+
+    /// Get Peer Address(es) for the given Association ID. See: Section 9.3 RFC 6458
     ///
-    /// For a One-to-one socket, this completes when the association is established, or fails
-    /// with the reason it could not be, e.g. `ETIMEDOUT` when the INIT was not answered or
-    /// `ECONNREFUSED` when the peer aborted it. For a One-to-many socket, this completes while
-    /// the association is being set up: an [`AssociationChange`][crate::AssociationChange]
-    /// notification tells how that ends. Dropping the returned future closes the socket.
-    pub async fn sctp_connectx(
-        self,
-        addrs: &[SocketAddr],
-    ) -> std::io::Result<(ConnectedSocket, AssociationId)> {
-        sctp_connectx_internal(self.inner, addrs).await
+    /// This function is supported on the [`Listener`] because in the case of One to Many
+    /// associations that are not peeled off, we are performing IO operations on the listening
+    /// socket itself.
+    pub fn sctp_getpaddrs(&self, assoc_id: AssociationId) -> std::io::Result<Vec<SocketAddr>> {
+        sctp_getpaddrs_internal(&self.inner, assoc_id)
+    }
+
+    /// Get's the Local Addresses for the association. See: Section 9.4 RFC 6458
+    pub fn sctp_getladdrs(&self, assoc_id: AssociationId) -> std::io::Result<Vec<SocketAddr>> {
+        sctp_getladdrs_internal(&self.inner, assoc_id)
+    }
+
+    /// Receive Data or Notification from the listening socket.
+    ///
+    /// In the case of One-to-many sockets, it is possible to receive on the listening socket,
+    /// without explicitly 'accept'ing or 'peeling off' the socket. The internal API used to
+    /// receive the data is also the API used to receive notifications. This function returns
+    /// either the notification (which the user should have subscribed for) or the data.
+    ///
+    /// Each call returns a whole message (or notification), however many reads it takes: the
+    /// kernel returns a message longer than the read buffer, or than the receive window, in
+    /// several parts. A message longer than 4 MiB is discarded and reported as an
+    /// [`InvalidData`][std::io::ErrorKind::InvalidData] error, and the next call returns the next
+    /// message. The `RcvInfo` is that of the first part of the message and the `NxtInfo` that of
+    /// the last. This assumes the default `SCTP_FRAGMENT_INTERLEAVE` level 0, where the parts of
+    /// a message are not interleaved with other messages.
+    ///
+    /// Cancel safe: if the returned future is dropped before it completes, the part of a message
+    /// received so far is kept for the next call.
+    ///
+    /// When the delivery of a message is aborted (e.g. its association is aborted), the part
+    /// received so far is dropped if a notification follows (subscribe to
+    /// [`Event::PartialDelivery`] for one) or, with `RcvInfo` requested (see
+    /// [`sctp_request_rcvinfo`][Self::sctp_request_rcvinfo]), a message of another association
+    /// or stream.
+    pub async fn sctp_recv(&self) -> std::io::Result<NotificationOrData> {
+        sctp_recvmsg_internal(&self.inner, &self.partial).await
+    }
+
+    /// Send Data and Anciliary data if any on the SCTP Socket.
+    ///
+    /// SCTP supports sending the actual SCTP message together with sending any anciliary data on
+    /// the SCTP association. The anciliary data is optional.
+    ///
+    /// Waits while the send buffer is full. The message is sent whole, or not at all if the
+    /// returned future is dropped before it completes.
+    pub async fn sctp_send(&self, to: SocketAddr, data: SendData) -> std::io::Result<()> {
+        sctp_sendmsg_internal(&self.inner, Some(to), data).await
     }
 
     /// Subscribe to a given SCTP Event on the given socket. See section 6.2.1 of RFC6458.
@@ -157,10 +151,7 @@ impl Socket {
         if failures.is_empty() {
             Ok(())
         } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("{:?}", failures),
-            ))
+            Err(std::io::Error::other(format!("{:?}", failures)))
         }
     }
 
@@ -183,10 +174,7 @@ impl Socket {
         if failures.is_empty() {
             Ok(())
         } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("{:?}", failures),
-            ))
+            Err(std::io::Error::other(format!("{:?}", failures)))
         }
     }
 
@@ -253,31 +241,25 @@ impl Socket {
         sctp_get_rto_info_internal(&self.inner, assoc_id)
     }
 
-    /// Enables or disables `SO_REUSEADDR`, before [`bind`][Self::bind].
-    ///
-    /// With it, the socket can bind an address that sockets which also have it set are bound to,
-    /// as long as none of them listens, e.g. while the associations of a previous instance of a
-    /// server are still shutting down.
-    pub fn set_reuseaddr(&self, reuseaddr: bool) -> std::io::Result<()> {
-        set_reuseaddr_internal(&self.inner, reuseaddr)
-    }
-
-    /// Whether `SO_REUSEADDR` is set. See [`set_reuseaddr`][Self::set_reuseaddr].
-    pub fn reuseaddr(&self) -> std::io::Result<bool> {
-        reuseaddr_internal(&self.inner)
+    // functions not part of public APIs
+    pub(crate) fn from_async_fd(inner: AsyncFd<OwnedFd>) -> Self {
+        Self {
+            inner,
+            partial: Mutex::new(None),
+        }
     }
 }
 
 /// The descriptor stays owned by the socket and must stay non-blocking. It allows setting socket
 /// options that are not wrapped here, e.g. with `socket2::SockRef` or `libc::setsockopt`.
-impl AsRawFd for Socket {
+impl AsRawFd for Listener {
     fn as_raw_fd(&self) -> RawFd {
         self.inner.as_raw_fd()
     }
 }
 
 /// Borrows the descriptor, under the same conditions as [`AsRawFd`].
-impl AsFd for Socket {
+impl AsFd for Listener {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.inner.get_ref().as_fd()
     }

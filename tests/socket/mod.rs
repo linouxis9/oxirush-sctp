@@ -3,7 +3,7 @@ use super::{create_client_socket, create_socket_bind_and_listen};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 #[allow(unused)]
-use sctp_rs::*;
+use oxirush_sctp::*;
 
 #[tokio::test]
 async fn socket_connect_basic_send_recv_req_info_on_and_off() {

@@ -149,10 +149,7 @@ impl ConnectedSocket {
         if failures.is_empty() {
             Ok(())
         } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("{:?}", failures),
-            ))
+            Err(std::io::Error::other(format!("{:?}", failures)))
         }
     }
 
@@ -175,10 +172,7 @@ impl ConnectedSocket {
         if failures.is_empty() {
             Ok(())
         } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("{:?}", failures),
-            ))
+            Err(std::io::Error::other(format!("{:?}", failures)))
         }
     }
 

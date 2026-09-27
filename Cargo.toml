@@ -1,4 +1,34 @@
-[workspace]
-members = [
-	"sctp-rs",
-]
+[package]
+name = "oxirush-sctp"
+version = "0.1.0"
+edition = "2018"
+description = "Idiomatic async Rust APIs for the Linux SCTP stack (a maintained fork of sctp-rs)"
+authors = [ "Abhijit Gadgil <gabhijit@iitbombay.org>"]
+categories = ["network-programming", "asynchronous"]
+keywords = ["sctp", "tokio", "linux", "ngap", "s1ap"]
+readme = "README.md"
+repository = "https://github.com/linouxis9/oxirush-sctp"
+documentation = "https://docs.rs/oxirush-sctp"
+license = "Apache-2.0 OR MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+os_socketaddr = { version = "0.2" }
+libc = { version = "0.2" }
+tokio = { version = "1.0" , features = ["net", "macros", "rt"]}
+log = { version = "0.4" }
+
+[dev-dependencies]
+clap = "4"
+tokio = { version = "1.0", features = ["time"] }
+
+[[example]]
+name = "ping"
+path = "examples/src/ping.rs"
+
+
+[[example]]
+name = "pong"
+path = "examples/src/pong.rs"
+

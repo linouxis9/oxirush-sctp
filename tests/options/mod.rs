@@ -4,7 +4,7 @@ use super::{create_client_socket, create_socket_bind_and_listen};
 
 use std::os::unix::io::{AsFd, AsRawFd, RawFd};
 
-use sctp_rs::*;
+use oxirush_sctp::*;
 
 fn getsockopt_int(fd: RawFd, level: libc::c_int, name: libc::c_int) -> libc::c_int {
     let mut value: libc::c_int = 0;
