@@ -1082,6 +1082,21 @@ pub(crate) fn sctp_nodelay_internal(fd: &AsyncFd<OwnedFd>) -> std::io::Result<bo
     Ok(nodelay != 0)
 }
 
+// Set `SO_LINGER` actual call.
+pub(crate) fn set_linger_internal(
+    fd: &AsyncFd<OwnedFd>,
+    linger: Option<std::time::Duration>,
+) -> std::io::Result<()> {
+    log::debug!("Setting `SO_LINGER` to {:?}.", linger);
+    let value = libc::linger {
+        l_onoff: libc::c_int::from(linger.is_some()),
+        l_linger: linger.map_or(0, |linger| {
+            linger.as_secs().min(libc::c_int::MAX as u64) as libc::c_int
+        }),
+    };
+    setsockopt_internal(fd, libc::SOL_SOCKET, libc::SO_LINGER, &value)
+}
+
 // Set `SCTP_RTOINFO` actual call.
 pub(crate) fn sctp_set_rto_info_internal(
     fd: &AsyncFd<OwnedFd>,
