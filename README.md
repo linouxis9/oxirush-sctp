@@ -10,15 +10,15 @@ Idiomatic async Rust APIs for the Linux kernel SCTP stack, per the SCTP sockets 
 
 - **Kernel SCTP, no `libsctp`** — system calls through `libc`, with `std::net::SocketAddr` instead of C socket addresses
 - **One-to-one and one-to-many sockets** — `Socket`, `Listener` and `ConnectedSocket`, with multi-homing (`sctp_bindx`, `sctp_connectx`), peel-off and local/peer address lists of any size
-- **Whole messages** — `sctp_recv` returns a complete message, however many reads the kernel delivers it in, and stays cancel-safe in the middle of one; messages over 4 MiB are an `InvalidData` error
+- **Whole messages** — `sctp_recv` returns a complete message with its sender's address, however many reads the kernel delivers it in, and stays cancel-safe in the middle of one; messages over a per-socket limit, 4 MiB by default, are an `InvalidData` error
 - **Waiting sends** — `sctp_send` waits for room in the send buffer instead of failing with `EWOULDBLOCK`, and never raises `SIGPIPE`
-- **Notifications and ancillary data** — association change and shutdown events, `SCTP_RCVINFO` and `SCTP_NXTINFO`, parsed with bounds checks
+- **Notifications and ancillary data** — association change and shutdown events, the type and octets of any other notification, `SCTP_RCVINFO` and `SCTP_NXTINFO`, parsed with bounds checks
 - **Socket options** — `SCTP_NODELAY`, `SCTP_RTOINFO`, `SCTP_INITMSG`, `SCTP_STATUS`, default send info and `SO_REUSEADDR`; `AsRawFd` and `AsFd` for any other option
 - **Owned descriptors** — sockets own their descriptor, close it after Tokio deregisters it, and are created close-on-exec
 
 ## Changes from sctp-rs 0.3.1
 
-The public API of sctp-rs 0.3 is kept, apart from the crate name; everything below is a fix or an addition.
+Code written for sctp-rs 0.3 needs the new crate name and three changes: `ConnectedSocket::from_rawfd` is `unsafe`, `Notification` is `#[non_exhaustive]` and its `Unsupported` variant carries the notification's type and octets, and `ReceivedData` has a `from` field with the sender's address. Everything else is a fix or an addition.
 
 - Received control messages are parsed safely: 0.3.1 computed buffer bounds from the wrong header, lost `RCVINFO` when `NXTINFO` was also requested, and spun forever on a control message of another level.
 - No descriptor leaks: dropped, unbound or unconnected sockets, cancelled connects and failures after accept or peel-off leaked their descriptor.
@@ -26,7 +26,7 @@ The public API of sctp-rs 0.3 is kept, apart from the crate name; everything bel
 - `sctp_send` waits instead of returning `EWOULDBLOCK` with stale write readiness, and sends with `MSG_NOSIGNAL`.
 - Connect failures carry the kernel's reason (`ETIMEDOUT`, `EHOSTUNREACH`, …) rather than always `ECONNREFUSED`; the connect futures are `Send`.
 - `sctp_getladdrs` and `sctp_getpaddrs` work for more than a few addresses; short notifications no longer panic; `accept` and `SCTP_STATUS` use `socklen_t`.
-- New: `set_nodelay`/`nodelay`, `sctp_set_rto_info`/`sctp_get_rto_info` with `RtoInfo`, `Socket::set_reuseaddr`/`reuseaddr`, and `AsRawFd`/`AsFd`.
+- New: `set_nodelay`/`nodelay`, `sctp_set_rto_info`/`sctp_get_rto_info` with `RtoInfo`, `Socket::set_reuseaddr`/`reuseaddr`, `set_max_message_size`/`max_message_size`, and `AsRawFd`/`AsFd`.
 
 The [changelog](CHANGELOG.md) has the details.
 
