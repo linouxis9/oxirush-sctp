@@ -4,7 +4,8 @@ use crate::{create_client_socket, create_socket_bind_and_listen};
 
 #[tokio::test]
 async fn bindx_not_supported() {
-    let connected = ConnectedSocket::from_rawfd(100);
+    // Safety: descriptor 100 is not open, so `from_rawfd` fails without taking it over.
+    let connected = unsafe { ConnectedSocket::from_rawfd(100) };
     assert!(connected.is_err(), "{:?}", connected.ok().unwrap());
 
     // TODO: Write real test
@@ -61,6 +62,7 @@ async fn connected_default_sendinfo_success() {
         payload,
         rcv_info,
         nxt_info,
+        ..
     }) = data
     {
         assert!(
@@ -87,7 +89,7 @@ async fn connected_default_sendinfo_success() {
         );
         assert!(nxt_info.is_none(), "{:#?}", nxt_info.unwrap());
     } else {
-        assert!(false, "Should never come here!: {:#?}", data);
+        panic!("Should never come here!: {:#?}", data);
     };
 }
 
@@ -139,6 +141,7 @@ async fn connected_send_some_sendinfo_success() {
         payload,
         rcv_info,
         nxt_info,
+        ..
     }) = data
     {
         assert!(
@@ -165,7 +168,7 @@ async fn connected_send_some_sendinfo_success() {
         );
         assert!(nxt_info.is_none(), "{:#?}", nxt_info.unwrap());
     } else {
-        assert!(false, "Should never come here!: {:#?}", data);
+        panic!("Should never come here!: {:#?}", data);
     };
 }
 #[tokio::test]
@@ -210,7 +213,7 @@ async fn test_shutdown_event() {
             client_assoc_id, assoc_id
         );
     } else {
-        assert!(false, "Should never come here!: {:#?}", data);
+        panic!("Should never come here!: {:#?}", data);
     }
 }
 
@@ -649,6 +652,33 @@ async fn recv_rejects_messages_longer_than_4_mib() {
                 panic!("{} octets received, of {}", data.payload.len(), len)
             }
             other => panic!("{:?}", other.map(|_| ())),
+        }
+    }
+}
+
+#[tokio::test]
+async fn recv_limit_is_set_per_socket_and_inherited_on_accept() {
+    let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
+    assert_eq!(listener.max_message_size(), 4 << 20);
+    listener.set_max_message_size(1000);
+    let client = create_client_socket(SocketToAssociation::OneToOne, true);
+    let (sending, _) = client.sctp_connectx(&[bindaddr]).await.unwrap();
+    let (receiving, _) = listener.accept().await.unwrap();
+    assert_eq!(receiving.max_message_size(), 1000);
+    for len in [1001, 1000] {
+        sending
+            .sctp_send(SendData {
+                payload: long_payload(len),
+                snd_info: None,
+            })
+            .await
+            .unwrap();
+        match receiving.sctp_recv().await {
+            Err(error) if len > 1000 => {
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{}", error)
+            }
+            Ok(received) if len == 1000 => assert!(data_payload(received) == long_payload(len)),
+            other => panic!("{} octets: {:?}", len, other.map(|_| ())),
         }
     }
 }

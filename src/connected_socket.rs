@@ -4,6 +4,7 @@ use tokio::io::unix::AsyncFd;
 
 use std::net::SocketAddr;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 #[allow(unused)]
@@ -27,6 +28,8 @@ pub struct ConnectedSocket {
     inner: AsyncFd<OwnedFd>,
     // The part of a message `sctp_recv` has received so far.
     partial: Mutex<Option<PartialMessage>>,
+    // The length of the longest message `sctp_recv` returns.
+    max_message_size: AtomicUsize,
 }
 
 impl ConnectedSocket {
@@ -39,9 +42,13 @@ impl ConnectedSocket {
     /// One to Many Association) would use this API to create new [`ConnectedSocket`].
     ///
     /// The [`ConnectedSocket`] takes ownership of `rawfd` and closes it when dropped, also when
-    /// this function fails after checking that `rawfd` is open. `rawfd` must be a non-blocking
-    /// SCTP socket that nothing else closes.
-    pub fn from_rawfd(rawfd: RawFd) -> std::io::Result<Self> {
+    /// this function fails after checking that `rawfd` is open.
+    ///
+    /// # Safety
+    ///
+    /// `rawfd` must be a non-blocking SCTP socket that nothing else owns: nothing else may close
+    /// it or use it after this call, as with [`OwnedFd::from_raw_fd`][std::os::fd::FromRawFd].
+    pub unsafe fn from_rawfd(rawfd: RawFd) -> std::io::Result<Self> {
         Self::from_owned_fd(owned_fd_from_raw(rawfd)?)
     }
 
@@ -79,7 +86,8 @@ impl ConnectedSocket {
     ///
     /// Each call returns a whole message (or notification), however many reads it takes: the
     /// kernel returns a message longer than the read buffer, or than the receive window, in
-    /// several parts. A message longer than 4 MiB is discarded and reported as an
+    /// several parts. A message longer than [`max_message_size`][Self::max_message_size] (4 MiB
+    /// by default) is discarded and reported as an
     /// [`InvalidData`][std::io::ErrorKind::InvalidData] error, and the next call returns the next
     /// message. The `RcvInfo` is that of the first part of the message and the `NxtInfo` that of
     /// the last. This assumes the default `SCTP_FRAGMENT_INTERLEAVE` level 0, where the parts of
@@ -88,7 +96,19 @@ impl ConnectedSocket {
     /// Cancel safe: if the returned future is dropped before it completes, the part of a message
     /// received so far is kept for the next call.
     pub async fn sctp_recv(&self) -> std::io::Result<NotificationOrData> {
-        sctp_recvmsg_internal(&self.inner, &self.partial).await
+        sctp_recvmsg_internal(&self.inner, &self.partial, self.max_message_size()).await
+    }
+
+    /// Sets the length of the longest message [`sctp_recv`][Self::sctp_recv] returns, 4 MiB by
+    /// default. A longer message is read and discarded, so that a peer cannot make the socket
+    /// buffer without bound.
+    pub fn set_max_message_size(&self, octets: usize) {
+        self.max_message_size.store(octets, Ordering::Relaxed);
+    }
+
+    /// The length of the longest message [`sctp_recv`][Self::sctp_recv] returns.
+    pub fn max_message_size(&self) -> usize {
+        self.max_message_size.load(Ordering::Relaxed)
     }
 
     /// Send Data and Anciliary data if any on the SCTP Socket.
@@ -246,6 +266,7 @@ impl ConnectedSocket {
         Self {
             inner,
             partial: Mutex::new(None),
+            max_message_size: AtomicUsize::new(DEFAULT_MAX_MESSAGE_SIZE),
         }
     }
 }

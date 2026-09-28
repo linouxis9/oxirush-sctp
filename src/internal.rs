@@ -511,6 +511,7 @@ pub(crate) fn shutdown_internal(
 pub(crate) async fn sctp_recvmsg_internal(
     fd: &AsyncFd<OwnedFd>,
     partial: &Mutex<Option<PartialMessage>>,
+    max_message_size: usize,
 ) -> std::io::Result<NotificationOrData> {
     log::debug!("Receiving Message on the socket.");
 
@@ -520,20 +521,21 @@ pub(crate) async fn sctp_recvmsg_internal(
         let mut guard = fd.readable().await?;
         if let Ok(result) = guard.try_io(|inner| {
             let mut partial = partial.lock().unwrap_or_else(PoisonError::into_inner);
-            sctp_recvmsg_whole(inner.as_raw_fd(), &mut partial)
+            sctp_recvmsg_whole(inner.as_raw_fd(), &mut partial, max_message_size)
         }) {
             return result;
         }
     }
 }
 
-// Messages longer than this are discarded, so that a peer cannot make us buffer without bound.
-pub(crate) const MAX_MESSAGE_SIZE: usize = 4 << 20;
+// Messages longer than this are discarded unless the socket sets another limit, so that a peer
+// cannot make us buffer without bound.
+pub(crate) const DEFAULT_MAX_MESSAGE_SIZE: usize = 4 << 20;
 
 // Initial size of the buffer of a message. It doubles for longer messages.
 const RECV_BUFFER_SIZE: usize = 4096;
 
-// Size of the reads that discard a message longer than `MAX_MESSAGE_SIZE`.
+// Size of the reads that discard a message longer than the limit.
 const DISCARD_BUFFER_SIZE: usize = 65536;
 
 // The part of a message received so far.
@@ -542,7 +544,8 @@ pub(crate) struct PartialMessage {
     notification: bool,
     payload: Vec<u8>,
     rcv_info: Option<RcvInfo>,
-    // Octets received, also those discarded once the message is longer than `MAX_MESSAGE_SIZE`.
+    from: Option<SocketAddr>,
+    // Octets received, also those discarded once the message is longer than the limit.
     received: usize,
 }
 
@@ -552,6 +555,7 @@ impl std::fmt::Debug for PartialMessage {
         f.debug_struct("PartialMessage")
             .field("notification", &self.notification)
             .field("rcv_info", &self.rcv_info)
+            .field("from", &self.from)
             .field("received", &self.received)
             .finish()
     }
@@ -564,6 +568,7 @@ struct Piece {
     end_of_record: bool,
     rcv_info: Option<RcvInfo>,
     nxt_info: Option<NxtInfo>,
+    from: Option<SocketAddr>,
 }
 
 // Reads the next message up to its end (`MSG_EOR`), or fails with `EWOULDBLOCK` after keeping the
@@ -575,10 +580,11 @@ struct Piece {
 fn sctp_recvmsg_whole(
     rawfd: RawFd,
     partial: &mut Option<PartialMessage>,
+    max_message_size: usize,
 ) -> std::io::Result<NotificationOrData> {
     loop {
         let mut message = partial.take().unwrap_or_default();
-        let discarding = message.received > MAX_MESSAGE_SIZE;
+        let discarding = message.received > max_message_size;
         if discarding {
             message.payload.clear();
         }
@@ -613,6 +619,7 @@ fn sctp_recvmsg_whole(
             log::debug!("Received end of stream.");
             return Ok(NotificationOrData::Data(ReceivedData {
                 payload: vec![],
+                from: None,
                 rcv_info: None,
                 nxt_info: None,
             }));
@@ -634,6 +641,7 @@ fn sctp_recvmsg_whole(
         if message.received == 0 {
             message.notification = piece.notification;
             message.rcv_info = piece.rcv_info;
+            message.from = piece.from;
         }
         message.received += piece.len;
 
@@ -641,12 +649,12 @@ fn sctp_recvmsg_whole(
             *partial = Some(message);
             continue;
         }
-        if message.received > MAX_MESSAGE_SIZE {
+        if message.received > max_message_size {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
                     "discarded a message of {} octets, longer than {}",
-                    message.received, MAX_MESSAGE_SIZE
+                    message.received, max_message_size
                 ),
             ));
         }
@@ -659,6 +667,7 @@ fn sctp_recvmsg_whole(
         log::debug!("Received Data.");
         return Ok(NotificationOrData::Data(ReceivedData {
             payload: message.payload,
+            from: message.from,
             rcv_info: message.rcv_info,
             nxt_info: piece.nxt_info,
         }));
@@ -675,9 +684,12 @@ fn sctp_recvmsg_once(rawfd: RawFd, buffer: &mut [u8]) -> std::io::Result<Piece> 
             iov_len: buffer.len(),
         };
         let mut msg_control = CmsgBuffer::new();
+        let mut from: libc::sockaddr_storage = std::mem::zeroed();
 
         // Some platforms have private fields in `msghdr`.
         let mut recvmsg_header: libc::msghdr = std::mem::zeroed();
+        recvmsg_header.msg_name = std::ptr::addr_of_mut!(from) as *mut libc::c_void;
+        recvmsg_header.msg_namelen = std::mem::size_of::<libc::sockaddr_storage>() as _;
         recvmsg_header.msg_iov = &mut recv_iov;
         recvmsg_header.msg_iovlen = 1;
         recvmsg_header.msg_control = msg_control.as_mut_ptr();
@@ -689,12 +701,18 @@ fn sctp_recvmsg_once(rawfd: RawFd, buffer: &mut [u8]) -> std::io::Result<Piece> 
             return Err(std::io::Error::last_os_error());
         }
         let (rcv_info, nxt_info) = rcvinfo_nxtinfo_from_cmsgs(&recvmsg_header);
+        let from = OsSocketAddr::copy_from_raw(
+            std::ptr::addr_of!(from) as *const libc::sockaddr,
+            recvmsg_header.msg_namelen,
+        )
+        .into_addr();
         Ok(Piece {
             len: result as usize,
             notification: recvmsg_header.msg_flags as u32 & MSG_NOTIFICATION != 0,
             end_of_record: recvmsg_header.msg_flags & libc::MSG_EOR != 0,
             rcv_info,
             nxt_info,
+            from,
         })
     }
 }
@@ -884,9 +902,15 @@ fn notification_from_message(data: &[u8]) -> Notification {
     const ASSOC_CHANGE_LEN: usize = 20;
     const SHUTDOWN_LEN: usize = 12;
 
+    let unsupported = || Notification::Unsupported {
+        ev_type: data.get(0..2).map_or(Event::Unknown, |ev_type| {
+            Event::from_u16(u16::from_ne_bytes(ev_type.try_into().unwrap()))
+        }),
+        data: data.to_vec(),
+    };
     if data.len() < 2 {
         log::warn!("Notification of {} octets.", data.len());
-        return Notification::Unsupported;
+        return unsupported();
     }
     let notification_type = u16::from_ne_bytes(data[0..2].try_into().unwrap());
     log::trace!(
@@ -928,7 +952,7 @@ fn notification_from_message(data: &[u8]) -> Notification {
                 notification_type,
                 data.len()
             );
-            Notification::Unsupported
+            unsupported()
         }
     }
 }
@@ -1213,17 +1237,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn short_notifications_are_unsupported_instead_of_panicking() {
+    fn short_and_unparsed_notifications_keep_their_type_and_octets() {
         let assoc_change = SCTP_ASSOC_CHANGE.to_ne_bytes();
         let shutdown = SCTP_SHUTDOWN.to_ne_bytes();
-        for data in [
-            &[][..],
-            &[0x80][..],
-            &assoc_change[..],
-            &[&assoc_change[..], &[0; 17]].concat()[..],
-            &[&shutdown[..], &[0; 9]].concat()[..],
+        let peer_address_change = (Event::Address as u16).to_ne_bytes();
+        for (data, ev_type) in [
+            (&[][..], Event::Unknown),
+            (&[0x80][..], Event::Unknown),
+            (&assoc_change[..], Event::Association),
+            (
+                &[&assoc_change[..], &[0; 17]].concat()[..],
+                Event::Association,
+            ),
+            (&[&shutdown[..], &[0; 9]].concat()[..], Event::Shutdown),
+            (
+                &[&peer_address_change[..], &[0; 146]].concat()[..],
+                Event::Address,
+            ),
         ] {
-            assert_eq!(notification_from_message(data), Notification::Unsupported);
+            assert_eq!(
+                notification_from_message(data),
+                Notification::Unsupported {
+                    ev_type,
+                    data: data.to_vec()
+                }
+            );
         }
 
         let mut shutdown_event = shutdown.to_vec();

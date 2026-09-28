@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use tokio::io::unix::AsyncFd;
@@ -23,12 +24,16 @@ pub struct Listener {
     inner: AsyncFd<OwnedFd>,
     // The part of a message `sctp_recv` has received so far.
     partial: Mutex<Option<PartialMessage>>,
+    // The length of the longest message `sctp_recv` returns.
+    max_message_size: AtomicUsize,
 }
 
 impl Listener {
     /// Accept on a given socket (valid only for `OneToOne` type sockets).
     pub async fn accept(&self) -> std::io::Result<(ConnectedSocket, SocketAddr)> {
-        accept_internal(&self.inner).await
+        let (accepted, address) = accept_internal(&self.inner).await?;
+        accepted.set_max_message_size(self.max_message_size());
+        Ok((accepted, address))
     }
 
     /// Shutdown on the socket
@@ -48,8 +53,14 @@ impl Listener {
     /// This call is successful only for UDP style one to many sockets. This is like
     /// `[Listener::accept`] where peeled off socket behaves like a stand alone
     /// one-to-one socket.
+    ///
+    /// The kernel moves the association's queued messages to the new socket, but not the part of
+    /// a message this socket's [`sctp_recv`][Self::sctp_recv] has already received: peel off an
+    /// association between its messages, e.g. on its `SCTP_COMM_UP` notification.
     pub fn sctp_peeloff(&self, assoc_id: AssociationId) -> std::io::Result<ConnectedSocket> {
-        sctp_peeloff_internal(&self.inner, assoc_id)
+        let peeled_off = sctp_peeloff_internal(&self.inner, assoc_id)?;
+        peeled_off.set_max_message_size(self.max_message_size());
+        Ok(peeled_off)
     }
 
     /// Get Peer Address(es) for the given Association ID. See: Section 9.3 RFC 6458
@@ -75,7 +86,8 @@ impl Listener {
     ///
     /// Each call returns a whole message (or notification), however many reads it takes: the
     /// kernel returns a message longer than the read buffer, or than the receive window, in
-    /// several parts. A message longer than 4 MiB is discarded and reported as an
+    /// several parts. A message longer than [`max_message_size`][Self::max_message_size] (4 MiB
+    /// by default) is discarded and reported as an
     /// [`InvalidData`][std::io::ErrorKind::InvalidData] error, and the next call returns the next
     /// message. The `RcvInfo` is that of the first part of the message and the `NxtInfo` that of
     /// the last. This assumes the default `SCTP_FRAGMENT_INTERLEAVE` level 0, where the parts of
@@ -90,7 +102,20 @@ impl Listener {
     /// [`sctp_request_rcvinfo`][Self::sctp_request_rcvinfo]), a message of another association
     /// or stream.
     pub async fn sctp_recv(&self) -> std::io::Result<NotificationOrData> {
-        sctp_recvmsg_internal(&self.inner, &self.partial).await
+        sctp_recvmsg_internal(&self.inner, &self.partial, self.max_message_size()).await
+    }
+
+    /// Sets the length of the longest message [`sctp_recv`][Self::sctp_recv] returns, 4 MiB by
+    /// default. A longer message is read and discarded, so that a peer cannot make the socket
+    /// buffer without bound. Sockets accepted from this
+    /// one or peeled off it start with its limit.
+    pub fn set_max_message_size(&self, octets: usize) {
+        self.max_message_size.store(octets, Ordering::Relaxed);
+    }
+
+    /// The length of the longest message [`sctp_recv`][Self::sctp_recv] returns.
+    pub fn max_message_size(&self) -> usize {
+        self.max_message_size.load(Ordering::Relaxed)
     }
 
     /// Send Data and Anciliary data if any on the SCTP Socket.
@@ -246,6 +271,7 @@ impl Listener {
         Self {
             inner,
             partial: Mutex::new(None),
+            max_message_size: AtomicUsize::new(DEFAULT_MAX_MESSAGE_SIZE),
         }
     }
 }

@@ -111,7 +111,7 @@ async fn listening_socket_one2many_connected_peeloff_success() {
         assert!(received.is_ok(), "{:#?}", received.err().unwrap());
         assert!(state == AssocChangeState::CommUp, "{:#?}", state);
     } else {
-        assert!(false, "Should never come here!: {:#?}", notification);
+        panic!("Should never come here!: {:#?}", notification);
     };
 }
 
@@ -167,7 +167,33 @@ async fn listening_getladdrs_and_getpaddrs_of_many_addresses() {
 }
 
 // Tests for `sctp_recv` for Listening Socket.
-// TODO:
+
+#[tokio::test]
+async fn one_to_many_recv_reports_the_sender_address() {
+    let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToMany, true);
+    let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
+    let (client, assoc_id) = client_socket.sctp_connectx(&[bindaddr]).await.unwrap();
+    let client_addresses = client.sctp_getladdrs(assoc_id).unwrap();
+    client
+        .sctp_send(SendData {
+            payload: b"from the client".to_vec(),
+            snd_info: None,
+        })
+        .await
+        .unwrap();
+
+    let NotificationOrData::Data(data) = listener.sctp_recv().await.unwrap() else {
+        panic!("expected data");
+    };
+    assert_eq!(data.payload, b"from the client");
+    assert!(
+        data.from
+            .is_some_and(|from| client_addresses.contains(&from)),
+        "{:?} is not one of {:?}",
+        data.from,
+        client_addresses
+    );
+}
 
 // Tests for `sctp_send for Listening Socket.
 // TODO:

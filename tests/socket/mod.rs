@@ -53,6 +53,7 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
         payload,
         rcv_info,
         nxt_info,
+        ..
     }) = data
     {
         assert!(
@@ -69,7 +70,7 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
         );
         assert!(nxt_info.is_none(), "{:#?}", nxt_info.unwrap());
     } else {
-        assert!(false, "Should never come here!: {:#?}", data);
+        panic!("Should never come here!: {:#?}", data);
     };
 
     // Now turn off Request Receive Info on client socket
@@ -93,6 +94,7 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
         payload,
         rcv_info,
         nxt_info,
+        ..
     }) = data
     {
         assert!(
@@ -103,7 +105,7 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
         assert!(rcv_info.is_none(), "{:#?}", rcv_info.unwrap());
         assert!(nxt_info.is_none(), "{:#?}", nxt_info.unwrap());
     } else {
-        assert!(false, "Should never come here!: {:#?}", data);
+        panic!("Should never come here!: {:#?}", data);
     };
 }
 
@@ -158,6 +160,7 @@ async fn socket_send_recv_nxtinfo_test() {
         payload,
         rcv_info,
         nxt_info,
+        ..
     }) = data
     {
         assert!(
@@ -168,7 +171,7 @@ async fn socket_send_recv_nxtinfo_test() {
         assert!(rcv_info.is_none(), "{:#?}", rcv_info.unwrap());
         assert!(nxt_info.is_some());
     } else {
-        assert!(false, "Should never come here!: {:#?}", data);
+        panic!("Should never come here!: {:#?}", data);
     };
 
     // First Receive nxtinfo should not be none.
@@ -185,6 +188,7 @@ async fn socket_send_recv_nxtinfo_test() {
         payload,
         rcv_info,
         nxt_info,
+        ..
     }) = data
     {
         assert!(
@@ -195,7 +199,7 @@ async fn socket_send_recv_nxtinfo_test() {
         assert!(rcv_info.is_none(), "{:#?}", rcv_info.unwrap());
         assert!(nxt_info.is_none(), "{:#?}", nxt_info.unwrap());
     } else {
-        assert!(false, "Should never come here!: {:#?}", data);
+        panic!("Should never come here!: {:#?}", data);
     };
 }
 
@@ -250,7 +254,7 @@ async fn socket_init_params_set_ostreams_success() {
             ob_streams
         );
     } else {
-        assert!(false, "Should never come here!: {:#?}", notification);
+        panic!("Should never come here!: {:#?}", notification);
     };
 }
 

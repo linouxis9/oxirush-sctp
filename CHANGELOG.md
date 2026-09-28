@@ -2,9 +2,9 @@
 
 ## 0.1.0 (unreleased)
 
-First release of oxirush-sctp, a fork of sctp-rs 0.3.1. The API of
-sctp-rs 0.3 is kept under the new crate name; the changes are fixes and
-additions.
+First release of oxirush-sctp, a fork of sctp-rs 0.3.1. Code written for
+sctp-rs 0.3 needs the new crate name and the three changes under
+"Changed" that break it; the other changes are fixes and additions.
 
 ### Fixed
 
@@ -19,7 +19,8 @@ additions.
   it after Tokio has deregistered it.
 - `sctp_recv` returns whole messages, reassembling partial deliveries
   until `MSG_EOR`; a partly received message is kept in the socket, so
-  the future is cancel-safe. A message over 4 MiB is an `InvalidData`
+  the future is cancel-safe. A message longer than the socket's limit (4 MiB
+  by default) is an `InvalidData`
   error. 0.3.1 returned at most 4096 bytes and parsed the rest of a long
   notification as a new one.
 - `sctp_send` waits for room in the send buffer instead of returning
@@ -45,12 +46,23 @@ additions.
 - `sctp_set_rto_info` and `sctp_get_rto_info` (`SCTP_RTOINFO`) with the
   `RtoInfo` type, and `Socket::set_reuseaddr` and `reuseaddr`.
 - `AsRawFd` and `AsFd` for `Socket`, `Listener` and `ConnectedSocket`.
+- `set_max_message_size` and `max_message_size` on `Listener` and
+  `ConnectedSocket`, the limit above which `sctp_recv` discards a message.
+  Accepted and peeled-off sockets start with their listener's limit.
 
 ### Changed
 
 - The crate is `oxirush-sctp` (library `oxirush_sctp`) and is the
   repository's root package.
-- `ConnectedSocket::from_rawfd` rejects a closed descriptor with `EBADF`
-  and closes the descriptor if registering it with Tokio fails.
+- `ConnectedSocket::from_rawfd` is `unsafe`: it takes ownership of any
+  descriptor, which nothing else may close or use afterwards. It rejects a
+  closed descriptor with `EBADF` and closes the descriptor if registering it
+  with Tokio fails.
+- `Notification` is `#[non_exhaustive]`, and `Notification::Unsupported`
+  carries the type and octets of the notifications the crate does not parse
+  (peer address change, send failure, remote error, sender dry, partial
+  delivery, …), which 0.3.1 dropped.
+- `ReceivedData` has a `from` field with the sender's address, which tells
+  the associations of a one-to-many socket apart; 0.3.1 discarded it.
 - Peel-off needs Linux 4.13 or later; event subscription already needed
   5.0.

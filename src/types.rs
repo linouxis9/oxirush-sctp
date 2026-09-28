@@ -42,6 +42,10 @@ pub struct ReceivedData {
     /// Received Message Payload.
     pub payload: Vec<u8>,
 
+    /// Address of the peer that sent the message, which tells the associations of a One-to-many
+    /// socket apart. `None` when the kernel gives no address, as at the end of the stream.
+    pub from: Option<std::net::SocketAddr>,
+
     /// Optional ancillary information about the received payload.
     pub rcv_info: Option<RcvInfo>,
 
@@ -156,6 +160,7 @@ pub struct NxtInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 /// An `enum` representing the notifications received on the SCTP Sockets.
 pub enum Notification {
     /// Association Change Notification. See Section 6.1.1 of RFC 6458.
@@ -163,8 +168,17 @@ pub enum Notification {
 
     /// Shutdown Notification. See Section 6.1.5 of RFC 6458.
     Shutdown(Shutdown),
-    /// A Catchall Notification type for the Notifications that are not supported
-    Unsupported,
+
+    /// A notification this crate does not parse, such as a peer address change, a send failure,
+    /// a remote error or sender dry (Section 6.1 of RFC 6458), or one too short for its type.
+    Unsupported {
+        /// Type of the notification, [`Event::Unknown`] for a type this crate does not know or a
+        /// notification too short to have one.
+        ev_type: Event,
+
+        /// The notification as the kernel delivered it, header included, in host byte order.
+        data: Vec<u8>,
+    },
 }
 
 /// AssociationChange: Structure returned as notification for Association Change.
