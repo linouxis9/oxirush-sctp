@@ -43,6 +43,8 @@ sctp-rs 0.3 needs the new crate name and the three changes under
 - `set_nodelay` and `nodelay` (`SCTP_NODELAY`) on `Socket`, `Listener`
   and `ConnectedSocket`. Accepted and peeled-off sockets inherit the
   option from their listener.
+- `ConnectedSocket::set_linger` (`SO_LINGER`): with zero, dropping the
+  socket aborts its association.
 - `sctp_set_rto_info` and `sctp_get_rto_info` (`SCTP_RTOINFO`) with the
   `RtoInfo` type, and `Socket::set_reuseaddr` and `reuseaddr`.
 - `AsRawFd` and `AsFd` for `Socket`, `Listener` and `ConnectedSocket`.

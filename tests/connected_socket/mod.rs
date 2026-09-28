@@ -218,6 +218,39 @@ async fn test_shutdown_event() {
 }
 
 #[tokio::test]
+async fn a_zero_linger_aborts_the_association_on_close() {
+    let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
+    let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
+    let (connected, _) = client_socket.sctp_connectx(&[bindaddr]).await.unwrap();
+    connected
+        .sctp_subscribe_events(
+            &[Event::Association, Event::Shutdown],
+            SubscribeEventAssocId::All,
+        )
+        .unwrap();
+    let (accepted, _) = listener.accept().await.unwrap();
+
+    accepted
+        .set_linger(Some(std::time::Duration::ZERO))
+        .unwrap();
+    drop(accepted);
+
+    // An ABORT, not a SHUTDOWN: the association is lost at once.
+    let data = connected.sctp_recv().await.unwrap();
+    assert!(
+        matches!(
+            data,
+            NotificationOrData::Notification(Notification::AssociationChange(AssociationChange {
+                state: AssocChangeState::CommLost,
+                ..
+            }))
+        ),
+        "{:#?}",
+        data
+    );
+}
+
+#[tokio::test]
 async fn test_get_status() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
 

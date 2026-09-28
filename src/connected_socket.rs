@@ -245,6 +245,14 @@ impl ConnectedSocket {
         sctp_nodelay_internal(&self.inner)
     }
 
+    /// Sets `SO_LINGER` (Section 8.1.4 of RFC 6458): how closing (dropping) the socket ends its
+    /// association. With `Some(Duration::ZERO)` the close aborts it (the ABORT primitive, with
+    /// an ABORT chunk to the peer) instead of shutting it down gracefully, as with `None`, the
+    /// default. The kernel takes other times in whole seconds.
+    pub fn set_linger(&self, linger: Option<std::time::Duration>) -> std::io::Result<()> {
+        set_linger_internal(&self.inner, linger)
+    }
+
     /// Set the retransmission timeout parameters (`SCTP_RTOINFO`, Section 8.1.1 of RFC 6458) of
     /// the association `rto_info.assoc_id`, or with 0 the defaults of the socket.
     pub fn sctp_set_rto_info(&self, rto_info: RtoInfo) -> std::io::Result<()> {
