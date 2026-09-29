@@ -248,7 +248,9 @@ impl ConnectedSocket {
     /// Sets `SO_LINGER` (Section 8.1.4 of RFC 6458): how closing (dropping) the socket ends its
     /// association. With `Some(Duration::ZERO)` the close aborts it (the ABORT primitive, with
     /// an ABORT chunk to the peer) instead of shutting it down gracefully, as with `None`, the
-    /// default. The kernel takes other times in whole seconds.
+    /// default. Positive durations return [`InvalidInput`][std::io::ErrorKind::InvalidInput]:
+    /// Linux can block even a non-blocking socket's close for that duration, stalling the async
+    /// runtime when the socket is dropped.
     pub fn set_linger(&self, linger: Option<std::time::Duration>) -> std::io::Result<()> {
         set_linger_internal(&self.inner, linger)
     }

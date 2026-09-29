@@ -99,8 +99,9 @@ impl Listener {
     /// When the delivery of a message is aborted (e.g. its association is aborted), the part
     /// received so far is dropped if a notification follows (subscribe to
     /// [`Event::PartialDelivery`] for one) or, with `RcvInfo` requested (see
-    /// [`sctp_request_rcvinfo`][Self::sctp_request_rcvinfo]), a message of another association
-    /// or stream.
+    /// [`sctp_request_rcvinfo`][Self::sctp_request_rcvinfo]), a different message. Without
+    /// `RcvInfo`, a changed sender address also discards the partial message. Request `RcvInfo`
+    /// for multi-homed peers, where a continuation can arrive from another address.
     pub async fn sctp_recv(&self) -> std::io::Result<NotificationOrData> {
         sctp_recvmsg_internal(&self.inner, &self.partial, self.max_message_size()).await
     }

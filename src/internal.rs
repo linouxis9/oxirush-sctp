@@ -3,7 +3,7 @@
 //! Nothing in this module should be public API as this module contains `unsafe` code that uses
 //! `libc` and internal `libc` structs and function calls.
 
-use tokio::io::unix::AsyncFd;
+use tokio::io::{unix::AsyncFd, Interest};
 
 use std::convert::TryInto;
 use std::net::SocketAddr;
@@ -13,6 +13,7 @@ use std::sync::{Mutex, PoisonError};
 use os_socketaddr::OsSocketAddr;
 
 use crate::types::internal::{ConnStatusInternal, ConnectxParam, InitMsg, SubscribeEvent};
+use crate::types::ConnState;
 use crate::{
     AssocChangeState, AssociationChange, AssociationId, BindxFlags, CmsgType, ConnStatus,
     ConnectedSocket, Event, Listener, Notification, NotificationOrData, NxtInfo, RcvInfo,
@@ -359,37 +360,37 @@ pub(crate) async fn sctp_connectx_internal(
         params.assoc_id
     };
 
-    log::trace!("Waiting to connect...");
-    let _guard = fd.writable().await?;
-
-    // One-to-one sockets report why the association could not start (e.g. `ETIMEDOUT` when the
-    // INIT was never answered, `ECONNREFUSED` for an ABORT) in `SO_ERROR`.
     // Safety: every value is a valid `c_int`.
-    let so_error: libc::c_int =
-        unsafe { getsockopt_internal(&fd, libc::SOL_SOCKET, libc::SO_ERROR, 0)? };
-    if so_error != 0 {
-        let err = std::io::Error::from_raw_os_error(so_error);
-        log::error!("Error: '{}' while connecting.", err);
-        return Err(err);
+    let socket_type: libc::c_int =
+        unsafe { getsockopt_internal(&fd, libc::SOL_SOCKET, libc::SO_TYPE, 0)? };
+    log::trace!("Waiting to connect...");
+    loop {
+        // With association events enabled, a failed one-to-one association may only become
+        // readable. Leave its notifications queued for `sctp_recv` on a successful connection.
+        let mut guard = fd.ready(Interest::READABLE | Interest::WRITABLE).await?;
+        // One-to-one sockets report the actual failure in `SO_ERROR`, even when an association
+        // notification is queued instead of making the socket writable.
+        // Safety: every value is a valid `c_int`.
+        let so_error: libc::c_int =
+            unsafe { getsockopt_internal(&fd, libc::SOL_SOCKET, libc::SO_ERROR, 0)? };
+        if so_error != 0 {
+            return Err(std::io::Error::from_raw_os_error(so_error));
+        }
+        let status = sctp_get_status_internal(&fd, assoc_id).map_err(|error| {
+            if error.raw_os_error() == Some(libc::EINVAL) {
+                std::io::Error::from_raw_os_error(libc::ECONNREFUSED)
+            } else {
+                error
+            }
+        })?;
+        if socket_type != libc::SOCK_STREAM || status.state == ConnState::Established {
+            break;
+        }
+        // A notification can arrive while the association is still being established. Clearing
+        // this readiness waits for the next state change instead of spinning on that event.
+        guard.clear_ready();
     }
     log::trace!("Connected...");
-
-    let sctp_status = sctp_get_status_internal(&fd, assoc_id);
-    if let Err(e) = sctp_status {
-        let err = if e.raw_os_error() != Some(libc::EINVAL) {
-            e
-        } else {
-            log::error!("Received `EINVAL`, while getting status, returning `ECONNREFUSED`.");
-            std::io::Error::from_raw_os_error(libc::ECONNREFUSED)
-        };
-        return Err(err);
-    }
-
-    log::debug!(
-        "Socket State for Assoc ID: {},  {:#?}",
-        assoc_id,
-        sctp_status.unwrap().state
-    );
 
     // The `ConnectedSocket` takes over the registered `fd`. Also, since this `fd` is the
     // 'original' created with `socket` call, no need to set it to non-blocking again.
@@ -517,8 +518,8 @@ pub(crate) async fn sctp_recvmsg_internal(
 
     loop {
         // `try_io` clears the readiness when `recvmsg` fails with `EWOULDBLOCK`, so that we wait
-        // for the socket to become readable again.
-        let mut guard = fd.readable().await?;
+        // for the socket to become readable again. A peer abort can signal only error readiness.
+        let mut guard = fd.ready(Interest::READABLE | Interest::ERROR).await?;
         if let Ok(result) = guard.try_io(|inner| {
             let mut partial = partial.lock().unwrap_or_else(PoisonError::into_inner);
             sctp_recvmsg_whole(inner.as_raw_fd(), &mut partial, max_message_size)
@@ -592,8 +593,13 @@ fn sctp_recvmsg_whole(
         let room = if discarding {
             DISCARD_BUFFER_SIZE
         } else {
-            start.max(RECV_BUFFER_SIZE)
+            start
+                .max(RECV_BUFFER_SIZE)
+                .min(max_message_size.saturating_sub(start).saturating_add(1))
         };
+        // `Vec::resize` would grow geometrically beyond the configured limit. One extra octet
+        // lets us detect an oversized message; subsequent reads use the fixed discard buffer.
+        message.payload.reserve_exact(room);
         message.payload.resize(start + room, 0);
 
         let piece = sctp_recvmsg_once(rawfd, &mut message.payload[start..]);
@@ -626,11 +632,18 @@ fn sctp_recvmsg_whole(
         }
 
         let continued = message.received > 0;
-        let same_stream = match (&message.rcv_info, &piece.rcv_info) {
-            (Some(first), Some(next)) => first.assoc_id == next.assoc_id && first.sid == next.sid,
-            _ => true,
+        let same_message = match (&message.rcv_info, &piece.rcv_info) {
+            (Some(first), Some(next)) => {
+                first.assoc_id == next.assoc_id
+                    && first.sid == next.sid
+                    && first.ppid == next.ppid
+                    && first.flags == next.flags
+                    // The SSN has no meaning for unordered messages.
+                    && (first.flags & 1 != 0 || first.ssn == next.ssn)
+            }
+            _ => message.from == piece.from,
         };
-        if continued && (piece.notification != message.notification || !same_stream) {
+        if continued && (piece.notification != message.notification || !same_message) {
             log::warn!(
                 "Dropping {} octets of a message whose delivery was aborted.",
                 message.received
@@ -643,7 +656,7 @@ fn sctp_recvmsg_whole(
             message.rcv_info = piece.rcv_info;
             message.from = piece.from;
         }
-        message.received += piece.len;
+        message.received = message.received.saturating_add(piece.len);
 
         if !piece.end_of_record {
             *partial = Some(message);
@@ -1088,11 +1101,15 @@ pub(crate) fn set_linger_internal(
     linger: Option<std::time::Duration>,
 ) -> std::io::Result<()> {
     log::debug!("Setting `SO_LINGER` to {:?}.", linger);
+    if linger.is_some_and(|duration| !duration.is_zero()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "positive linger can block the async runtime when the socket is dropped",
+        ));
+    }
     let value = libc::linger {
         l_onoff: libc::c_int::from(linger.is_some()),
-        l_linger: linger.map_or(0, |linger| {
-            linger.as_secs().min(libc::c_int::MAX as u64) as libc::c_int
-        }),
+        l_linger: 0,
     };
     setsockopt_internal(fd, libc::SOL_SOCKET, libc::SO_LINGER, &value)
 }
@@ -1250,6 +1267,34 @@ pub(crate) fn owned_fd_from_raw(fd: RawFd) -> std::io::Result<OwnedFd> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receive_growth_stays_within_the_message_limit() {
+        use std::os::unix::net::UnixDatagram;
+        let (socket, _peer) = UnixDatagram::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        for limit in [1000, 3 << 20, DEFAULT_MAX_MESSAGE_SIZE] {
+            let mut partial = Some(PartialMessage {
+                payload: vec![0; limit],
+                received: limit,
+                ..Default::default()
+            });
+            assert_eq!(
+                sctp_recvmsg_whole(socket.as_raw_fd(), &mut partial, limit)
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            let message = partial.unwrap();
+            assert_eq!(message.payload.len(), limit);
+            assert!(
+                message.payload.capacity() <= limit + 1,
+                "{} octets allocated for limit {}",
+                message.payload.capacity(),
+                limit
+            );
+        }
+    }
 
     #[test]
     fn short_and_unparsed_notifications_keep_their_type_and_octets() {
