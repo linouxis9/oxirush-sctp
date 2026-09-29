@@ -674,8 +674,23 @@ async fn recv_rejects_messages_longer_than_4_mib() {
             payload: payload.clone(),
             snd_info: None,
         });
-        let (sent, received) = tokio::join!(send, receiving.sctp_recv());
-        sent.unwrap();
+        let ((), received) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            // A failed send must stop the transfer: there will be no message to receive.
+            // Keep receive errors as values, since an oversized message should be rejected.
+            tokio::try_join!(send, async {
+                Ok::<_, std::io::Error>(receiving.sctp_recv().await)
+            })
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "send/receive of {} octets did not complete within 10 seconds; sender: {:?}; receiver: {:?}",
+                len,
+                sending.sctp_get_status(0),
+                receiving.sctp_get_status(0),
+            )
+        })
+        .unwrap();
         match received {
             Err(error) if len > max => {
                 assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{}", error)
