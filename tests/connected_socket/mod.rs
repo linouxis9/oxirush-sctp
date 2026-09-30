@@ -269,6 +269,7 @@ async fn test_get_status() {
     let result = connected.sctp_get_status(0);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
     let status = result.unwrap();
+    assert_eq!(status.state, ConnState::Established);
     assert_eq!(
         status.assoc_id, client_assoc_id,
         "client assoc ID: {}, status assoc ID: {}",
@@ -278,10 +279,12 @@ async fn test_get_status() {
     let result = accepted.sctp_get_status(0);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
     let status = result.unwrap();
+    assert!(matches!(status.state, ConnState::Established));
+    let peer: PeerAddress = status.peer_primary;
     assert_eq!(
-        client_addr, status.peer_primary.address,
+        client_addr, peer.address,
         "Client Addres: {}, Peer Primary Address: {}",
-        client_addr, status.peer_primary.address
+        client_addr, peer.address
     );
 }
 

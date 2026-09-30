@@ -67,11 +67,9 @@ pub(crate) fn sctp_bindx_internal(
         );
 
         if result < 0 {
-            log::error!(
-                "Error: {} during `sctp_bindx` using `setsockopt`.",
-                std::io::Error::last_os_error()
-            );
-            Err(std::io::Error::last_os_error())
+            let error = std::io::Error::last_os_error();
+            log::error!("Error: {} during `sctp_bindx` using `setsockopt`.", error);
+            Err(error)
         } else {
             Ok(())
         }
@@ -113,11 +111,9 @@ pub(crate) fn sctp_peeloff_internal(
             peeloff_size_ptr as *mut _ as *mut libc::socklen_t,
         );
         if result < 0 {
-            log::error!(
-                "Error: {} during `sctp_peeloff` using `getsockopt`.",
-                std::io::Error::last_os_error()
-            );
-            Err(std::io::Error::last_os_error())
+            let error = std::io::Error::last_os_error();
+            log::error!("Error: {} during `sctp_peeloff` using `getsockopt`.", error);
+            Err(error)
         } else {
             // Safety: the kernel returned a new descriptor, which nothing else owns.
             let fd = OwnedFd::from_raw_fd(peeloff_arg.p_arg.sd);
@@ -178,11 +174,9 @@ pub(crate) fn sctp_listen_internal(
         let result = libc::listen(rawfd, backlog);
 
         if result < 0 {
-            log::error!(
-                "Error: {} during `sctp_listen`.",
-                std::io::Error::last_os_error()
-            );
-            Err(std::io::Error::last_os_error())
+            let error = std::io::Error::last_os_error();
+            log::error!("Error: {} during `sctp_listen`.", error);
+            Err(error)
         } else {
             Ok(Listener::from_async_fd(fd))
         }
