@@ -23,19 +23,19 @@ pub enum SocketToAssociation {
     OneToMany,
 }
 
-/// NotificationOrData: A type returned by a `sctp_recv` call.
+/// NotificationOrData: A type returned by a `recv` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotificationOrData {
-    /// SCTP Notification received by an `sctp_recv` call.
+    /// SCTP Notification received by a `recv` call.
     Notification(Notification),
 
-    /// SCTP Data Received by an `sctp_recv` call.
+    /// SCTP Data Received by a `recv` call.
     Data(ReceivedData),
 }
 
 /// Structure Representing SCTP Received Data.
 ///
-/// This structure is returned by the `sctp_recv` API call. This contains in addition to 'received'
+/// This structure is returned by the `recv` API call. This contains in addition to 'received'
 /// data, any ancillary data that is received during the underlying system call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceivedData {
@@ -49,7 +49,7 @@ pub struct ReceivedData {
     /// Optional ancillary information about the received payload.
     pub rcv_info: Option<RcvInfo>,
 
-    /// Optional ancillary information about the next call to `sctp_recv`.
+    /// Optional ancillary information about the next call to `recv`.
     pub nxt_info: Option<NxtInfo>,
 }
 
@@ -66,7 +66,7 @@ pub struct SendData {
 }
 
 /// Options for sending a borrowed message with [`ConnectedSocket::send`][crate::ConnectedSocket::send]
-/// or [`Listener::send`][crate::Listener::send].
+/// or [`OneToManyEndpoint::send`][crate::OneToManyEndpoint::send].
 ///
 /// Unlike the low-level [`SendInfo`], `ppid` uses host byte order; conversion happens once when
 /// the message is sent. Defaults select ordered delivery on stream 0 with PPID 0.
@@ -238,7 +238,7 @@ pub struct NxtInfo {
     /// Application protocol ID, without byte order conversion (see [`SendInfo::ppid`]).
     pub ppid: u32,
 
-    /// Length of the message to be used in the next `sctp_recv` call.
+    /// Length of the message to be used in the next `recv` call.
     pub length: u32,
 
     /// SCTP Association ID.
@@ -401,7 +401,7 @@ pub struct Shutdown {
 #[repr(u16)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    /// Event to receive ancillary information with every `sctp_recv`.
+    /// Event to receive ancillary information with every `recv`.
     DataIo = (1 << 15),
 
     /// Event related to association change.

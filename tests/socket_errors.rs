@@ -37,6 +37,7 @@ async fn refused_connect_completes_with_association_events() {
         let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
         if subscribed {
             client
+                .options()
                 .sctp_subscribe_events(&[Event::Association], SubscribeEventAssocId::All)
                 .unwrap();
         }
@@ -55,6 +56,7 @@ async fn successful_connect_keeps_its_association_notification() {
     let address = listener.sctp_getladdrs(0).unwrap()[0];
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     client
+        .options()
         .sctp_subscribe_events(&[Event::Association], SubscribeEventAssocId::All)
         .unwrap();
     let (client, _) = tokio::time::timeout(Duration::from_secs(2), client.connect(address))
@@ -63,7 +65,7 @@ async fn successful_connect_keeps_its_association_notification() {
         .unwrap();
     let (_peer, _) = listener.accept().await.unwrap();
     assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(2), client.sctp_recv())
+        tokio::time::timeout(Duration::from_secs(2), client.recv())
             .await
             .unwrap()
             .unwrap(),
@@ -83,9 +85,9 @@ async fn peer_abort_without_notifications_completes_receive() {
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     let (client, _) = client.connect(address).await.unwrap();
     let (peer, _) = listener.accept().await.unwrap();
-    client.set_linger(Some(Duration::ZERO)).unwrap();
+    client.options().set_linger(Some(Duration::ZERO)).unwrap();
     drop(client);
-    let result = tokio::time::timeout(Duration::from_secs(2), peer.sctp_recv())
+    let result = tokio::time::timeout(Duration::from_secs(2), peer.recv())
         .await
         .expect("receive waited after the peer aborted the association");
     assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::ECONNRESET));
@@ -100,20 +102,25 @@ async fn positive_linger_is_rejected_without_changing_close_behavior() {
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     let (client, _) = client.connect(address).await.unwrap();
     let (peer, _) = listener.accept().await.unwrap();
-    peer.sctp_subscribe_events(
-        &[Event::Shutdown, Event::Association],
-        SubscribeEventAssocId::All,
-    )
-    .unwrap();
+    peer.options()
+        .sctp_subscribe_events(
+            &[Event::Shutdown, Event::Association],
+            SubscribeEventAssocId::All,
+        )
+        .unwrap();
     for duration in [Duration::from_millis(500), Duration::from_secs(2)] {
         assert_eq!(
-            client.set_linger(Some(duration)).unwrap_err().kind(),
+            client
+                .options()
+                .set_linger(Some(duration))
+                .unwrap_err()
+                .kind(),
             std::io::ErrorKind::InvalidInput
         );
     }
     drop(client);
     assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(2), peer.sctp_recv())
+        tokio::time::timeout(Duration::from_secs(2), peer.recv())
             .await
             .unwrap()
             .unwrap(),
@@ -127,13 +134,14 @@ async fn aborted_partial_delivery_does_not_contaminate_another_sender() {
         let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
         socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
         set_int(&socket, libc::SO_RCVBUF, 8192);
-        socket.sctp_request_rcvinfo(rcvinfo).unwrap();
-        let listener = socket.listen(2).unwrap();
+        socket.options().sctp_request_rcvinfo(rcvinfo).unwrap();
+        let listener = socket.into_endpoint(2).unwrap();
+        listener.options().sctp_request_rcvinfo(rcvinfo).unwrap();
         let address = listener.sctp_getladdrs(0).unwrap()[0];
         let a = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
         set_int(&a, libc::SO_SNDBUF, 1 << 20);
         let (a, _) = a.connect(address).await.unwrap();
-        a.sctp_send(SendData {
+        a.send_data(SendData {
             payload: vec![0xaa; 300_000],
             snd_info: None,
         })
@@ -141,23 +149,23 @@ async fn aborted_partial_delivery_does_not_contaminate_another_sender() {
         .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(
-            tokio::time::timeout(Duration::from_millis(1), listener.sctp_recv())
+            tokio::time::timeout(Duration::from_millis(1), listener.recv())
                 .await
                 .is_err()
         );
-        a.set_linger(Some(Duration::ZERO)).unwrap();
+        a.options().set_linger(Some(Duration::ZERO)).unwrap();
         drop(a);
         tokio::time::sleep(Duration::from_millis(100)).await;
         let b = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
         let (b, _) = b.connect(address).await.unwrap();
         let b_address = b.sctp_getladdrs(0).unwrap()[0];
-        b.sctp_send(SendData {
+        b.send_data(SendData {
             payload: b"hello from B".to_vec(),
             snd_info: None,
         })
         .await
         .unwrap();
-        match tokio::time::timeout(Duration::from_secs(2), listener.sctp_recv())
+        match tokio::time::timeout(Duration::from_secs(2), listener.recv())
             .await
             .unwrap()
             .unwrap()

@@ -1,5 +1,5 @@
 //! Whole-record assembly, independent of descriptor ownership and readiness.
-use super::sys::notification_from_message;
+use super::notifications::notification_from_message;
 use crate::{NotificationOrData, NxtInfo, RcvInfo, ReceivedData};
 use std::net::SocketAddr;
 
@@ -24,6 +24,14 @@ pub(crate) struct PartialMessage {
     received: usize,
 }
 
+impl PartialMessage {
+    pub(crate) fn belongs_to(&self, assoc_id: crate::AssociationId) -> bool {
+        self.rcv_info
+            .as_ref()
+            .is_none_or(|info| info.assoc_id == assoc_id)
+    }
+}
+
 // Without the payload, which can be long.
 impl std::fmt::Debug for PartialMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -37,7 +45,7 @@ impl std::fmt::Debug for PartialMessage {
 }
 
 // One part of a message, as returned by `recvmsg`.
-pub(super) struct Piece {
+pub(crate) struct Piece {
     pub(super) len: usize,
     pub(super) notification: bool,
     pub(super) end_of_record: bool,

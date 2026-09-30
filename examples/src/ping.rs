@@ -32,8 +32,8 @@ async fn main() -> std::io::Result<()> {
             payload: message.as_bytes().to_vec(),
             snd_info: None,
         };
-        connected.sctp_send(send_data).await?;
-        let received = connected.sctp_recv().await?;
+        connected.send_data(send_data).await?;
+        let received = connected.recv().await?;
         eprintln!("received: {:#?}", received);
     }
 

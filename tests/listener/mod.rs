@@ -1,4 +1,7 @@
-use crate::{create_client_socket, create_socket_bind_and_listen};
+use crate::{
+    connect_endpoint, create_client_socket, create_endpoint_bind_and_listen,
+    create_socket_bind_and_listen,
+};
 use oxirush_sctp::*;
 use std::net::SocketAddr;
 
@@ -21,19 +24,6 @@ async fn listening_one_2_one_listen_accept_success() {
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 }
 
-#[tokio::test]
-async fn listening_one_2_many_listen_accept_failure() {
-    let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToMany, true);
-
-    let client_socket = create_client_socket(SocketToAssociation::OneToMany, true);
-
-    let assoc_id = client_socket.sctp_connectx(&[bindaddr]).await;
-    assert!(assoc_id.is_ok(), "{:#?}", assoc_id.err().unwrap());
-
-    let accept = listener.accept().await;
-    assert!(accept.is_err(), "{:#?}", accept.ok().unwrap());
-}
-
 // Tests for `shutdown` API for Listening Socket.
 // TODO:
 
@@ -50,43 +40,27 @@ async fn listening_sctp_bindx_add_success() {
 // Tests for `sctp_peeloff` API for Listening Socket.
 #[tokio::test]
 async fn listening_socket_no_connect_peeloff_failure() {
-    let (listener, _) = create_socket_bind_and_listen(SocketToAssociation::OneToMany, true);
+    let (listener, _) = create_endpoint_bind_and_listen(true);
 
-    let result = listener.sctp_peeloff(42);
+    let result = listener.peeloff(42);
     assert!(result.is_err(), "{:#?}", result.ok().unwrap());
 }
 
 #[tokio::test]
-async fn listening_socket_one2one_connected_peeloff_failure() {
-    let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
-
-    let result =
-        listener.sctp_subscribe_events(&[Event::Association], SubscribeEventAssocId::Future);
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
-
-    let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-
-    let assoc_id = client_socket.sctp_connectx(&[bindaddr]).await;
-    assert!(assoc_id.is_ok(), "{:#?}", assoc_id.err().unwrap());
-
-    let received = listener.sctp_peeloff(0);
-    assert!(received.is_err(), "{:#?}", received.ok().unwrap());
-}
-
-#[tokio::test]
 async fn listening_socket_one2many_connected_peeloff_success() {
-    let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToMany, true);
+    let (listener, bindaddr) = create_endpoint_bind_and_listen(true);
 
-    let result =
-        listener.sctp_subscribe_events(&[Event::Association], SubscribeEventAssocId::Future);
+    let result = listener
+        .options()
+        .sctp_subscribe_events(&[Event::Association], SubscribeEventAssocId::Future);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
     let client_socket = create_client_socket(SocketToAssociation::OneToMany, true);
 
-    let assoc_id = client_socket.sctp_connectx(&[bindaddr]).await;
+    let assoc_id = connect_endpoint(client_socket, &[bindaddr]).await;
     assert!(assoc_id.is_ok(), "{:#?}", assoc_id.err().unwrap());
 
-    let result = listener.sctp_recv().await;
+    let result = listener.recv().await;
     assert!(result.is_ok(), "{:#}", result.err().unwrap());
 
     let notification = result.unwrap();
@@ -107,7 +81,7 @@ async fn listening_socket_one2many_connected_peeloff_success() {
         ..
     })) = notification
     {
-        let received = listener.sctp_peeloff(assoc_id);
+        let received = listener.peeloff(assoc_id);
         assert!(received.is_ok(), "{:#?}", received.err().unwrap());
         assert!(state == AssocChangeState::CommUp, "{:#?}", state);
     } else {
@@ -170,19 +144,19 @@ async fn listening_getladdrs_and_getpaddrs_of_many_addresses() {
 
 #[tokio::test]
 async fn one_to_many_recv_reports_the_sender_address() {
-    let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToMany, true);
+    let (listener, bindaddr) = create_endpoint_bind_and_listen(true);
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
     let (client, assoc_id) = client_socket.sctp_connectx(&[bindaddr]).await.unwrap();
     let client_addresses = client.sctp_getladdrs(assoc_id).unwrap();
     client
-        .sctp_send(SendData {
+        .send_data(SendData {
             payload: b"from the client".to_vec(),
             snd_info: None,
         })
         .await
         .unwrap();
 
-    let NotificationOrData::Data(data) = listener.sctp_recv().await.unwrap() else {
+    let NotificationOrData::Data(data) = listener.recv().await.unwrap() else {
         panic!("expected data");
     };
     assert_eq!(data.payload, b"from the client");
