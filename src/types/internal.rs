@@ -85,6 +85,13 @@ pub struct ConnStatusInternal {
     pub peer_primary: PeerAddrInternal,
 }
 
+// Linux sctp_paddrparams is packed and aligned to 4. Byte fields avoid references to its
+// unaligned u32 members; size/offset tests below protect the handwritten UAPI layout.
+#[repr(C, align(4))]
+pub(crate) struct PeerAddressParamsInternal {
+    pub(crate) bytes: [u8; 156],
+}
+
 use std::convert::{TryFrom, TryInto};
 
 use os_socketaddr::OsSocketAddr;
@@ -145,5 +152,36 @@ impl TryFrom<ConnStatusInternal> for ConnStatus {
             fragmentation_pt: val.fragmentation_pt,
             peer_primary: val.peer_primary.try_into()?,
         })
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use crate::{NxtInfo, RcvInfo, RtoInfo, SendInfo};
+    use std::mem::{align_of, offset_of, size_of};
+
+    #[test]
+    fn linux_sctp_abi_sizes_and_offsets_match_uapi() {
+        assert_eq!(size_of::<SubscribeEvent>(), 8);
+        assert_eq!(offset_of!(SubscribeEvent, event), 4);
+        assert_eq!(offset_of!(SubscribeEvent, on), 6);
+        assert_eq!(size_of::<InitMsg>(), 8);
+        assert_eq!(size_of::<PeeloffArg>(), 8);
+        assert_eq!(size_of::<PeeloffFlagsArg>(), 12);
+        assert_eq!(offset_of!(ConnectxParam, addrs), 8);
+        assert_eq!(size_of::<ConnectxParam>(), 8 + size_of::<*mut u8>());
+        assert_eq!(size_of::<SendInfo>(), 16);
+        assert_eq!(offset_of!(SendInfo, ppid), 4);
+        assert_eq!(size_of::<RcvInfo>(), 28);
+        assert_eq!(offset_of!(RcvInfo, assoc_id), 24);
+        assert_eq!(size_of::<NxtInfo>(), 16);
+        assert_eq!(size_of::<RtoInfo>(), 16);
+        assert_eq!(size_of::<PeerAddrInternal>(), 152);
+        assert_eq!(offset_of!(PeerAddrInternal, state), 132);
+        assert_eq!(size_of::<ConnStatusInternal>(), 176);
+        assert_eq!(offset_of!(ConnStatusInternal, peer_primary), 24);
+        assert_eq!(size_of::<PeerAddressParamsInternal>(), 156);
+        assert_eq!(align_of::<PeerAddressParamsInternal>(), 4);
     }
 }

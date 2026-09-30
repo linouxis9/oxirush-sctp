@@ -11,9 +11,9 @@ Idiomatic async Rust APIs for the Linux kernel SCTP stack, per the SCTP sockets 
 - **Kernel SCTP, no `libsctp`** — system calls through `libc`, with `std::net::SocketAddr` instead of C socket addresses
 - **One-to-one and one-to-many sockets** — `Socket`, `Listener` and `ConnectedSocket`, with multi-homing (`sctp_bindx`, `sctp_connectx`), peel-off and local/peer address lists of any size
 - **Whole messages** — `sctp_recv` returns a complete message with its sender's address, however many reads the kernel delivers it in, and stays cancel-safe in the middle of one; messages over a per-socket limit, 4 MiB by default, are an `InvalidData` error
-- **Waiting sends** — `sctp_send` waits for room in the send buffer instead of failing with `EWOULDBLOCK`, and never raises `SIGPIPE`
-- **Notifications and ancillary data** — association change and shutdown events, the type and octets of any other notification, `SCTP_RCVINFO` and `SCTP_NXTINFO`, parsed with bounds checks
-- **Socket options** — `SCTP_NODELAY`, `SCTP_RTOINFO`, `SCTP_INITMSG`, `SCTP_STATUS`, default send info, `SO_REUSEADDR` and nonblocking `SO_LINGER`; `AsRawFd` and `AsFd` for any other option
+- **Waiting sends** — owned `sctp_send` and borrowed `send` wait for room in the send buffer instead of failing with `EWOULDBLOCK`, and never raise `SIGPIPE`; `SendOptions` accepts host-order PPIDs
+- **Notifications and ancillary data** — typed association change, shutdown, peer-address change and modern send-failure events; the type and octets of any other notification; `SCTP_RCVINFO` and `SCTP_NXTINFO`, parsed with bounds checks
+- **Socket options** — `SCTP_NODELAY`, `SCTP_RTOINFO`, `SCTP_INITMSG`, `SCTP_STATUS`, heartbeat/path retransmission settings, default send info, `SO_REUSEADDR` and nonblocking `SO_LINGER`; `AsRawFd` and `AsFd` for any other option
 - **Owned descriptors** — sockets own their descriptor, close it after Tokio deregisters it, and are created close-on-exec
 
 ### Changes from sctp-rs 0.3.1
@@ -37,7 +37,7 @@ The [changelog](CHANGELOG.md) has the details.
 oxirush-sctp = "0.1"
 ```
 
-The crate needs Linux 5.0 or later.
+The crate needs Rust 1.85 or later and Linux 5.0 or later.
 
 ## Usage
 
@@ -74,6 +74,58 @@ async fn main() -> std::io::Result<()> {
 cargo run --example pong -- --help
 cargo run --example ping -- --help
 ```
+
+### Send borrowed messages
+
+`send` borrows an existing encoding buffer. Its `SendOptions::ppid` is a logical
+identifier in host byte order; the older `sctp_send`/`SendInfo` API retains its
+wire-order PPID convention.
+
+```rust,no_run
+use oxirush_sctp::{ConnectedSocket, SendOptions};
+
+async fn send_ngap(socket: &ConnectedSocket, encoded_pdu: &[u8]) -> std::io::Result<()> {
+    socket.send(encoded_pdu, SendOptions {
+        stream_id: 1,
+        ppid: 60,
+        ..Default::default()
+    }).await
+}
+```
+
+`sctp_recv` assembles records until the kernel reports `MSG_EOR`, including
+records split across reads or interrupted by cancellation. It assumes
+`SCTP_FRAGMENT_INTERLEAVE` level 0. This receive behavior does not enable the
+RFC's explicit send-EOR mode, which the Linux SCTP API does not provide.
+
+### Manage one-to-many associations
+
+`Listener::sctp_connectx_association` and
+`ConnectedSocket::sctp_connectx_association` initiate additional outgoing
+associations without consuming the endpoint. Subscribe to `Event::Association`
+to learn whether setup succeeds; use the returned ID in `SendOptions::assoc_id`
+or `SendInfo::assoc_id`. Incoming and outgoing associations can share a
+one-to-many listener. On one-to-one sockets, this operation returns
+`EOPNOTSUPP`. `ConnectedSocket::sctp_bindx` also supports local address changes
+on established associations, subject to the kernel's ASCONF policy.
+
+Batch event subscription always attempts every event. Its `io::Error` contains
+an `EventSubscriptionError`; downcast `error.get_ref()` and call `failures()`
+to inspect each failed event and its original errno.
+
+### Observe and configure peer paths
+
+Subscribe to `Event::Address` for `Notification::PeerAddressChange`, and to
+`Event::SendFailureEvent` for `Notification::SendFailure`. Send failures include
+the undelivered payload, stream, wire-order PPID and application context.
+Deprecated or unrecognized notification formats remain available as
+`Notification::Unsupported` with their original bytes.
+
+`peer_address_params` and `set_peer_address_params` expose heartbeat intervals
+and path retransmission limits. Intervals use whole milliseconds; disabling
+heartbeats preserves the kernel's existing interval. `request_heartbeat`
+requests an immediate probe on a selected path. These operations leave PMTU,
+SACK delay and other path settings unchanged.
 
 ### Closing an association
 
@@ -124,7 +176,7 @@ as `Notification::Unsupported` with their type and raw octets.
 | 5.3.9 | no | |
 | 5.3.10 | no | |
 | 6.1.1 | yes | |
-| 6.1.2 | no | |
+| 6.1.2 | yes | `PeerAddressChange` |
 | 6.1.3 | no | |
 | 6.1.4 | N/A | |
 | 6.1.5 | yes | |
@@ -133,7 +185,7 @@ as `Notification::Unsupported` with their type and raw octets.
 | 6.1.8 | no | |
 | 6.1.9 | no | |
 | 6.1.10 | no | |
-| 6.1.11 | no | |
+| 6.1.11 | yes | `SendFailure`; the deprecated format stays available as raw bytes. |
 | 6.2.1 | N/A | |
 | 6.2.2 | yes | |
 | 8.1.1 | yes | |
@@ -147,7 +199,7 @@ as `Notification::Unsupported` with their type and raw octets.
 | 8.1.9 | no | |
 | 8.1.10 | no | |
 | 8.1.11 | no | |
-| 8.1.12 | no | |
+| 8.1.12 | partial | Heartbeat and path retransmission controls; other parameters via `AsFd`. |
 | 8.1.13 | N/A | |
 | 8.1.14 | N/A | |
 | 8.1.15 | no | |
@@ -179,7 +231,7 @@ as `Notification::Unsupported` with their type and raw octets.
 | 8.3.3 | no | |
 | 8.3.4 | no | |
 | 8.3.5 | no | |
-| 9.1 | partial | `Socket::sctp_bindx` and `Listener::sctp_bindx`; connected sockets return `EOPNOTSUPP`. |
+| 9.1 | yes | Available on unconnected, listening and connected sockets. |
 | 9.2 | yes | `Listener::sctp_peeloff` |
 | 9.3 | yes | `sctp_getpaddrs` |
 | 9.4 | N/A | Address lists are owned Rust vectors. See Note 3. |
@@ -205,6 +257,12 @@ cargo test
 ```
 
 The tests open SCTP associations over loopback, so the kernel's `sctp` module must be available. The connect-timeout test needs `unshare` and `ip`, and the 4 MiB message tests need `net.core.wmem_max` and `net.core.rmem_max` large enough; each skips otherwise. Sender errors in the receive-limit tests fail immediately, and a timeout bounds the send/receive pair.
+
+`src/internal.rs` handles Tokio readiness and descriptor ownership.
+`src/internal/sys.rs` contains synchronous socket operations and the Linux ABI
+boundary, using borrowed descriptors. `src/internal/receive.rs` assembles whole
+records directly into their receive buffers; deterministic tests exercise
+partial delivery, interruption, cancellation boundaries and size limits.
 
 ## Documentation
 

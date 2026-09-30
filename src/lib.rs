@@ -72,7 +72,8 @@ mod types;
 #[doc(inline)]
 pub use types::{
     AssocChangeState, AssociationChange, AssociationId, BindxFlags, CmsgType, ConnState,
-    ConnStatus, Event, Notification, NotificationOrData, NxtInfo, PeerAddress, RcvInfo,
-    ReceivedData, RtoInfo, SendData, SendInfo, Shutdown, SocketToAssociation,
+    ConnStatus, Event, EventSubscriptionError, Notification, NotificationOrData, NxtInfo,
+    PeerAddress, PeerAddressChange, PeerAddressParams, PeerAddressState, RcvInfo, ReceivedData,
+    RtoInfo, SendData, SendFailure, SendInfo, SendOptions, Shutdown, SocketToAssociation,
     SubscribeEventAssocId,
 };
