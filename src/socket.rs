@@ -6,8 +6,8 @@ use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use tokio::io::unix::AsyncFd;
 
 use crate::{
-    AssociationId, BindxFlags, ConnStatus, ConnectedSocket, Event, Listener, RtoInfo,
-    SocketToAssociation, SubscribeEventAssocId,
+    AssociationId, BindxFlags, ConnStatus, ConnectedSocket, Event, Listener, PeerAddressParams,
+    RtoInfo, SocketToAssociation, SubscribeEventAssocId,
 };
 
 #[allow(unused)]
@@ -64,7 +64,8 @@ impl Socket {
     /// This successful operation  returns [`Listener`] consuming this structure. The `backlog`
     /// parameter determines the length of the listen queue.
     pub fn listen(self, backlog: i32) -> std::io::Result<Listener> {
-        sctp_listen_internal(self.inner, backlog)
+        sctp_listen_internal(self.inner.as_fd(), backlog)?;
+        Ok(Listener::from_async_fd(self.inner))
     }
 
     /// Connect to SCTP Server.
@@ -88,7 +89,7 @@ impl Socket {
     /// for more details about the semantics of which addresses are acceptable for addition or
     /// removoal using the `sctp_bindx` API.
     pub fn sctp_bindx(&self, addrs: &[SocketAddr], flags: BindxFlags) -> std::io::Result<()> {
-        sctp_bindx_internal(&self.inner, addrs, flags)
+        sctp_bindx_internal(self.inner.as_fd(), addrs, flags)
     }
 
     /// Connect to a multi-homed Peer. See Section 9.9 RFC 6458
@@ -121,7 +122,7 @@ impl Socket {
         event: Event,
         assoc_id: SubscribeEventAssocId,
     ) -> std::io::Result<()> {
-        sctp_subscribe_event_internal(&self.inner, event, assoc_id, true)
+        sctp_subscribe_event_internal(self.inner.as_fd(), event, assoc_id, true)
     }
 
     /// Unsubscribe from a given SCTP Event on the given socket. See section 6.2.1 of RFC6458.
@@ -133,32 +134,20 @@ impl Socket {
         event: Event,
         assoc_id: SubscribeEventAssocId,
     ) -> std::io::Result<()> {
-        sctp_subscribe_event_internal(&self.inner, event, assoc_id, false)
+        sctp_subscribe_event_internal(self.inner.as_fd(), event, assoc_id, false)
     }
 
     /// Subscribe to SCTP Events. See section 6.2.1 of RFC6458.
     ///
     /// SCTP allows receiving notifications about the changes to SCTP associations etc from the
-    /// user space. For these notification events to be received, this API is used to subsribe for
-    /// the events while receiving the data on the SCTP Socket.
+    /// user space. Every event is attempted; on failure the error contains
+    /// [`EventSubscriptionError`][crate::EventSubscriptionError] with the failed events and errno values.
     pub fn sctp_subscribe_events(
         &self,
         events: &[Event],
         assoc_id: SubscribeEventAssocId,
     ) -> std::io::Result<()> {
-        let mut failures = vec![];
-        for ev in events {
-            let result = sctp_subscribe_event_internal(&self.inner, ev.clone(), assoc_id, true);
-            if result.is_err() {
-                failures.push(result.err().unwrap());
-            }
-        }
-
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(std::io::Error::other(format!("{:?}", failures)))
-        }
+        sctp_subscribe_events_internal(self.inner.as_fd(), events, assoc_id, true)
     }
 
     /// Unsubscribe from a given SCTP Event on the given socket. See section 6.2.1 of RFC6458.
@@ -169,19 +158,7 @@ impl Socket {
         events: &[Event],
         assoc_id: SubscribeEventAssocId,
     ) -> std::io::Result<()> {
-        let mut failures = vec![];
-        for ev in events {
-            let result = sctp_subscribe_event_internal(&self.inner, ev.clone(), assoc_id, false);
-            if result.is_err() {
-                failures.push(result.err().unwrap());
-            }
-        }
-
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(std::io::Error::other(format!("{:?}", failures)))
-        }
+        sctp_subscribe_events_internal(self.inner.as_fd(), events, assoc_id, false)
     }
 
     /// Setup parameters for a new association.
@@ -194,7 +171,7 @@ impl Socket {
         retries: u16,
         timeout: u16,
     ) -> std::io::Result<()> {
-        sctp_setup_init_params_internal(&self.inner, ostreams, istreams, retries, timeout)
+        sctp_setup_init_params_internal(self.inner.as_fd(), ostreams, istreams, retries, timeout)
     }
 
     /// Request to receive `RcvInfo` ancillary data.
@@ -202,7 +179,7 @@ impl Socket {
     /// SCTP allows receiving ancillary data about the curent data received on the given socket.
     /// This API is used to obtain receive side additional info when the data is to be received.
     pub fn sctp_request_rcvinfo(&self, on: bool) -> std::io::Result<()> {
-        request_rcvinfo_internal(&self.inner, on)
+        request_rcvinfo_internal(self.inner.as_fd(), on)
     }
 
     /// Request to receive `NxtInfo` ancillary data.
@@ -210,12 +187,12 @@ impl Socket {
     /// SCTP allows receiving ancillary data about the curent data received on the given socket.
     /// This API is used to obtain information about the next datagram that will be received.
     pub fn sctp_request_nxtinfo(&self, on: bool) -> std::io::Result<()> {
-        request_nxtinfo_internal(&self.inner, on)
+        request_nxtinfo_internal(self.inner.as_fd(), on)
     }
 
     /// Get the status of the connection associated with the association ID.
     pub fn sctp_get_status(&self, assoc_id: AssociationId) -> std::io::Result<ConnStatus> {
-        sctp_get_status_internal(&self.inner, assoc_id)
+        sctp_get_status_internal(self.inner.as_fd(), assoc_id)
     }
 
     /// Enables or disables `SCTP_NODELAY` (Section 8.1.5 of RFC 6458).
@@ -227,24 +204,24 @@ impl Socket {
     ///
     /// On Linux, sockets accepted from a listening socket or peeled off it inherit its setting.
     pub fn set_nodelay(&self, nodelay: bool) -> std::io::Result<()> {
-        sctp_set_nodelay_internal(&self.inner, nodelay)
+        sctp_set_nodelay_internal(self.inner.as_fd(), nodelay)
     }
 
     /// Whether `SCTP_NODELAY` is set. See [`set_nodelay`][Self::set_nodelay].
     pub fn nodelay(&self) -> std::io::Result<bool> {
-        sctp_nodelay_internal(&self.inner)
+        sctp_nodelay_internal(self.inner.as_fd())
     }
 
     /// Set the retransmission timeout parameters (`SCTP_RTOINFO`, Section 8.1.1 of RFC 6458) of
     /// the association `rto_info.assoc_id`, or with 0 the defaults of the socket.
     pub fn sctp_set_rto_info(&self, rto_info: RtoInfo) -> std::io::Result<()> {
-        sctp_set_rto_info_internal(&self.inner, rto_info)
+        sctp_set_rto_info_internal(self.inner.as_fd(), rto_info)
     }
 
     /// Get the retransmission timeout parameters of the association `assoc_id`, or with 0 the
     /// defaults of the socket. See [`sctp_set_rto_info`][Self::sctp_set_rto_info].
     pub fn sctp_get_rto_info(&self, assoc_id: AssociationId) -> std::io::Result<RtoInfo> {
-        sctp_get_rto_info_internal(&self.inner, assoc_id)
+        sctp_get_rto_info_internal(self.inner.as_fd(), assoc_id)
     }
 
     /// Enables or disables `SO_REUSEADDR`, before [`bind`][Self::bind].
@@ -253,12 +230,34 @@ impl Socket {
     /// as long as none of them listens, e.g. while the associations of a previous instance of a
     /// server are still shutting down.
     pub fn set_reuseaddr(&self, reuseaddr: bool) -> std::io::Result<()> {
-        set_reuseaddr_internal(&self.inner, reuseaddr)
+        set_reuseaddr_internal(self.inner.as_fd(), reuseaddr)
     }
 
     /// Whether `SO_REUSEADDR` is set. See [`set_reuseaddr`][Self::set_reuseaddr].
     pub fn reuseaddr(&self) -> std::io::Result<bool> {
-        reuseaddr_internal(&self.inner)
+        reuseaddr_internal(self.inner.as_fd())
+    }
+    /// Get heartbeat and retransmission settings for a peer path or socket defaults.
+    pub fn peer_address_params(
+        &self,
+        assoc_id: AssociationId,
+        address: SocketAddr,
+    ) -> std::io::Result<PeerAddressParams> {
+        peer_address_params_internal(self.inner.as_fd(), assoc_id, address)
+    }
+
+    /// Set heartbeat and path retransmission settings, leaving other path settings unchanged.
+    pub fn set_peer_address_params(&self, params: PeerAddressParams) -> std::io::Result<()> {
+        set_peer_address_params_internal(self.inner.as_fd(), params)
+    }
+
+    /// Request an immediate heartbeat on the specified path.
+    pub fn request_heartbeat(
+        &self,
+        assoc_id: AssociationId,
+        address: SocketAddr,
+    ) -> std::io::Result<()> {
+        request_heartbeat_internal(self.inner.as_fd(), assoc_id, address)
     }
 }
 

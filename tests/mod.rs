@@ -1,10 +1,7 @@
 #![cfg(test)]
 
-static TEST_PORT_NO: AtomicU16 = AtomicU16::new(8080);
-
 use oxirush_sctp::{Listener, Socket, SocketToAssociation};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU16, Ordering};
 
 fn create_socket_bind_and_listen(
     association: SocketToAssociation,
@@ -18,8 +15,7 @@ fn create_socket_bind_and_listen(
     assert!(sctp_socket.is_ok(), "{:#?}", sctp_socket.err().unwrap());
     let sctp_socket = sctp_socket.unwrap();
 
-    let port = TEST_PORT_NO.fetch_add(1, Ordering::SeqCst);
-    let bindaddr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+    let mut bindaddr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
     let result = sctp_socket.bind(bindaddr);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
@@ -27,7 +23,9 @@ fn create_socket_bind_and_listen(
     let listener = sctp_socket.listen(10);
     assert!(listener.is_ok(), "{:#?}", listener.err().unwrap());
 
-    (listener.unwrap(), bindaddr)
+    let listener = listener.unwrap();
+    bindaddr.set_port(listener.sctp_getladdrs(0).unwrap()[0].port());
+    (listener, bindaddr)
 }
 
 fn create_client_socket(association: SocketToAssociation, v4: bool) -> Socket {

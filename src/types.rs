@@ -65,6 +65,92 @@ pub struct SendData {
     pub snd_info: Option<SendInfo>,
 }
 
+/// Options for sending a borrowed message with [`ConnectedSocket::send`][crate::ConnectedSocket::send]
+/// or [`Listener::send`][crate::Listener::send].
+///
+/// Unlike the low-level [`SendInfo`], `ppid` uses host byte order; conversion happens once when
+/// the message is sent. Defaults select ordered delivery on stream 0 with PPID 0.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SendOptions {
+    /// Outbound stream identifier.
+    pub stream_id: u16,
+    /// Payload protocol identifier in host byte order, e.g. 60 for NGAP.
+    pub ppid: u32,
+    /// Deliver without ordering relative to other messages on the stream.
+    pub unordered: bool,
+    /// Application context returned in send-failure notifications.
+    pub context: u32,
+    /// Destination association on a one-to-many socket; ignored on one-to-one sockets.
+    pub assoc_id: AssociationId,
+}
+
+impl SendOptions {
+    pub(crate) fn wire_info(self) -> SendInfo {
+        SendInfo {
+            sid: self.stream_id,
+            flags: u16::from(self.unordered),
+            ppid: self.ppid.to_be(),
+            context: self.context,
+            assoc_id: self.assoc_id,
+        }
+    }
+}
+
+/// Failures from a batch event subscription or unsubscription.
+///
+/// Every requested event is attempted. The returned [`std::io::Error`] has kind `Other` and
+/// contains this value; use `error.get_ref().and_then(|source| source.downcast_ref::<Self>())`
+/// to inspect each event and its original kernel error. Its error source is the first failure.
+#[derive(Debug)]
+pub struct EventSubscriptionError {
+    pub(crate) failures: Vec<(Event, std::io::Error)>,
+}
+
+impl EventSubscriptionError {
+    /// Failed events, in request order, with their original errors and errno values.
+    pub fn failures(&self) -> &[(Event, std::io::Error)] {
+        &self.failures
+    }
+}
+
+impl std::fmt::Display for EventSubscriptionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, (event, error)) in self.failures.iter().enumerate() {
+            if index != 0 {
+                f.write_str("; ")?;
+            }
+            write!(f, "{:?}: {}", event, error)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for EventSubscriptionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.failures.first().map(|(_, error)| error as _)
+    }
+}
+
+/// Heartbeat and failure-detection settings for one destination path (`SCTP_PEER_ADDR_PARAMS`).
+///
+/// Times are in milliseconds. Setting these fields leaves PMTU discovery, SACK delay and other
+/// Linux path settings unchanged. Association 0 selects socket defaults; an unspecified address
+/// applies to all paths of the selected association (RFC 6458, Section 8.1.12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerAddressParams {
+    /// Association to query or change; ignored on one-to-one sockets.
+    pub assoc_id: AssociationId,
+    /// Peer path, or an unspecified address for defaults/all paths.
+    pub address: std::net::SocketAddr,
+    /// Whether periodic heartbeats are enabled on the path.
+    pub heartbeat_enabled: bool,
+    /// Interval between heartbeats, applied only when enabling them. Disabling leaves the
+    /// previous interval unchanged. Zero explicitly selects zero rather than leaving it unchanged.
+    pub heartbeat_interval: std::time::Duration,
+    /// Path retransmission limit; zero leaves the kernel value unchanged when setting.
+    pub path_max_retrans: u16,
+}
+
 /// Structure representing Ancilliary Send Information (See Section 5.3.4 of RFC 6458)
 #[repr(C)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -169,8 +255,14 @@ pub enum Notification {
     /// Shutdown Notification. See Section 6.1.5 of RFC 6458.
     Shutdown(Shutdown),
 
-    /// A notification this crate does not parse, such as a peer address change, a send failure,
-    /// a remote error or sender dry (Section 6.1 of RFC 6458), or one too short for its type.
+    /// Peer path status changed. Subscribe to [`Event::Address`].
+    PeerAddressChange(PeerAddressChange),
+
+    /// A message could not be delivered. Subscribe to [`Event::SendFailureEvent`].
+    SendFailure(SendFailure),
+
+    /// A notification this crate does not parse, such as the deprecated send-failure format,
+    /// a remote error or sender dry (Section 6.1 of RFC 6458), or one malformed for its type.
     Unsupported {
         /// Type of the notification, [`Event::Unknown`] for a type this crate does not know or a
         /// notification too short to have one.
@@ -179,6 +271,73 @@ pub enum Notification {
         /// The notification as the kernel delivered it, header included, in host byte order.
         data: Vec<u8>,
     },
+}
+
+/// Status reported by a peer-address-change notification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PeerAddressState {
+    /// The path is reachable.
+    Available,
+    /// The path is unreachable after its retransmission limit.
+    Unreachable,
+    /// The address was removed from the association.
+    Removed,
+    /// The address was added to the association.
+    Added,
+    /// The address became the primary path.
+    MadePrimary,
+    /// The address was confirmed reachable.
+    Confirmed,
+    /// Linux marked the path potentially failed.
+    PotentiallyFailed,
+    /// A state unknown to this crate; its kernel value is preserved.
+    Unknown(i32),
+}
+
+impl PeerAddressState {
+    pub(crate) fn from_i32(state: i32) -> Self {
+        match state {
+            0 => Self::Available,
+            1 => Self::Unreachable,
+            2 => Self::Removed,
+            3 => Self::Added,
+            4 => Self::MadePrimary,
+            5 => Self::Confirmed,
+            6 => Self::PotentiallyFailed,
+            value => Self::Unknown(value),
+        }
+    }
+}
+
+/// A peer path change (`SCTP_PEER_ADDR_CHANGE`, RFC 6458 Section 6.1.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerAddressChange {
+    /// Notification flags as delivered by the kernel.
+    pub flags: u16,
+    /// The affected peer address.
+    pub address: std::net::SocketAddr,
+    /// New path state, including unrecognized kernel values.
+    pub state: PeerAddressState,
+    /// Kernel error code associated with this change.
+    pub error: i32,
+    /// Association whose path changed.
+    pub assoc_id: AssociationId,
+}
+
+/// A modern send failure (`SCTP_SEND_FAILED_EVENT`, RFC 6458 Section 6.1.11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendFailure {
+    /// Kernel flags: 0 means never sent, 1 means transmitted without confirmed delivery.
+    pub flags: u16,
+    /// Kernel error associated with the failed send.
+    pub error: u32,
+    /// Original send metadata. PPID keeps the wire-order semantics of [`SendInfo`].
+    pub snd_info: SendInfo,
+    /// Association whose message failed; can be 0 if establishment failed before an ID was assigned.
+    pub assoc_id: AssociationId,
+    /// Undelivered message bytes returned by the kernel.
+    pub payload: Vec<u8>,
 }
 
 /// AssociationChange: Structure returned as notification for Association Change.

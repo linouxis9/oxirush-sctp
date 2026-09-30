@@ -15,7 +15,7 @@ jobs:
     name: ( Linux Build ${{ matrix.cfg_release_channel }})
     strategy:
       matrix:
-        cfg_release_channel: [ nightly, stable]
+        cfg_release_channel: [ "1.85.0", nightly, stable]
 
     steps:
     - uses: actions/checkout@v3

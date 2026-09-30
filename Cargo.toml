@@ -2,6 +2,7 @@
 name = "oxirush-sctp"
 version = "0.1.0"
 edition = "2018"
+rust-version = "1.85"
 description = "Idiomatic async Rust APIs for the Linux SCTP stack (a maintained fork of sctp-rs)"
 authors = [ "Abhijit Gadgil <gabhijit@iitbombay.org>"]
 categories = ["network-programming", "asynchronous"]

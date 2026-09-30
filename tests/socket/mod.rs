@@ -304,13 +304,28 @@ async fn test_bindx_inaddr_any_add_and_remove_failure() {
     let bindaddr6_localhost = Ipv6Addr::LOCALHOST;
 
     let result = sctp_socket.sctp_bindx(
-        &[SocketAddr::new(IpAddr::V6(bindaddr6_localhost), 8080)],
+        &[SocketAddr::new(IpAddr::V6(bindaddr6_localhost), 0)],
         BindxFlags::Add,
     );
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
+    let mut address: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of_val(&address) as libc::socklen_t;
+    // Safety: both output buffers are valid for the stated sizes.
+    assert_eq!(
+        unsafe {
+            libc::getsockname(
+                std::os::fd::AsRawFd::as_raw_fd(&sctp_socket),
+                &mut address as *mut _ as *mut libc::sockaddr,
+                &mut len,
+            )
+        },
+        0
+    );
+    let port = u16::from_be(address.sin6_port);
+
     let result = sctp_socket.sctp_bindx(
-        &[SocketAddr::new(IpAddr::V6(bindaddr6_localhost), 8080)],
+        &[SocketAddr::new(IpAddr::V6(bindaddr6_localhost), port)],
         BindxFlags::Remove,
     );
     assert!(result.is_err(), "{:#?}", result.ok().unwrap());
