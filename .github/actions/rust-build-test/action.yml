@@ -2,7 +2,7 @@ name: "RustBuildTest"
 description: 'Using Rustup build for the passed channel. Sets up the channel on the given runner.'
 inputs:
   target:
-    descritption: 'Rust target to use - one of `x86_64-apple-darwin` or `x86_64-unknown-linux-gnu`'
+    description: 'Rust target to use - one of `x86_64-apple-darwin` or `x86_64-unknown-linux-gnu`'
     default: 'x86_64-unknown-linux-gnu'
   channel:
     description: 'Channel to use for this particular action, nightly, stable or beta'
@@ -21,6 +21,12 @@ runs:
         cargo -V
         cargo build --verbose
         cargo build --release --verbose
+      shell: bash
+    - name: Prepare Linux SCTP tests
+      if: inputs.target == 'x86_64-unknown-linux-gnu'
+      run: |
+        sudo modprobe sctp
+        sudo sysctl -w net.core.wmem_max=8388608 net.core.rmem_max=8388608
       shell: bash
     - run: |
         rustc -Vv
