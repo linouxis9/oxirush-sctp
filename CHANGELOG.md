@@ -28,6 +28,10 @@ sctp-rs 0.3 needs the new crate name and the three changes under
   `MSG_NOSIGNAL`, so a closed association no longer raises `SIGPIPE`.
 - A failed connect reports the kernel's error from `SO_ERROR`
   (`ETIMEDOUT`, `EHOSTUNREACH`, …) instead of always `ECONNREFUSED`.
+- Connect waits for an established association without consuming queued
+  notifications; receive reports peer aborts even without event subscriptions.
+- Partial deliveries are bounded by the receive limit and checked for
+  consistent association, stream and sender metadata before reassembly.
 - The `connect` and `sctp_connectx` futures are `Send`.
 - `sctp_getladdrs` and `sctp_getpaddrs` grow their buffer as needed
   (0.3.1 failed with `ENOMEM` beyond 15 IPv4 or 8 IPv6 addresses) and
@@ -44,7 +48,8 @@ sctp-rs 0.3 needs the new crate name and the three changes under
   and `ConnectedSocket`. Accepted and peeled-off sockets inherit the
   option from their listener.
 - `ConnectedSocket::set_linger` (`SO_LINGER`): with zero, dropping the
-  socket aborts its association.
+  socket aborts its association. `None` selects graceful shutdown; positive
+  durations return `InvalidInput` because close must not block Tokio.
 - `sctp_set_rto_info` and `sctp_get_rto_info` (`SCTP_RTOINFO`) with the
   `RtoInfo` type, and `Socket::set_reuseaddr` and `reuseaddr`.
 - `AsRawFd` and `AsFd` for `Socket`, `Listener` and `ConnectedSocket`.
