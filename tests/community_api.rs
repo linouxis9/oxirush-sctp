@@ -29,6 +29,7 @@ async fn subscription_failure_retains_kernel_source_and_attempts_later_events() 
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     assert!(!event_enabled(&socket, Event::Association));
     let error = socket
+        .options()
         .sctp_subscribe_events(
             &[Event::Unknown, Event::Association],
             SubscribeEventAssocId::All,
@@ -50,6 +51,7 @@ async fn subscription_failure_retains_kernel_source_and_attempts_later_events() 
     assert_eq!(failures[0].0, Event::Unknown);
     assert_eq!(failures[0].1.raw_os_error(), Some(libc::EINVAL));
     let error = socket
+        .options()
         .sctp_unsubscribe_events(
             &[Event::Unknown, Event::Association],
             SubscribeEventAssocId::All,
@@ -72,13 +74,13 @@ async fn subscription_failure_retains_kernel_source_and_attempts_later_events() 
 fn server() -> Listener {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    socket.sctp_request_rcvinfo(true).unwrap();
+    socket.options().sctp_request_rcvinfo(true).unwrap();
     socket.listen(2).unwrap()
 }
 
 async fn expect_message(receiver: &ConnectedSocket, expected: &[u8], ppid: u32) {
     let NotificationOrData::Data(data) =
-        tokio::time::timeout(std::time::Duration::from_secs(2), receiver.sctp_recv())
+        tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
             .await
             .unwrap()
             .unwrap()
@@ -117,7 +119,7 @@ async fn borrowed_send_converts_host_ppid_without_changing_legacy_wire_order() {
     expect_message(&peer, payload, 60).await;
     // Existing SendInfo continues to accept an already-converted wire-order PPID.
     client
-        .sctp_send(SendData {
+        .send_data(SendData {
             payload: payload.to_vec(),
             snd_info: Some(SendInfo {
                 sid: 2,
@@ -136,21 +138,17 @@ async fn one_to_many_connected_endpoint_can_connect_another_peer() {
     let a = server();
     let b = server();
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
-    let (client, assoc_a) = socket
-        .connect(a.sctp_getladdrs(0).unwrap()[0])
-        .await
-        .unwrap();
+    let client = socket.into_endpoint(2).unwrap();
+    let assoc_a = client.connect(&[a.sctp_getladdrs(0).unwrap()[0]]).unwrap();
     let (peer_a, _) = a.accept().await.unwrap();
-    let assoc_b = client
-        .sctp_connectx_association(&[b.sctp_getladdrs(0).unwrap()[0]])
-        .unwrap();
+    let assoc_b = client.connect(&[b.sctp_getladdrs(0).unwrap()[0]]).unwrap();
     let (peer_b, _) = tokio::time::timeout(std::time::Duration::from_secs(2), b.accept())
         .await
         .unwrap()
         .unwrap();
     assert_ne!(assoc_a, assoc_b);
     assert_eq!(
-        client.sctp_connectx_association(&[]).unwrap_err().kind(),
+        client.connect(&[]).unwrap_err().kind(),
         std::io::ErrorKind::InvalidInput
     );
     for (assoc_id, payload, peer) in [
@@ -188,9 +186,7 @@ async fn one_to_many_connected_endpoint_can_connect_another_peer() {
         .unwrap();
     expect_message(&peer_b, b"still B", 60).await;
     let c = server();
-    let assoc_c = client
-        .sctp_connectx_association(&[c.sctp_getladdrs(0).unwrap()[0]])
-        .unwrap();
+    let assoc_c = client.connect(&[c.sctp_getladdrs(0).unwrap()[0]]).unwrap();
     let (peer_c, _) = tokio::time::timeout(std::time::Duration::from_secs(2), c.accept())
         .await
         .unwrap()
@@ -212,16 +208,16 @@ async fn one_to_many_connected_endpoint_can_connect_another_peer() {
 }
 
 #[tokio::test]
-async fn one_to_many_listener_can_initiate_multiple_outgoing_associations() {
+async fn one_to_many_endpoint_can_initiate_multiple_outgoing_associations() {
     let a = server();
     let b = server();
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let client = socket.listen(2).unwrap();
+    let client = socket.into_endpoint(2).unwrap();
     let addr_a = a.sctp_getladdrs(0).unwrap()[0];
     let addr_b = b.sctp_getladdrs(0).unwrap()[0];
-    let assoc_a = client.sctp_connectx_association(&[addr_a]).unwrap();
-    let assoc_b = client.sctp_connectx_association(&[addr_b]).unwrap();
+    let assoc_a = client.connect(&[addr_a]).unwrap();
+    let assoc_b = client.connect(&[addr_b]).unwrap();
     assert_ne!(assoc_a, assoc_b);
     let (peer_a, _) = tokio::time::timeout(std::time::Duration::from_secs(2), a.accept())
         .await
@@ -236,7 +232,7 @@ async fn one_to_many_listener_can_initiate_multiple_outgoing_associations() {
         (addr_b, assoc_b, b"peer B".as_slice(), &peer_b),
     ] {
         client
-            .send(
+            .send_to(
                 address,
                 payload,
                 SendOptions {
@@ -251,42 +247,58 @@ async fn one_to_many_listener_can_initiate_multiple_outgoing_associations() {
             .unwrap();
         expect_message(peer, payload, 18).await;
     }
-    assert_eq!(
-        a.sctp_connectx_association(&[addr_b])
-            .unwrap_err()
-            .raw_os_error(),
-        Some(libc::EOPNOTSUPP)
-    );
 }
 
 #[tokio::test]
 async fn heartbeat_and_path_settings_roundtrip_on_defaults_and_established_paths() {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     let defaults: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
-    let mut params = socket.peer_address_params(0, defaults).unwrap();
+    let mut params = socket.options().peer_address_params(0, defaults).unwrap();
     params.heartbeat_interval = std::time::Duration::from_millis(1500);
     params.heartbeat_enabled = true;
     params.path_max_retrans = 3;
-    socket.set_peer_address_params(params.clone()).unwrap();
-    assert_eq!(socket.peer_address_params(0, defaults).unwrap(), params);
+    socket
+        .options()
+        .set_peer_address_params(params.clone())
+        .unwrap();
+    assert_eq!(
+        socket.options().peer_address_params(0, defaults).unwrap(),
+        params
+    );
     params.heartbeat_enabled = false;
-    socket.set_peer_address_params(params.clone()).unwrap();
-    assert_eq!(socket.peer_address_params(0, defaults).unwrap(), params);
+    socket
+        .options()
+        .set_peer_address_params(params.clone())
+        .unwrap();
+    assert_eq!(
+        socket.options().peer_address_params(0, defaults).unwrap(),
+        params
+    );
     let server = server();
     let address = server.sctp_getladdrs(0).unwrap()[0];
     let (client, _) = socket.connect(address).await.unwrap();
     let (_peer, _) = server.accept().await.unwrap();
-    let mut params = client.peer_address_params(0, address).unwrap();
+    let mut params = client.options().peer_address_params(0, address).unwrap();
     assert!(!params.heartbeat_enabled);
     assert_eq!(params.path_max_retrans, 3);
     params.heartbeat_enabled = true;
     params.heartbeat_interval = std::time::Duration::from_millis(1000);
-    client.set_peer_address_params(params.clone()).unwrap();
-    assert_eq!(client.peer_address_params(0, address).unwrap(), params);
-    client.request_heartbeat(0, address).unwrap();
+    client
+        .options()
+        .set_peer_address_params(params.clone())
+        .unwrap();
+    assert_eq!(
+        client.options().peer_address_params(0, address).unwrap(),
+        params
+    );
+    client.options().request_heartbeat(0, address).unwrap();
     params.heartbeat_interval = std::time::Duration::from_nanos(1);
     assert_eq!(
-        client.set_peer_address_params(params).unwrap_err().kind(),
+        client
+            .options()
+            .set_peer_address_params(params)
+            .unwrap_err()
+            .kind(),
         std::io::ErrorKind::InvalidInput
     );
 }
@@ -313,11 +325,12 @@ async fn send_failure_notification_preserves_payload_and_metadata() {
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], u16::from_be(address.sin_port)));
     let client = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     client
+        .options()
         .sctp_subscribe_events(&[Event::SendFailureEvent], SubscribeEventAssocId::All)
         .unwrap();
-    let client = client.listen(1).unwrap();
+    let client = client.into_endpoint(1).unwrap();
     client
-        .send(
+        .send_to(
             address,
             b"undelivered",
             SendOptions {
@@ -330,7 +343,7 @@ async fn send_failure_notification_preserves_payload_and_metadata() {
         .await
         .unwrap();
     let NotificationOrData::Notification(Notification::SendFailure(failure)) =
-        tokio::time::timeout(std::time::Duration::from_secs(2), client.sctp_recv())
+        tokio::time::timeout(std::time::Duration::from_secs(2), client.recv())
             .await
             .unwrap()
             .unwrap()
@@ -347,7 +360,7 @@ async fn send_failure_notification_preserves_payload_and_metadata() {
 async fn read_fifty(socket: std::sync::Arc<ConnectedSocket>) -> Vec<u32> {
     let mut ids = Vec::new();
     for _ in 0..50 {
-        let NotificationOrData::Data(data) = socket.sctp_recv().await.unwrap() else {
+        let NotificationOrData::Data(data) = socket.recv().await.unwrap() else {
             panic!("unexpected notification");
         };
         let id = u32::from_be_bytes(data.payload[..4].try_into().unwrap());
@@ -363,7 +376,7 @@ async fn read_fifty(socket: std::sync::Arc<ConnectedSocket>) -> Vec<u32> {
 async fn concurrent_receivers_preserve_record_boundaries_and_streams() {
     let server = server();
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-    socket.set_nodelay(true).unwrap();
+    socket.options().set_nodelay(true).unwrap();
     let (sender, _) = socket
         .connect(server.sctp_getladdrs(0).unwrap()[0])
         .await
@@ -404,7 +417,7 @@ async fn concurrent_receivers_preserve_record_boundaries_and_streams() {
 async fn ipv6_borrowed_send_and_path_controls_preserve_native_addresses() {
     let server = Socket::new_v6(SocketToAssociation::OneToOne).unwrap();
     server.bind("[::1]:0".parse().unwrap()).unwrap();
-    server.sctp_request_rcvinfo(true).unwrap();
+    server.options().sctp_request_rcvinfo(true).unwrap();
     let server = server.listen(1).unwrap();
     let address = server.sctp_getladdrs(0).unwrap()[0];
     assert!(address.is_ipv6());
@@ -412,13 +425,19 @@ async fn ipv6_borrowed_send_and_path_controls_preserve_native_addresses() {
     let (client, _) = socket.connect(address).await.unwrap();
     let (peer, accepted_address) = server.accept().await.unwrap();
     assert!(accepted_address.is_ipv6());
-    let mut params = client.peer_address_params(0, address).unwrap();
+    let mut params = client.options().peer_address_params(0, address).unwrap();
     params.heartbeat_enabled = true;
     params.heartbeat_interval = std::time::Duration::from_millis(1000);
     params.path_max_retrans = 3;
-    client.set_peer_address_params(params.clone()).unwrap();
-    assert_eq!(client.peer_address_params(0, address).unwrap(), params);
-    client.request_heartbeat(0, address).unwrap();
+    client
+        .options()
+        .set_peer_address_params(params.clone())
+        .unwrap();
+    assert_eq!(
+        client.options().peer_address_params(0, address).unwrap(),
+        params
+    );
+    client.options().request_heartbeat(0, address).unwrap();
     client
         .send(
             b"ipv6",

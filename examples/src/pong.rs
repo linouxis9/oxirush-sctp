@@ -29,7 +29,7 @@ async fn main() -> std::io::Result<()> {
     let (accepted, _client_address) = server_socket.accept().await?;
 
     loop {
-        let received = accepted.sctp_recv().await?;
+        let received = accepted.recv().await?;
         if let oxirush_sctp::NotificationOrData::Data(data) = received {
             eprintln!("received: {:#?}", data);
             if data.payload.is_empty() {
@@ -40,7 +40,7 @@ async fn main() -> std::io::Result<()> {
                 payload: response.as_bytes().to_vec(),
                 snd_info: None,
             };
-            accepted.sctp_send(send_data).await?;
+            accepted.send_data(send_data).await?;
         }
     }
 

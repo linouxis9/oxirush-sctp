@@ -16,7 +16,7 @@ async fn connected_default_sendinfo_success() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
 
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let result = client_socket.sctp_request_rcvinfo(true);
+    let result = client_socket.options().sctp_request_rcvinfo(true);
     assert!(result.is_ok(), "{:?}", result.err().unwrap());
 
     let result = client_socket.sctp_connectx(&[bindaddr]).await;
@@ -39,17 +39,17 @@ async fn connected_default_sendinfo_success() {
         context: 0,
     };
 
-    let result = accepted.sctp_set_default_sendinfo(sendinfo);
+    let result = accepted.options().sctp_set_default_sendinfo(sendinfo);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
     let senddata = SendData {
         payload: b"hello world!".to_vec(),
         snd_info: None,
     };
-    let result = accepted.sctp_send(senddata.clone()).await;
+    let result = accepted.send_data(senddata.clone()).await;
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
-    let result = connected.sctp_recv().await;
+    let result = connected.recv().await;
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
     let data = result.unwrap();
     assert!(
@@ -98,7 +98,7 @@ async fn connected_send_some_sendinfo_success() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
 
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let result = client_socket.sctp_request_rcvinfo(true);
+    let result = client_socket.options().sctp_request_rcvinfo(true);
     assert!(result.is_ok(), "{:?}", result.err().unwrap());
 
     let result = client_socket.sctp_connectx(&[bindaddr]).await;
@@ -125,10 +125,10 @@ async fn connected_send_some_sendinfo_success() {
         payload: b"hello world!".to_vec(),
         snd_info: Some(snd_info),
     };
-    let result = accepted.sctp_send(senddata).await;
+    let result = accepted.send_data(senddata).await;
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
-    let result = connected.sctp_recv().await;
+    let result = connected.recv().await;
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
     let data = result.unwrap();
     assert!(
@@ -176,13 +176,15 @@ async fn test_shutdown_event() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
 
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let result = client_socket.sctp_request_rcvinfo(true);
+    let result = client_socket.options().sctp_request_rcvinfo(true);
     assert!(result.is_ok(), "{:?}", result.err().unwrap());
 
     let result = client_socket.sctp_connectx(&[bindaddr]).await;
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
     let (connected, client_assoc_id) = result.unwrap();
-    let result = connected.sctp_subscribe_events(&[Event::Shutdown], SubscribeEventAssocId::All);
+    let result = connected
+        .options()
+        .sctp_subscribe_events(&[Event::Shutdown], SubscribeEventAssocId::All);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
     let accept = listener.accept().await;
@@ -192,7 +194,7 @@ async fn test_shutdown_event() {
     // drop the connected socket, so that should generate shutdown event.
     drop(accepted);
 
-    let result = connected.sctp_recv().await;
+    let result = connected.recv().await;
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
     let data = result.unwrap();
     assert!(
@@ -223,6 +225,7 @@ async fn a_zero_linger_aborts_the_association_on_close() {
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
     let (connected, _) = client_socket.sctp_connectx(&[bindaddr]).await.unwrap();
     connected
+        .options()
         .sctp_subscribe_events(
             &[Event::Association, Event::Shutdown],
             SubscribeEventAssocId::All,
@@ -231,12 +234,13 @@ async fn a_zero_linger_aborts_the_association_on_close() {
     let (accepted, _) = listener.accept().await.unwrap();
 
     accepted
+        .options()
         .set_linger(Some(std::time::Duration::ZERO))
         .unwrap();
     drop(accepted);
 
     // An ABORT, not a SHUTDOWN: the association is lost at once.
-    let data = connected.sctp_recv().await.unwrap();
+    let data = connected.recv().await.unwrap();
     assert!(
         matches!(
             data,
@@ -255,7 +259,7 @@ async fn test_get_status() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
 
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let result = client_socket.sctp_request_rcvinfo(true);
+    let result = client_socket.options().sctp_request_rcvinfo(true);
     assert!(result.is_ok(), "{:?}", result.err().unwrap());
 
     let result = client_socket.sctp_connectx(&[bindaddr]).await;
@@ -294,9 +298,12 @@ async fn futures_are_send() {
 
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
     assert_send(&listener.accept());
-    assert_send(&listener.sctp_recv());
-    assert_send(&listener.sctp_send(
-        bindaddr,
+    let endpoint = create_client_socket(SocketToAssociation::OneToMany, true)
+        .into_endpoint(2)
+        .unwrap();
+    assert_send(&endpoint.recv());
+    assert_send(&endpoint.send_data(
+        Some(bindaddr),
         SendData {
             payload: vec![],
             snd_info: None,
@@ -307,8 +314,8 @@ async fn futures_are_send() {
     let connect = client.sctp_connectx(&addrs);
     assert_send(&connect);
     let (connected, _) = connect.await.unwrap();
-    assert_send(&connected.sctp_recv());
-    assert_send(&connected.sctp_send(SendData {
+    assert_send(&connected.recv());
+    assert_send(&connected.send_data(SendData {
         payload: vec![],
         snd_info: None,
     }));
@@ -347,7 +354,7 @@ async fn send_waits_for_room_instead_of_failing_with_would_block() {
     // The peer does not read: its window and then the send buffer fill up.
     let mut sent = 0;
     loop {
-        let send = connected.sctp_send(data.clone());
+        let send = connected.send_data(data.clone());
         match tokio::time::timeout(Duration::from_millis(200), send).await {
             Ok(Ok(())) => sent += 1,
             Ok(Err(e)) => panic!("send {} failed: {}", sent + 1, e),
@@ -357,10 +364,10 @@ async fn send_waits_for_room_instead_of_failing_with_would_block() {
     }
 
     // As the peer reads, the waiting send completes.
-    let send = tokio::time::timeout(Duration::from_secs(5), connected.sctp_send(data.clone()));
+    let send = tokio::time::timeout(Duration::from_secs(5), connected.send_data(data.clone()));
     let read = async {
         for _ in 0..=sent {
-            let received = accepted.sctp_recv().await.unwrap();
+            let received = accepted.recv().await.unwrap();
             assert!(matches!(received, NotificationOrData::Data(_)));
         }
     };
@@ -391,12 +398,12 @@ async fn send_after_peer_closed_fails_without_sigpipe() {
     let (accepted, _) = listener.accept().await.unwrap();
     drop(accepted);
     // The association has ended once the client reads the end of the stream.
-    match connected.sctp_recv().await.unwrap() {
+    match connected.recv().await.unwrap() {
         NotificationOrData::Data(data) => assert!(data.payload.is_empty()),
         other => panic!("not the end of the stream: {:?}", other),
     }
     let result = connected
-        .sctp_send(SendData {
+        .send_data(SendData {
             payload: b"too late".to_vec(),
             snd_info: None,
         })
@@ -427,8 +434,8 @@ async fn send_after_peer_closed_fails_without_sigpipe() {
 async fn pair_receiving_rcvinfo_and_nxtinfo() -> (ConnectedSocket, ConnectedSocket) {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
-    client.sctp_request_rcvinfo(true).unwrap();
-    client.sctp_request_nxtinfo(true).unwrap();
+    client.options().sctp_request_rcvinfo(true).unwrap();
+    client.options().sctp_request_nxtinfo(true).unwrap();
     let (receiving, _) = client.sctp_connectx(&[bindaddr]).await.unwrap();
     let (sending, _) = listener.accept().await.unwrap();
     (sending, receiving)
@@ -442,7 +449,7 @@ async fn send_two_messages(sending: &ConnectedSocket) {
             ..Default::default()
         };
         sending
-            .sctp_send(SendData {
+            .send_data(SendData {
                 payload: payload.to_vec(),
                 snd_info: Some(snd_info),
             })
@@ -469,10 +476,11 @@ async fn recv_returns_rcvinfo_and_nxtinfo_together() {
     let (sending, receiving) = pair_receiving_rcvinfo_and_nxtinfo().await;
     // The data I/O event adds an `SCTP_SNDRCV` control message.
     receiving
+        .options()
         .sctp_subscribe_events(&[Event::DataIo], SubscribeEventAssocId::All)
         .unwrap();
     send_two_messages(&sending).await;
-    assert_first_with_infos(receiving.sctp_recv().await.unwrap());
+    assert_first_with_infos(receiving.recv().await.unwrap());
 }
 
 #[cfg(target_os = "linux")]
@@ -503,7 +511,7 @@ fn recv_skips_control_messages_of_other_levels() {
             };
             assert_eq!(result, 0, "{}", std::io::Error::last_os_error());
             send_two_messages(&sending).await;
-            receiving.sctp_recv().await
+            receiving.recv().await
         });
         let _ = received_tx.send(received);
     });
@@ -574,6 +582,7 @@ async fn pair_for_long_messages(
     }
     // Retransmit quickly when the receive window reopens.
     client
+        .options()
         .sctp_set_rto_info(RtoInfo {
             assoc_id: 0,
             initial: 10,
@@ -606,13 +615,13 @@ async fn recv_returns_long_messages_whole() {
         long_payload(60_000),
     ] {
         sending
-            .sctp_send(SendData {
+            .send_data(SendData {
                 payload: payload.clone(),
                 snd_info: None,
             })
             .await
             .unwrap();
-        let received = data_payload(receiving.sctp_recv().await.unwrap());
+        let received = data_payload(receiving.recv().await.unwrap());
         assert_eq!(received.len(), payload.len());
         assert!(received == payload);
     }
@@ -625,11 +634,11 @@ async fn recv_returns_partially_delivered_messages_whole() {
         return;
     };
     let payload = long_payload(len);
-    let send = sending.sctp_send(SendData {
+    let send = sending.send_data(SendData {
         payload: payload.clone(),
         snd_info: None,
     });
-    let (sent, received) = tokio::join!(send, receiving.sctp_recv());
+    let (sent, received) = tokio::join!(send, receiving.recv());
     sent.unwrap();
     let received = data_payload(received.unwrap());
     assert_eq!(received.len(), payload.len());
@@ -643,14 +652,14 @@ async fn recv_cancelled_in_the_middle_of_a_message_loses_nothing() {
         return;
     };
     let payload = long_payload(len);
-    let send = sending.sctp_send(SendData {
+    let send = sending.send_data(SendData {
         payload: payload.clone(),
         snd_info: None,
     });
     let receive = async {
         let mut cancelled = 0;
         loop {
-            let recv = receiving.sctp_recv();
+            let recv = receiving.recv();
             match tokio::time::timeout(std::time::Duration::from_millis(1), recv).await {
                 Ok(received) => return (received, cancelled),
                 Err(_) => cancelled += 1,
@@ -673,7 +682,7 @@ async fn recv_rejects_messages_longer_than_4_mib() {
     };
     for len in [max + 1, max] {
         let payload = long_payload(len);
-        let send = sending.sctp_send(SendData {
+        let send = sending.send_data(SendData {
             payload: payload.clone(),
             snd_info: None,
         });
@@ -681,7 +690,7 @@ async fn recv_rejects_messages_longer_than_4_mib() {
             // A failed send must stop the transfer: there will be no message to receive.
             // Keep receive errors as values, since an oversized message should be rejected.
             tokio::try_join!(send, async {
-                Ok::<_, std::io::Error>(receiving.sctp_recv().await)
+                Ok::<_, std::io::Error>(receiving.recv().await)
             })
         })
         .await
@@ -710,21 +719,21 @@ async fn recv_rejects_messages_longer_than_4_mib() {
 #[tokio::test]
 async fn recv_limit_is_set_per_socket_and_inherited_on_accept() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
-    assert_eq!(listener.max_message_size(), 4 << 20);
-    listener.set_max_message_size(1000);
+    assert_eq!(listener.options().max_message_size(), 4 << 20);
+    listener.options().set_max_message_size(1000);
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
     let (sending, _) = client.sctp_connectx(&[bindaddr]).await.unwrap();
     let (receiving, _) = listener.accept().await.unwrap();
-    assert_eq!(receiving.max_message_size(), 1000);
+    assert_eq!(receiving.options().max_message_size(), 1000);
     for len in [1001, 1000] {
         sending
-            .sctp_send(SendData {
+            .send_data(SendData {
                 payload: long_payload(len),
                 snd_info: None,
             })
             .await
             .unwrap();
-        match receiving.sctp_recv().await {
+        match receiving.recv().await {
             Err(error) if len > 1000 => {
                 assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{}", error)
             }

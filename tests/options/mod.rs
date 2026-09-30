@@ -1,6 +1,9 @@
 //! Access to the descriptors and socket options.
 
-use super::{create_client_socket, create_socket_bind_and_listen};
+use super::{
+    connect_endpoint, create_client_socket, create_endpoint_bind_and_listen,
+    create_socket_bind_and_listen,
+};
 
 use std::os::unix::io::{AsFd, AsRawFd, RawFd};
 
@@ -63,34 +66,34 @@ const SCTP_NODELAY: libc::c_int = 3;
 #[tokio::test]
 async fn nodelay_round_trips_on_every_socket_type() {
     let socket = create_client_socket(SocketToAssociation::OneToMany, true);
-    assert!(!socket.nodelay().unwrap());
-    socket.set_nodelay(true).unwrap();
-    assert!(socket.nodelay().unwrap());
+    assert!(!socket.options().nodelay().unwrap());
+    socket.options().set_nodelay(true).unwrap();
+    assert!(socket.options().nodelay().unwrap());
     assert_eq!(
         getsockopt_int(socket.as_raw_fd(), SOL_SCTP, SCTP_NODELAY),
         1
     );
-    socket.set_nodelay(false).unwrap();
-    assert!(!socket.nodelay().unwrap());
+    socket.options().set_nodelay(false).unwrap();
+    assert!(!socket.options().nodelay().unwrap());
     assert_eq!(
         getsockopt_int(socket.as_raw_fd(), SOL_SCTP, SCTP_NODELAY),
         0
     );
 
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
-    listener.set_nodelay(true).unwrap();
-    assert!(listener.nodelay().unwrap());
+    listener.options().set_nodelay(true).unwrap();
+    assert!(listener.options().nodelay().unwrap());
     assert_eq!(
         getsockopt_int(listener.as_raw_fd(), SOL_SCTP, SCTP_NODELAY),
         1
     );
 
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
-    client.set_nodelay(true).unwrap();
+    client.options().set_nodelay(true).unwrap();
     let (connected, _) = client.sctp_connectx(&[bindaddr]).await.unwrap();
-    assert!(connected.nodelay().unwrap());
-    connected.set_nodelay(false).unwrap();
-    assert!(!connected.nodelay().unwrap());
+    assert!(connected.options().nodelay().unwrap());
+    connected.options().set_nodelay(false).unwrap();
+    assert!(!connected.options().nodelay().unwrap());
     assert_eq!(
         getsockopt_int(connected.as_raw_fd(), SOL_SCTP, SCTP_NODELAY),
         0
@@ -102,46 +105,47 @@ async fn accepted_and_peeled_off_sockets_inherit_nodelay() {
     // Set on the socket before `listen`.
     let socket = create_client_socket(SocketToAssociation::OneToOne, true);
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    socket.set_nodelay(true).unwrap();
+    socket.options().set_nodelay(true).unwrap();
     let listener = socket.listen(10).unwrap();
     let bindaddr = listener.sctp_getladdrs(0).unwrap()[0];
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
     let _connected = client.sctp_connectx(&[bindaddr]).await.unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
-    assert!(accepted.nodelay().unwrap());
+    assert!(accepted.options().nodelay().unwrap());
 
     // Set on the listener, and the other way round.
     for nodelay in [true, false] {
         let (listener, bindaddr) =
             create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
-        listener.set_nodelay(nodelay).unwrap();
+        listener.options().set_nodelay(nodelay).unwrap();
         let client = create_client_socket(SocketToAssociation::OneToOne, true);
-        client.set_nodelay(!nodelay).unwrap();
+        client.options().set_nodelay(!nodelay).unwrap();
         let _connected = client.sctp_connectx(&[bindaddr]).await.unwrap();
         let (accepted, _) = listener.accept().await.unwrap();
-        assert_eq!(accepted.nodelay().unwrap(), nodelay);
+        assert_eq!(accepted.options().nodelay().unwrap(), nodelay);
     }
 
     // Peeled off a one-to-many listener.
-    let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToMany, true);
-    listener.set_nodelay(true).unwrap();
+    let (listener, bindaddr) = create_endpoint_bind_and_listen(true);
+    listener.options().set_nodelay(true).unwrap();
     listener
+        .options()
         .sctp_subscribe_events(&[Event::Association], SubscribeEventAssocId::Future)
         .unwrap();
     let client = create_client_socket(SocketToAssociation::OneToMany, true);
-    let _connected = client.sctp_connectx(&[bindaddr]).await.unwrap();
-    let assoc_id = match listener.sctp_recv().await.unwrap() {
+    let _connected = connect_endpoint(client, &[bindaddr]).await.unwrap();
+    let assoc_id = match listener.recv().await.unwrap() {
         NotificationOrData::Notification(Notification::AssociationChange(change)) => {
             change.assoc_id
         }
         other => panic!("not an association change: {:?}", other),
     };
-    let peeled = listener.sctp_peeloff(assoc_id).unwrap();
-    assert!(peeled.nodelay().unwrap());
+    let peeled = listener.peeloff(assoc_id).unwrap();
+    assert!(peeled.options().nodelay().unwrap());
 }
 
 async fn recv_data(socket: &ConnectedSocket) -> Vec<u8> {
-    match socket.sctp_recv().await.unwrap() {
+    match socket.recv().await.unwrap() {
         NotificationOrData::Data(data) => data.payload,
         other => panic!("not data: {:?}", other),
     }
@@ -152,11 +156,11 @@ async fn recv_data(socket: &ConnectedSocket) -> Vec<u8> {
 async fn third_message_lag(nodelay: bool) -> std::time::Duration {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
-    client.set_nodelay(nodelay).unwrap();
+    client.options().set_nodelay(nodelay).unwrap();
     let (connected, _) = client.sctp_connectx(&[bindaddr]).await.unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
     let send = |payload: &[u8]| {
-        connected.sctp_send(SendData {
+        connected.send_data(SendData {
             payload: payload.to_vec(),
             snd_info: None,
         })
@@ -219,19 +223,20 @@ async fn descriptors_are_close_on_exec() {
     assert_close_on_exec_and_non_blocking(&connected);
     assert_close_on_exec_and_non_blocking(&accepted);
 
-    let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToMany, true);
+    let (listener, bindaddr) = create_endpoint_bind_and_listen(true);
     listener
+        .options()
         .sctp_subscribe_events(&[Event::Association], SubscribeEventAssocId::Future)
         .unwrap();
     let client = create_client_socket(SocketToAssociation::OneToMany, true);
-    let _connected = client.sctp_connectx(&[bindaddr]).await.unwrap();
-    let assoc_id = match listener.sctp_recv().await.unwrap() {
+    let _connected = connect_endpoint(client, &[bindaddr]).await.unwrap();
+    let assoc_id = match listener.recv().await.unwrap() {
         NotificationOrData::Notification(Notification::AssociationChange(change)) => {
             change.assoc_id
         }
         other => panic!("not an association change: {:?}", other),
     };
-    assert_close_on_exec_and_non_blocking(&listener.sctp_peeloff(assoc_id).unwrap());
+    assert_close_on_exec_and_non_blocking(&listener.peeloff(assoc_id).unwrap());
 }
 
 #[tokio::test]
@@ -243,17 +248,21 @@ async fn rto_info_round_trips() {
         min: 100,
     };
     let socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    socket.sctp_set_rto_info(rto_info.clone()).unwrap();
-    assert_eq!(socket.sctp_get_rto_info(0).unwrap(), rto_info);
+    socket
+        .options()
+        .sctp_set_rto_info(rto_info.clone())
+        .unwrap();
+    assert_eq!(socket.options().sctp_get_rto_info(0).unwrap(), rto_info);
     // Zero leaves a value unchanged.
     socket
+        .options()
         .sctp_set_rto_info(RtoInfo {
             max: 6000,
             ..Default::default()
         })
         .unwrap();
     assert_eq!(
-        socket.sctp_get_rto_info(0).unwrap(),
+        socket.options().sctp_get_rto_info(0).unwrap(),
         RtoInfo {
             max: 6000,
             ..rto_info.clone()
@@ -264,32 +273,39 @@ async fn rto_info_round_trips() {
         min: 7000,
         ..rto_info.clone()
     };
-    assert!(socket.sctp_set_rto_info(invalid).is_err());
+    assert!(socket.options().sctp_set_rto_info(invalid).is_err());
 
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
-    listener.sctp_set_rto_info(rto_info.clone()).unwrap();
-    assert_eq!(listener.sctp_get_rto_info(0).unwrap(), rto_info);
+    listener
+        .options()
+        .sctp_set_rto_info(rto_info.clone())
+        .unwrap();
+    assert_eq!(listener.options().sctp_get_rto_info(0).unwrap(), rto_info);
 
     // Associations start with the values of their socket.
     let (connected, assoc_id) = socket.sctp_connectx(&[bindaddr]).await.unwrap();
-    let association = connected.sctp_get_rto_info(assoc_id).unwrap();
+    let association = connected.options().sctp_get_rto_info(assoc_id).unwrap();
     assert_eq!((association.max, association.min), (6000, 100));
     connected
+        .options()
         .sctp_set_rto_info(RtoInfo {
             assoc_id,
             max: 2000,
             ..Default::default()
         })
         .unwrap();
-    assert_eq!(connected.sctp_get_rto_info(assoc_id).unwrap().max, 2000);
+    assert_eq!(
+        connected.options().sctp_get_rto_info(assoc_id).unwrap().max,
+        2000
+    );
 }
 
 #[tokio::test]
 async fn reuseaddr_allows_binding_a_bound_address() {
     let bound = create_client_socket(SocketToAssociation::OneToOne, true);
-    assert!(!bound.reuseaddr().unwrap());
-    bound.set_reuseaddr(true).unwrap();
-    assert!(bound.reuseaddr().unwrap());
+    assert!(!bound.options().reuseaddr().unwrap());
+    bound.options().set_reuseaddr(true).unwrap();
+    assert!(bound.options().reuseaddr().unwrap());
     assert_eq!(
         getsockopt_int(bound.as_raw_fd(), libc::SOL_SOCKET, libc::SO_REUSEADDR),
         1
@@ -316,6 +332,6 @@ async fn reuseaddr_allows_binding_a_bound_address() {
     assert_eq!(error.raw_os_error(), Some(libc::EADDRINUSE), "{}", error);
 
     let with = create_client_socket(SocketToAssociation::OneToOne, true);
-    with.set_reuseaddr(true).unwrap();
+    with.options().set_reuseaddr(true).unwrap();
     with.bind(address).unwrap();
 }

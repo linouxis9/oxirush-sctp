@@ -40,10 +40,10 @@ async fn syscall_errors_are_preserved_when_the_logger_changes_errno() {
 
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let listener = socket.listen(1).unwrap();
+    let listener = socket.into_endpoint(1).unwrap();
     log::set_max_level(log::LevelFilter::Off);
-    let baseline = listener.sctp_peeloff(0).unwrap_err();
+    let baseline = listener.peeloff(0).unwrap_err();
     log::set_max_level(log::LevelFilter::Error);
-    let logged = listener.sctp_peeloff(0).unwrap_err();
+    let logged = listener.peeloff(0).unwrap_err();
     assert_eq!(logged.raw_os_error(), baseline.raw_os_error());
 }
