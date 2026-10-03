@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/oxirush-sctp.svg)](https://crates.io/crates/oxirush-sctp)
 [![Documentation](https://docs.rs/oxirush-sctp/badge.svg)](https://docs.rs/oxirush-sctp)
-[![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg)](https://github.com/linouxis9/oxirush-sctp/blob/main/LICENSE)
 
 Async Rust APIs for the Linux kernel SCTP stack, per RFC 6458, on Tokio. It is a maintained fork of [sctp-rs](https://github.com/gabhijit/ellora) 0.3.1 by Abhijit Gadgil.
 

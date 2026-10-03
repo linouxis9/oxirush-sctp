@@ -397,7 +397,7 @@ pub struct Shutdown {
 
 /// Event: Used for Subscribing for SCTP Events
 ///
-/// See [`sctp_subscribe_events`][`crate::Listener::sctp_subscribe_event`] for the usage.
+/// See [`sctp_subscribe_events`][`crate::SocketOptions::sctp_subscribe_events`] for the usage.
 #[repr(u16)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
