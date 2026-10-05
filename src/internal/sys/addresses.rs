@@ -57,6 +57,18 @@ pub(crate) fn sctp_bindx_internal(
     }
 }
 
+pub(crate) fn local_addr(fd: BorrowedFd<'_>) -> std::io::Result<SocketAddr> {
+    let mut address = OsSocketAddr::new();
+    let mut len = address.capacity();
+    // Safety: `address` is valid for writes of `len` octets during the call.
+    if unsafe { libc::getsockname(fd.as_raw_fd(), address.as_mut_ptr(), &mut len) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    address
+        .into_addr()
+        .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))
+}
+
 pub(crate) fn sctp_getpaddrs_internal(
     fd: BorrowedFd<'_>,
     assoc_id: AssociationId,

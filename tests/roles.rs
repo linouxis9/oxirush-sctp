@@ -1,5 +1,7 @@
 //! Socket role transitions and the shared configuration view.
-use oxirush_sctp::{ConnectedSocket, NotificationOrData, SendOptions, Socket, SocketToAssociation};
+use oxirush_sctp::{
+    BindxFlags, ConnectedSocket, NotificationOrData, SendOptions, Socket, SocketToAssociation,
+};
 use std::os::fd::AsRawFd;
 
 #[tokio::test]
@@ -56,6 +58,35 @@ async fn configuration_and_registration_survive_listen_connect_and_accept() {
     assert!(peer.options().nodelay().unwrap());
     listener.options().set_max_message_size(512);
     assert_eq!(peer.options().max_message_size(), 2048);
+}
+
+#[tokio::test]
+async fn local_addr_reports_the_bound_address_in_every_role() {
+    let unbound = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
+    assert_eq!(unbound.local_addr().unwrap(), "0.0.0.0:0".parse().unwrap());
+    let server = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
+    let addresses = [
+        "127.0.0.1:0".parse().unwrap(),
+        "127.0.0.2:0".parse().unwrap(),
+    ];
+    server.sctp_bindx(&addresses, BindxFlags::Add).unwrap();
+    let address = server.local_addr().unwrap();
+    assert!(addresses.iter().any(|bound| bound.ip() == address.ip()));
+    assert_ne!(address.port(), 0);
+    let listener = server.listen(4).unwrap();
+    assert_eq!(listener.local_addr().unwrap(), address);
+    let (client, _) = unbound.connect(address).await.unwrap();
+    let (peer, client_address) = listener.accept().await.unwrap();
+    assert_eq!(peer.local_addr().unwrap().port(), address.port());
+    assert_eq!(client.local_addr().unwrap(), client_address);
+
+    let socket = Socket::new_v6(SocketToAssociation::OneToMany).unwrap();
+    socket.bind("[::1]:0".parse().unwrap()).unwrap();
+    let endpoint = socket.into_endpoint(4).unwrap();
+    assert_eq!(
+        endpoint.local_addr().unwrap(),
+        endpoint.sctp_getladdrs(0).unwrap()[0]
+    );
 }
 
 #[tokio::test]
