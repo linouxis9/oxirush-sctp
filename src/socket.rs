@@ -59,12 +59,11 @@ impl Socket {
 
     /// Become a one-to-many endpoint supporting incoming and outgoing associations.
     ///
-    /// A one-to-one socket returns `InvalidInput`. This enables receive metadata by default,
-    /// then listens with the supplied backlog. The endpoint keeps this socket's registered
-    /// descriptor and receive limit. A failure closes it.
+    /// A one-to-one socket returns `InvalidInput`. This listens with the supplied backlog. The
+    /// endpoint keeps this socket's registered descriptor and receive limit. A failure closes
+    /// it.
     pub fn into_endpoint(self, backlog: i32) -> std::io::Result<OneToManyEndpoint> {
         self.core.require_style(SocketToAssociation::OneToMany)?;
-        sys::request_rcvinfo_internal(self.as_fd(), true)?;
         sys::sctp_listen_internal(self.as_fd(), backlog)?;
         Ok(OneToManyEndpoint::from_core(self.core))
     }

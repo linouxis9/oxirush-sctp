@@ -20,6 +20,7 @@ impl ConnectedSocket {
     /// use [`OneToManyEndpoint::peeloff`][crate::OneToManyEndpoint::peeloff] to obtain those.
     ///
     /// A valid descriptor is closed on failure, including rejection of a one-to-many socket.
+    /// Its options stay as they are: receive metadata is off unless the descriptor has it on.
     ///
     /// # Safety
     ///

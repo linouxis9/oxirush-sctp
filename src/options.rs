@@ -52,9 +52,10 @@ impl SocketOptions<'_> {
         )
     }
 
-    /// Enable receive metadata, including the association ID. Enabled by default on
-    /// [`OneToManyEndpoint`][crate::OneToManyEndpoint]; disabling it loses this identity and can
-    /// make partially delivered records from multihomed peers ambiguous.
+    /// Enable receive metadata: the stream, payload protocol and association of each message.
+    /// Enabled by default. On a [`OneToManyEndpoint`][crate::OneToManyEndpoint], disabling it
+    /// loses the association's identity and can make partially delivered records from
+    /// multihomed peers ambiguous.
     pub fn sctp_request_rcvinfo(&self, on: bool) -> std::io::Result<()> {
         sys::request_rcvinfo_internal(self.core.as_fd(), on)
     }

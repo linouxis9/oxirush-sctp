@@ -59,6 +59,35 @@ async fn configuration_and_registration_survive_listen_connect_and_accept() {
 }
 
 #[tokio::test]
+async fn connected_and_accepted_sockets_report_stream_and_ppid_by_default() {
+    let server = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
+    server.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = server.listen(4).unwrap();
+    let (client, assoc_id) = Socket::new_v4(SocketToAssociation::OneToOne)
+        .unwrap()
+        .connect(listener.sctp_getladdrs(0).unwrap()[0])
+        .await
+        .unwrap();
+    let (peer, _) = listener.accept().await.unwrap();
+    let options = SendOptions {
+        stream_id: 3,
+        ppid: 60,
+        ..Default::default()
+    };
+    client.send(b"request", options).await.unwrap();
+    peer.send(b"answer", options).await.unwrap();
+    let NotificationOrData::Data(data) = peer.recv().await.unwrap() else {
+        panic!("not data")
+    };
+    assert_eq!((data.stream_id(), data.ppid()), (Some(3), Some(60)));
+    let NotificationOrData::Data(data) = client.recv().await.unwrap() else {
+        panic!("not data")
+    };
+    assert_eq!((data.stream_id(), data.ppid()), (Some(3), Some(60)));
+    assert_eq!(data.assoc_id(), Some(assoc_id));
+}
+
+#[tokio::test]
 async fn endpoint_defaults_identify_associations_and_peeloff_preserves_configuration() {
     let socket = Socket::new_v6(SocketToAssociation::OneToMany).unwrap();
     socket.bind("[::1]:0".parse().unwrap()).unwrap();

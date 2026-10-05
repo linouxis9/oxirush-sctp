@@ -46,11 +46,31 @@ pub struct ReceivedData {
     /// socket apart. `None` when the kernel gives no address, as at the end of the stream.
     pub from: Option<std::net::SocketAddr>,
 
-    /// Optional ancillary information about the received payload.
+    /// Ancillary information about the received payload. `None` at the end of the stream and
+    /// when [`sctp_request_rcvinfo`][crate::SocketOptions::sctp_request_rcvinfo] turned it off.
     pub rcv_info: Option<RcvInfo>,
 
     /// Optional ancillary information about the next call to `recv`.
     pub nxt_info: Option<NxtInfo>,
+}
+
+impl ReceivedData {
+    /// Stream the message arrived on. `None` without receive information.
+    pub fn stream_id(&self) -> Option<u16> {
+        self.rcv_info.as_ref().map(|info| info.sid)
+    }
+
+    /// Payload protocol identifier in host byte order, as in [`SendOptions::ppid`]. `None`
+    /// without receive information.
+    pub fn ppid(&self) -> Option<u32> {
+        self.rcv_info.as_ref().map(|info| u32::from_be(info.ppid))
+    }
+
+    /// Association the message arrived on, which [`SendOptions::assoc_id`] takes to answer on
+    /// a one-to-many socket. `None` without receive information.
+    pub fn assoc_id(&self) -> Option<AssociationId> {
+        self.rcv_info.as_ref().map(|info| info.assoc_id)
+    }
 }
 
 /// Structure Represnting Data to be Sent.
@@ -209,7 +229,7 @@ pub struct RcvInfo {
     pub flags: u16,
 
     /// Application Protocol ID used by the sender while sending the data, as received, without
-    /// byte order conversion (see [`SendInfo::ppid`]).
+    /// byte order conversion (see [`SendInfo::ppid`]). [`ReceivedData::ppid`] converts it.
     pub ppid: u32,
 
     /// Transaction sequence number.

@@ -22,6 +22,9 @@ pub(crate) struct SocketCore {
 impl SocketCore {
     pub(crate) fn new(domain: libc::c_int, style: SocketToAssociation) -> std::io::Result<Self> {
         let fd = sys::sctp_socket_internal(domain, style.clone())?;
+        // The stream, payload protocol and association of each message. Accepted and
+        // peeled-off sockets inherit the setting.
+        sys::request_rcvinfo_internal(fd.as_fd(), true)?;
         Self::register(fd, style)
     }
 
