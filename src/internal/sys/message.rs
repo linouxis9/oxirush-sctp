@@ -217,11 +217,11 @@ mod tests {
         let header_len = unsafe { libc::CMSG_LEN(0) as usize };
         let size = unsafe { libc::CMSG_SPACE(data.len() as u32) as usize };
         let mut bytes = vec![0; size];
-        let header = libc::cmsghdr {
-            cmsg_len: (header_len + data.len()) as _,
-            cmsg_level: level,
-            cmsg_type: kind,
-        };
+        // Some platforms have private fields in `cmsghdr`.
+        let mut header: libc::cmsghdr = unsafe { std::mem::zeroed() };
+        header.cmsg_len = (header_len + data.len()) as _;
+        header.cmsg_level = level;
+        header.cmsg_type = kind;
         // Safety: the allocated slice contains the native header, which contains integers only.
         unsafe {
             std::ptr::write_unaligned(bytes.as_mut_ptr().cast::<libc::cmsghdr>(), header);
