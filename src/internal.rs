@@ -126,9 +126,12 @@ impl SocketCore {
             let mut guard = self.fd.ready(Interest::READABLE | Interest::ERROR).await?;
             if let Ok(result) = guard.try_io(|inner| {
                 let mut partial = self.partial.lock().unwrap_or_else(PoisonError::into_inner);
-                receive::receive_message(&mut partial, self.max_message_size(), |buffer| {
-                    sys::sctp_recvmsg_once(inner.as_fd(), buffer)
-                })
+                receive::receive_message(
+                    &mut partial,
+                    self.max_message_size(),
+                    self.style == SocketToAssociation::OneToOne,
+                    |buffer| sys::sctp_recvmsg_once(inner.as_fd(), buffer),
+                )
             }) {
                 return result;
             }
@@ -174,7 +177,7 @@ mod tests {
             let core = SocketCore::new(libc::AF_INET, SocketToAssociation::OneToMany).unwrap();
             let mut partial = None;
             let mut first = true;
-            let error = receive::receive_message(&mut partial, 100, |buffer| {
+            let error = receive::receive_message(&mut partial, 100, false, |buffer| {
                 if !first {
                     return Err(std::io::ErrorKind::WouldBlock.into());
                 }

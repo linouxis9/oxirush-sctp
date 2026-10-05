@@ -63,6 +63,7 @@ pub(crate) struct Piece {
 pub(super) fn receive_message(
     partial: &mut Option<PartialMessage>,
     max_message_size: usize,
+    one_association: bool,
     mut read: impl FnMut(&mut [u8]) -> std::io::Result<Piece>,
 ) -> std::io::Result<NotificationOrData> {
     loop {
@@ -127,7 +128,9 @@ pub(super) fn receive_message(
                     // The SSN has no meaning for unordered messages.
                     && (first.flags & 1 != 0 || first.ssn == next.ssn)
             }
-            _ => message.from == piece.from,
+            // Without receive information only the address tells senders apart, and the parts
+            // of a message can come from several addresses of a multihomed peer.
+            _ => one_association || message.from == piece.from,
         };
         if continued && (piece.notification != message.notification || !same_message) {
             log::warn!(
@@ -226,7 +229,7 @@ mod tests {
             data(b"last", true, None),
         ]);
         assert_eq!(
-            payload(receive_message(&mut partial, 100, read).unwrap()),
+            payload(receive_message(&mut partial, 100, false, read).unwrap()),
             b"firstlast"
         );
         assert!(partial.is_none());
@@ -255,13 +258,14 @@ mod tests {
         ]);
         let mut partial = None;
         assert_eq!(
-            receive_message(&mut partial, 100, &mut read)
+            receive_message(&mut partial, 100, false, &mut read)
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::WouldBlock
         );
         assert_eq!(partial.as_ref().unwrap().payload, b"first");
-        let NotificationOrData::Data(record) = receive_message(&mut partial, 100, read).unwrap()
+        let NotificationOrData::Data(record) =
+            receive_message(&mut partial, 100, false, read).unwrap()
         else {
             panic!("not data");
         };
@@ -280,14 +284,14 @@ mod tests {
             data(b"ok", true, None),
         ]);
         assert_eq!(
-            receive_message(&mut partial, 4, &mut read)
+            receive_message(&mut partial, 4, false, &mut read)
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::InvalidData
         );
         assert!(partial.is_none());
         assert_eq!(
-            payload(receive_message(&mut partial, 4, read).unwrap()),
+            payload(receive_message(&mut partial, 4, false, read).unwrap()),
             b"ok"
         );
     }
@@ -302,19 +306,19 @@ mod tests {
             data(b"ok", true, None),
         ]);
         assert_eq!(
-            receive_message(&mut partial, 10, &mut read)
+            receive_message(&mut partial, 10, false, &mut read)
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::WouldBlock
         );
         assert_eq!(
-            receive_message(&mut partial, 4, &mut read)
+            receive_message(&mut partial, 4, false, &mut read)
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::InvalidData
         );
         assert_eq!(
-            payload(receive_message(&mut partial, 4, read).unwrap()),
+            payload(receive_message(&mut partial, 4, false, read).unwrap()),
             b"ok"
         );
     }
@@ -341,8 +345,34 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            payload(receive_message(&mut partial, 100, read).unwrap()),
+            payload(receive_message(&mut partial, 100, false, read).unwrap()),
             b"new"
+        );
+    }
+
+    #[test]
+    fn one_association_keeps_a_record_whose_pieces_come_from_two_peer_addresses() {
+        let piece = |payload: &[u8], end_of_record, from: &str| {
+            let mut step = data(payload, end_of_record, None);
+            if let Step::Piece(_, piece) = &mut step {
+                piece.from = Some(from.parse().unwrap());
+            }
+            step
+        };
+        let pieces = || {
+            vec![
+                piece(b"first", false, "192.0.2.1:38412"),
+                piece(b"last", true, "198.51.100.1:38412"),
+            ]
+        };
+        assert_eq!(
+            payload(receive_message(&mut None, 100, true, reader(pieces())).unwrap()),
+            b"firstlast"
+        );
+        // The address is all that tells the associations of a one-to-many socket apart.
+        assert_eq!(
+            payload(receive_message(&mut None, 100, false, reader(pieces())).unwrap()),
+            b"last"
         );
     }
 
@@ -367,7 +397,7 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            receive_message(&mut partial, 100, read).unwrap(),
+            receive_message(&mut partial, 100, false, read).unwrap(),
             NotificationOrData::Notification(crate::Notification::Unsupported {
                 ev_type: crate::Event::PartialDelivery,
                 data: raw,
@@ -393,7 +423,7 @@ mod tests {
             data(b"last", true, Some(last)),
         ]);
         assert_eq!(
-            payload(receive_message(&mut None, 100, read).unwrap()),
+            payload(receive_message(&mut None, 100, false, read).unwrap()),
             b"firstlast"
         );
     }
@@ -402,7 +432,7 @@ mod tests {
     fn eof_discards_the_incomplete_record() {
         let mut partial = None;
         let read = reader(vec![data(b"partial", false, None), data(b"", false, None)]);
-        assert!(payload(receive_message(&mut partial, 100, read).unwrap()).is_empty());
+        assert!(payload(receive_message(&mut partial, 100, false, read).unwrap()).is_empty());
         assert!(partial.is_none());
     }
     #[test]
@@ -417,7 +447,7 @@ mod tests {
                 ..Default::default()
             });
             assert_eq!(
-                receive_message(&mut partial, limit, |buffer| {
+                receive_message(&mut partial, limit, false, |buffer| {
                     super::super::sys::sctp_recvmsg_once(socket.as_fd(), buffer)
                 })
                 .unwrap_err()
