@@ -420,6 +420,7 @@ pub struct Shutdown {
 /// See [`sctp_subscribe_events`][`crate::SocketOptions::sctp_subscribe_events`] for the usage.
 #[repr(u16)]
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Event {
     /// Event to receive ancillary information with every `recv`.
     DataIo = (1 << 15),
@@ -558,8 +559,8 @@ impl AssocChangeState {
 
 /// Constants related to `enum sctp_cmsg_type`
 #[repr(i32)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CmsgType {
+#[allow(dead_code)]
+pub(crate) enum CmsgType {
     Init = 0,
     SndRcv,
     SndInfo,

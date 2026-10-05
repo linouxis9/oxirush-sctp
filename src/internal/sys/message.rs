@@ -1,7 +1,8 @@
 //! Individual message syscalls and their initialized ancillary buffers.
 use crate::consts::MSG_NOTIFICATION;
 use crate::internal::receive::Piece;
-use crate::{CmsgType, NxtInfo, RcvInfo, SendInfo};
+use crate::types::CmsgType;
+use crate::{NxtInfo, RcvInfo, SendInfo};
 use os_socketaddr::OsSocketAddr;
 use std::convert::TryInto;
 use std::net::SocketAddr;
