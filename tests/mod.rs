@@ -26,7 +26,7 @@ fn create_socket_bind_and_listen(
     assert!(listener.is_ok(), "{:#?}", listener.err().unwrap());
 
     let listener = listener.unwrap();
-    bindaddr.set_port(listener.sctp_getladdrs(0).unwrap()[0].port());
+    bindaddr.set_port(listener.local_addrs(0).unwrap()[0].port());
     (listener, bindaddr)
 }
 
@@ -45,7 +45,7 @@ fn create_endpoint_bind_and_listen(v4: bool) -> (OneToManyEndpoint, SocketAddr) 
     let socket = create_client_socket(SocketToAssociation::OneToMany, v4);
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let endpoint = socket.into_endpoint(10).unwrap();
-    let address = endpoint.sctp_getladdrs(0).unwrap()[0];
+    let address = endpoint.local_addrs(0).unwrap()[0];
     (endpoint, address)
 }
 
@@ -57,7 +57,7 @@ async fn connect_endpoint(
     let assoc_id = endpoint.connect(addresses)?;
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            if endpoint.sctp_get_status(assoc_id)?.state == ConnState::Established {
+            if endpoint.status(assoc_id)?.state == ConnState::Established {
                 return Ok::<_, std::io::Error>(());
             }
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;

@@ -54,7 +54,7 @@ async fn descriptors_are_the_sctp_sockets() {
     assert_sctp_socket(&listener, libc::SOCK_STREAM);
 
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
-    let (connected, _) = client.sctp_connectx(&[bindaddr]).await.unwrap();
+    let (connected, _) = client.connectx(&[bindaddr]).await.unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
     assert_sctp_socket(&connected, libc::SOCK_STREAM);
     assert_sctp_socket(&accepted, libc::SOCK_STREAM);
@@ -90,7 +90,7 @@ async fn nodelay_round_trips_on_every_socket_type() {
 
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
     client.options().set_nodelay(true).unwrap();
-    let (connected, _) = client.sctp_connectx(&[bindaddr]).await.unwrap();
+    let (connected, _) = client.connectx(&[bindaddr]).await.unwrap();
     assert!(connected.options().nodelay().unwrap());
     connected.options().set_nodelay(false).unwrap();
     assert!(!connected.options().nodelay().unwrap());
@@ -107,9 +107,9 @@ async fn accepted_and_peeled_off_sockets_inherit_nodelay() {
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     socket.options().set_nodelay(true).unwrap();
     let listener = socket.listen(10).unwrap();
-    let bindaddr = listener.sctp_getladdrs(0).unwrap()[0];
+    let bindaddr = listener.local_addrs(0).unwrap()[0];
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
-    let _connected = client.sctp_connectx(&[bindaddr]).await.unwrap();
+    let _connected = client.connectx(&[bindaddr]).await.unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
     assert!(accepted.options().nodelay().unwrap());
 
@@ -120,7 +120,7 @@ async fn accepted_and_peeled_off_sockets_inherit_nodelay() {
         listener.options().set_nodelay(nodelay).unwrap();
         let client = create_client_socket(SocketToAssociation::OneToOne, true);
         client.options().set_nodelay(!nodelay).unwrap();
-        let _connected = client.sctp_connectx(&[bindaddr]).await.unwrap();
+        let _connected = client.connectx(&[bindaddr]).await.unwrap();
         let (accepted, _) = listener.accept().await.unwrap();
         assert_eq!(accepted.options().nodelay().unwrap(), nodelay);
     }
@@ -130,7 +130,7 @@ async fn accepted_and_peeled_off_sockets_inherit_nodelay() {
     listener.options().set_nodelay(true).unwrap();
     listener
         .options()
-        .sctp_subscribe_events(&[Event::Association], SubscribeEventAssocId::Future)
+        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Future)
         .unwrap();
     let client = create_client_socket(SocketToAssociation::OneToMany, true);
     let _connected = connect_endpoint(client, &[bindaddr]).await.unwrap();
@@ -157,7 +157,7 @@ async fn third_message_lag(nodelay: bool) -> std::time::Duration {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
     client.options().set_nodelay(nodelay).unwrap();
-    let (connected, _) = client.sctp_connectx(&[bindaddr]).await.unwrap();
+    let (connected, _) = client.connectx(&[bindaddr]).await.unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
     let send = |payload: &[u8]| {
         connected.send_data(SendData {
@@ -218,7 +218,7 @@ async fn descriptors_are_close_on_exec() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
     assert_close_on_exec_and_non_blocking(&listener);
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
-    let (connected, _) = client.sctp_connectx(&[bindaddr]).await.unwrap();
+    let (connected, _) = client.connectx(&[bindaddr]).await.unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
     assert_close_on_exec_and_non_blocking(&connected);
     assert_close_on_exec_and_non_blocking(&accepted);
@@ -226,7 +226,7 @@ async fn descriptors_are_close_on_exec() {
     let (listener, bindaddr) = create_endpoint_bind_and_listen(true);
     listener
         .options()
-        .sctp_subscribe_events(&[Event::Association], SubscribeEventAssocId::Future)
+        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Future)
         .unwrap();
     let client = create_client_socket(SocketToAssociation::OneToMany, true);
     let _connected = connect_endpoint(client, &[bindaddr]).await.unwrap();
@@ -248,21 +248,18 @@ async fn rto_info_round_trips() {
         min: 100,
     };
     let socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    socket
-        .options()
-        .sctp_set_rto_info(rto_info.clone())
-        .unwrap();
-    assert_eq!(socket.options().sctp_get_rto_info(0).unwrap(), rto_info);
+    socket.options().set_rto_info(rto_info.clone()).unwrap();
+    assert_eq!(socket.options().rto_info(0).unwrap(), rto_info);
     // Zero leaves a value unchanged.
     socket
         .options()
-        .sctp_set_rto_info(RtoInfo {
+        .set_rto_info(RtoInfo {
             max: 6000,
             ..Default::default()
         })
         .unwrap();
     assert_eq!(
-        socket.options().sctp_get_rto_info(0).unwrap(),
+        socket.options().rto_info(0).unwrap(),
         RtoInfo {
             max: 6000,
             ..rto_info.clone()
@@ -273,31 +270,25 @@ async fn rto_info_round_trips() {
         min: 7000,
         ..rto_info.clone()
     };
-    assert!(socket.options().sctp_set_rto_info(invalid).is_err());
+    assert!(socket.options().set_rto_info(invalid).is_err());
 
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
-    listener
-        .options()
-        .sctp_set_rto_info(rto_info.clone())
-        .unwrap();
-    assert_eq!(listener.options().sctp_get_rto_info(0).unwrap(), rto_info);
+    listener.options().set_rto_info(rto_info.clone()).unwrap();
+    assert_eq!(listener.options().rto_info(0).unwrap(), rto_info);
 
     // Associations start with the values of their socket.
-    let (connected, assoc_id) = socket.sctp_connectx(&[bindaddr]).await.unwrap();
-    let association = connected.options().sctp_get_rto_info(assoc_id).unwrap();
+    let (connected, assoc_id) = socket.connectx(&[bindaddr]).await.unwrap();
+    let association = connected.options().rto_info(assoc_id).unwrap();
     assert_eq!((association.max, association.min), (6000, 100));
     connected
         .options()
-        .sctp_set_rto_info(RtoInfo {
+        .set_rto_info(RtoInfo {
             assoc_id,
             max: 2000,
             ..Default::default()
         })
         .unwrap();
-    assert_eq!(
-        connected.options().sctp_get_rto_info(assoc_id).unwrap().max,
-        2000
-    );
+    assert_eq!(connected.options().rto_info(assoc_id).unwrap().max, 2000);
 }
 
 #[tokio::test]

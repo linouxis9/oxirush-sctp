@@ -18,8 +18,8 @@ use std::os::fd::AsFd;
 /// let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
 /// let options = socket.options();
 /// options.set_nodelay(true)?;
-/// options.sctp_setup_init_params(4, 4, 0, 0)?; // four streams each way
-/// options.sctp_subscribe_events(
+/// options.set_init_params(4, 4, 0, 0)?; // four streams each way
+/// options.subscribe_events(
 ///     &[Event::Association, Event::Shutdown],
 ///     SubscribeEventAssocId::All,
 /// )?;
@@ -36,7 +36,7 @@ impl SocketOptions<'_> {
     /// Subscribe to events. Every event is attempted; errors retain all failed events and errno
     /// values in [`EventSubscriptionError`][crate::EventSubscriptionError]. Associations
     /// accepted from a listener inherit its subscriptions.
-    pub fn sctp_subscribe_events(
+    pub fn subscribe_events(
         &self,
         events: &[Event],
         assoc_id: SubscribeEventAssocId,
@@ -45,7 +45,7 @@ impl SocketOptions<'_> {
     }
 
     /// Unsubscribe from events, with the same attempt-all error behavior as subscription.
-    pub fn sctp_unsubscribe_events(
+    pub fn unsubscribe_events(
         &self,
         events: &[Event],
         assoc_id: SubscribeEventAssocId,
@@ -56,7 +56,7 @@ impl SocketOptions<'_> {
     /// Set outgoing/incoming stream counts, INIT retry count and timeout in milliseconds for
     /// associations established after this call (`SCTP_INITMSG`). A zero leaves that value
     /// unchanged; by default Linux opens ten outgoing streams.
-    pub fn sctp_setup_init_params(
+    pub fn set_init_params(
         &self,
         ostreams: u16,
         istreams: u16,
@@ -76,17 +76,17 @@ impl SocketOptions<'_> {
     /// Enabled by default. On a [`OneToManyEndpoint`][crate::OneToManyEndpoint], disabling it
     /// loses the association's identity and can make partially delivered records from
     /// multihomed peers ambiguous.
-    pub fn sctp_request_rcvinfo(&self, on: bool) -> std::io::Result<()> {
+    pub fn request_rcvinfo(&self, on: bool) -> std::io::Result<()> {
         sys::request_rcvinfo_internal(self.core.as_fd(), on)
     }
 
     /// Enable metadata describing the next queued message (`SCTP_NXTINFO`).
-    pub fn sctp_request_nxtinfo(&self, on: bool) -> std::io::Result<()> {
+    pub fn request_nxtinfo(&self, on: bool) -> std::io::Result<()> {
         sys::request_nxtinfo_internal(self.core.as_fd(), on)
     }
 
     /// Set wire-order ancillary defaults used when a send supplies no `SendInfo`.
-    pub fn sctp_set_default_sendinfo(&self, info: SendInfo) -> std::io::Result<()> {
+    pub fn set_default_sendinfo(&self, info: SendInfo) -> std::io::Result<()> {
         sys::sctp_set_default_sendinfo_internal(self.core.as_fd(), info)
     }
 
@@ -108,12 +108,12 @@ impl SocketOptions<'_> {
     }
 
     /// Set association retransmission timeouts, or socket defaults when the ID is zero.
-    pub fn sctp_set_rto_info(&self, info: RtoInfo) -> std::io::Result<()> {
+    pub fn set_rto_info(&self, info: RtoInfo) -> std::io::Result<()> {
         sys::sctp_set_rto_info_internal(self.core.as_fd(), info)
     }
 
     /// Query association retransmission timeouts, or socket defaults when the ID is zero.
-    pub fn sctp_get_rto_info(&self, assoc_id: AssociationId) -> std::io::Result<RtoInfo> {
+    pub fn rto_info(&self, assoc_id: AssociationId) -> std::io::Result<RtoInfo> {
         sys::sctp_get_rto_info_internal(self.core.as_fd(), assoc_id)
     }
 

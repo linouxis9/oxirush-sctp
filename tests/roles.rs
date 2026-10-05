@@ -18,7 +18,7 @@ async fn one_to_many_socket_cannot_become_a_single_association() {
     let server = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     server.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let server = server.listen(4).unwrap();
-    let address = server.sctp_getladdrs(0).unwrap()[0];
+    let address = server.local_addrs(0).unwrap()[0];
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     match socket.connect(address).await {
         Ok(_) => panic!("a one-to-many socket became a single association"),
@@ -44,7 +44,7 @@ async fn configuration_and_registration_survive_listen_connect_and_accept() {
     assert_eq!(listener.as_raw_fd(), original);
     assert_eq!(listener.options().max_message_size(), 2048);
     assert!(listener.options().nodelay().unwrap());
-    let address = listener.sctp_getladdrs(0).unwrap()[0];
+    let address = listener.local_addrs(0).unwrap()[0];
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     client.options().set_max_message_size(1024);
     client.options().set_nodelay(true).unwrap();
@@ -69,7 +69,7 @@ async fn local_addr_reports_the_bound_address_in_every_role() {
         "127.0.0.1:0".parse().unwrap(),
         "127.0.0.2:0".parse().unwrap(),
     ];
-    server.sctp_bindx(&addresses, BindxFlags::Add).unwrap();
+    server.bindx(&addresses, BindxFlags::Add).unwrap();
     let address = server.local_addr().unwrap();
     assert!(addresses.iter().any(|bound| bound.ip() == address.ip()));
     assert_ne!(address.port(), 0);
@@ -85,7 +85,7 @@ async fn local_addr_reports_the_bound_address_in_every_role() {
     let endpoint = socket.into_endpoint(4).unwrap();
     assert_eq!(
         endpoint.local_addr().unwrap(),
-        endpoint.sctp_getladdrs(0).unwrap()[0]
+        endpoint.local_addrs(0).unwrap()[0]
     );
 }
 
@@ -96,7 +96,7 @@ async fn connected_and_accepted_sockets_report_stream_and_ppid_by_default() {
     let listener = server.listen(4).unwrap();
     let (client, assoc_id) = Socket::new_v4(SocketToAssociation::OneToOne)
         .unwrap()
-        .connect(listener.sctp_getladdrs(0).unwrap()[0])
+        .connect(listener.local_addrs(0).unwrap()[0])
         .await
         .unwrap();
     let (peer, _) = listener.accept().await.unwrap();
@@ -128,7 +128,7 @@ async fn endpoint_defaults_identify_associations_and_peeloff_preserves_configura
     let endpoint = socket.into_endpoint(4).unwrap();
     assert_eq!(endpoint.as_raw_fd(), original);
     assert_eq!(endpoint.options().max_message_size(), 100);
-    let address = endpoint.sctp_getladdrs(0).unwrap()[0];
+    let address = endpoint.local_addrs(0).unwrap()[0];
     let (client, _) = Socket::new_v6(SocketToAssociation::OneToOne)
         .unwrap()
         .connect(address)
@@ -168,7 +168,7 @@ async fn raw_stream_import_transfers_ownership_of_an_established_association() {
     let listener = socket.listen(2).unwrap();
     let (client, _) = Socket::new_v4(SocketToAssociation::OneToOne)
         .unwrap()
-        .connect(listener.sctp_getladdrs(0).unwrap()[0])
+        .connect(listener.local_addrs(0).unwrap()[0])
         .await
         .unwrap();
     let (peer, _) = listener.accept().await.unwrap();

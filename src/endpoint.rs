@@ -113,28 +113,28 @@ impl OneToManyEndpoint {
 
     /// The local address as `getsockname` reports it, with the port the kernel chose for port 0:
     /// one of several bound addresses, or the wildcard address when bound to it or not bound.
-    /// [`sctp_getladdrs`][Self::sctp_getladdrs] lists them all.
+    /// [`local_addrs`][Self::local_addrs] lists them all.
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         sys::local_addr(self.as_fd())
     }
 
     /// Add or remove local addresses across associations, subject to kernel ASCONF policy.
-    pub fn sctp_bindx(&self, addrs: &[SocketAddr], flags: BindxFlags) -> std::io::Result<()> {
+    pub fn bindx(&self, addrs: &[SocketAddr], flags: BindxFlags) -> std::io::Result<()> {
         sys::sctp_bindx_internal(self.as_fd(), addrs, flags)
     }
 
     /// Query an association's peer addresses.
-    pub fn sctp_getpaddrs(&self, assoc_id: AssociationId) -> std::io::Result<Vec<SocketAddr>> {
+    pub fn peer_addrs(&self, assoc_id: AssociationId) -> std::io::Result<Vec<SocketAddr>> {
         sys::sctp_getpaddrs_internal(self.as_fd(), assoc_id)
     }
 
     /// Query association local addresses; zero selects the endpoint's bound addresses.
-    pub fn sctp_getladdrs(&self, assoc_id: AssociationId) -> std::io::Result<Vec<SocketAddr>> {
+    pub fn local_addrs(&self, assoc_id: AssociationId) -> std::io::Result<Vec<SocketAddr>> {
         sys::sctp_getladdrs_internal(self.as_fd(), assoc_id)
     }
 
     /// Query one association's connection status.
-    pub fn sctp_get_status(&self, assoc_id: AssociationId) -> std::io::Result<ConnStatus> {
+    pub fn status(&self, assoc_id: AssociationId) -> std::io::Result<ConnStatus> {
         sys::sctp_get_status_internal(self.as_fd(), assoc_id)
     }
 

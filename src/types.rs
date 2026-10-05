@@ -3,7 +3,7 @@
 /// SCTP Association ID Type
 pub type AssociationId = i32;
 
-/// Flags used by `sctp_bindx`.
+/// Flags of `bindx`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindxFlags {
     /// Add the addresses passed (corresponding to `SCTP_BINDX_ADD_ADDR`)
@@ -50,7 +50,7 @@ pub struct ReceivedData {
     pub from: Option<std::net::SocketAddr>,
 
     /// Ancillary information about the received payload. `None` at the end of the stream and
-    /// when [`sctp_request_rcvinfo`][crate::SocketOptions::sctp_request_rcvinfo] turned it off.
+    /// when [`request_rcvinfo`][crate::SocketOptions::request_rcvinfo] turned it off.
     pub rcv_info: Option<RcvInfo>,
 
     /// Optional ancillary information about the next call to `recv`.
@@ -368,7 +368,7 @@ pub struct SendFailure {
 /// AssociationChange: Structure returned as notification for Association Change.
 ///
 /// To subscribe to this notification type, an application should call
-/// [`sctp_subscribe_events`][crate::SocketOptions::sctp_subscribe_events] using the [`Event`]
+/// [`subscribe_events`][crate::SocketOptions::subscribe_events] using the [`Event`]
 /// type as [`Event::Association`].
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -407,7 +407,7 @@ pub struct AssociationChange {
 /// Shutdown: Structure returned as notification when the peer shuts the association down.
 ///
 /// To subscribe to this notification type, an application should call
-/// [`sctp_subscribe_events`][crate::SocketOptions::sctp_subscribe_events] using the [`Event`]
+/// [`subscribe_events`][crate::SocketOptions::subscribe_events] using the [`Event`]
 /// type as [`Event::Shutdown`].
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -427,13 +427,13 @@ pub struct Shutdown {
 
 /// Event: Used for Subscribing for SCTP Events
 ///
-/// See [`sctp_subscribe_events`][`crate::SocketOptions::sctp_subscribe_events`] for the usage.
+/// See [`subscribe_events`][`crate::SocketOptions::subscribe_events`] for the usage.
 #[repr(u16)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Event {
     /// The deprecated `SCTP_SNDRCV` ancillary data, which this crate does not parse: see
-    /// [`sctp_request_rcvinfo`][crate::SocketOptions::sctp_request_rcvinfo].
+    /// [`request_rcvinfo`][crate::SocketOptions::request_rcvinfo].
     DataIo = (1 << 15),
 
     /// Event related to association change.

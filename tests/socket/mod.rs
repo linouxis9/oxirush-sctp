@@ -11,11 +11,11 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
 
     let result = client_socket
         .options()
-        .sctp_subscribe_events(&[Event::Association], SubscribeEventAssocId::Current);
+        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Current);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
     // Request Receive Info on client socket
-    let result = client_socket.options().sctp_request_rcvinfo(true);
+    let result = client_socket.options().request_rcvinfo(true);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
     let (listener, bindaddr) = create_endpoint_bind_and_listen(true);
@@ -29,7 +29,7 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
     let (connected, assoc_id) = sock_and_assoc_id.unwrap();
     eprintln!("assoc_id: {}", assoc_id);
 
-    let laddrs = connected.sctp_getladdrs(assoc_id);
+    let laddrs = connected.local_addrs(assoc_id);
     assert!(laddrs.is_ok(), "{:#?}", laddrs.err().unwrap());
 
     let client_addr = laddrs.unwrap()[0];
@@ -77,7 +77,7 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
     };
 
     // Now turn off Request Receive Info on client socket
-    let result = connected.options().sctp_request_rcvinfo(false);
+    let result = connected.options().request_rcvinfo(false);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
     // Again send the data to client
@@ -117,11 +117,11 @@ async fn socket_send_recv_nxtinfo_test() {
     let client_socket = create_client_socket(SocketToAssociation::OneToMany, true);
     let result = client_socket
         .options()
-        .sctp_subscribe_events(&[Event::Association], SubscribeEventAssocId::Current);
+        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Current);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
     // Request Receive Info on client socket
-    let result = client_socket.options().sctp_request_nxtinfo(true);
+    let result = client_socket.options().request_nxtinfo(true);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
     let (listener, bindaddr) = create_endpoint_bind_and_listen(true);
@@ -133,9 +133,9 @@ async fn socket_send_recv_nxtinfo_test() {
         sock_and_assoc_id.err().unwrap()
     );
     let (connected, assoc_id) = sock_and_assoc_id.unwrap();
-    connected.options().sctp_request_rcvinfo(false).unwrap();
+    connected.options().request_rcvinfo(false).unwrap();
 
-    let laddrs = connected.sctp_getladdrs(assoc_id);
+    let laddrs = connected.local_addrs(assoc_id);
     assert!(laddrs.is_ok(), "{:#?}", laddrs.err().unwrap());
 
     let client_addr = laddrs.unwrap()[0];
@@ -218,16 +218,15 @@ async fn socket_init_params_set_ostreams_success() {
 
     let result = listener
         .options()
-        .sctp_subscribe_events(&[Event::Association], SubscribeEventAssocId::Future);
+        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Future);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
     let client_ostreams = 100;
     let client_istreams = 5;
     let client_socket = create_client_socket(SocketToAssociation::OneToMany, true);
-    let result =
-        client_socket
-            .options()
-            .sctp_setup_init_params(client_ostreams, client_istreams, 0, 0);
+    let result = client_socket
+        .options()
+        .set_init_params(client_ostreams, client_istreams, 0, 0);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
     let assoc_id = connect_endpoint(client_socket, &[bindaddr]).await;
@@ -274,11 +273,11 @@ async fn socket_init_params_set_ostreams_success() {
 #[tokio::test]
 async fn socket_sctp_req_recv_info_success() {
     let one2one_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let result = one2one_socket.options().sctp_request_rcvinfo(true);
+    let result = one2one_socket.options().request_rcvinfo(true);
     assert!(result.is_ok(), "{:?}", result.err().unwrap());
 
     let one2many_socket = create_client_socket(SocketToAssociation::OneToMany, true);
-    let result = one2many_socket.options().sctp_request_rcvinfo(true);
+    let result = one2many_socket.options().request_rcvinfo(true);
     assert!(result.is_ok(), "{:?}", result.err().unwrap());
 }
 
@@ -296,8 +295,7 @@ async fn test_bindx_inaddr_any_add_success() {
     let sctp_socket = create_client_socket(SocketToAssociation::OneToOne, true);
     let bindaddr = Ipv4Addr::UNSPECIFIED;
 
-    let result =
-        sctp_socket.sctp_bindx(&[SocketAddr::new(IpAddr::V4(bindaddr), 0)], BindxFlags::Add);
+    let result = sctp_socket.bindx(&[SocketAddr::new(IpAddr::V4(bindaddr), 0)], BindxFlags::Add);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 }
 
@@ -306,8 +304,7 @@ async fn test_bindx_inaddr6_any_add_success() {
     let sctp_socket = create_client_socket(SocketToAssociation::OneToOne, false);
     let bindaddr = Ipv6Addr::UNSPECIFIED;
 
-    let result =
-        sctp_socket.sctp_bindx(&[SocketAddr::new(IpAddr::V6(bindaddr), 0)], BindxFlags::Add);
+    let result = sctp_socket.bindx(&[SocketAddr::new(IpAddr::V6(bindaddr), 0)], BindxFlags::Add);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 }
 
@@ -316,7 +313,7 @@ async fn test_bindx_inaddr_any_add_and_remove_failure() {
     let sctp_socket = create_client_socket(SocketToAssociation::OneToOne, false);
     let bindaddr6_localhost = Ipv6Addr::LOCALHOST;
 
-    let result = sctp_socket.sctp_bindx(
+    let result = sctp_socket.bindx(
         &[SocketAddr::new(IpAddr::V6(bindaddr6_localhost), 0)],
         BindxFlags::Add,
     );
@@ -337,7 +334,7 @@ async fn test_bindx_inaddr_any_add_and_remove_failure() {
     );
     let port = u16::from_be(address.sin6_port);
 
-    let result = sctp_socket.sctp_bindx(
+    let result = sctp_socket.bindx(
         &[SocketAddr::new(IpAddr::V6(bindaddr6_localhost), port)],
         BindxFlags::Remove,
     );
@@ -367,11 +364,11 @@ async fn connect_in_network_namespace_times_out() {
     // One INIT, given up after 100 ms.
     client_socket
         .options()
-        .sctp_setup_init_params(1, 1, 1, 100)
+        .set_init_params(1, 1, 1, 100)
         .unwrap();
     client_socket
         .options()
-        .sctp_set_rto_info(RtoInfo {
+        .set_rto_info(RtoInfo {
             assoc_id: 0,
             initial: 100,
             max: 100,

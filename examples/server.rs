@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 async fn serve(association: ConnectedSocket, peer: SocketAddr) -> std::io::Result<()> {
-    let status = association.sctp_get_status(0)?;
+    let status = association.status(0)?;
     println!(
         "{peer}: {:?}, {} outgoing and {} incoming streams, nodelay {}",
         status.state,
@@ -85,8 +85,8 @@ async fn main() -> std::io::Result<()> {
     // The associations accepted later inherit these options.
     let options = socket.options();
     options.set_nodelay(true)?; // send small messages at once
-    options.sctp_setup_init_params(4, 4, 0, 0)?; // four streams each way
-    options.sctp_subscribe_events(
+    options.set_init_params(4, 4, 0, 0)?; // four streams each way
+    options.subscribe_events(
         &[Event::Association, Event::Shutdown],
         SubscribeEventAssocId::All,
     )?;

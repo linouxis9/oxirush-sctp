@@ -16,10 +16,10 @@ async fn connected_default_sendinfo_success() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
 
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let result = client_socket.options().sctp_request_rcvinfo(true);
+    let result = client_socket.options().request_rcvinfo(true);
     assert!(result.is_ok(), "{:?}", result.err().unwrap());
 
-    let result = client_socket.sctp_connectx(&[bindaddr]).await;
+    let result = client_socket.connectx(&[bindaddr]).await;
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
     let (connected, assoc_id) = result.unwrap();
 
@@ -39,7 +39,7 @@ async fn connected_default_sendinfo_success() {
         context: 0,
     };
 
-    let result = accepted.options().sctp_set_default_sendinfo(sendinfo);
+    let result = accepted.options().set_default_sendinfo(sendinfo);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
     let senddata = SendData {
@@ -98,10 +98,10 @@ async fn connected_send_some_sendinfo_success() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
 
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let result = client_socket.options().sctp_request_rcvinfo(true);
+    let result = client_socket.options().request_rcvinfo(true);
     assert!(result.is_ok(), "{:?}", result.err().unwrap());
 
-    let result = client_socket.sctp_connectx(&[bindaddr]).await;
+    let result = client_socket.connectx(&[bindaddr]).await;
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
     let (connected, assoc_id) = result.unwrap();
 
@@ -176,15 +176,15 @@ async fn test_shutdown_event() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
 
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let result = client_socket.options().sctp_request_rcvinfo(true);
+    let result = client_socket.options().request_rcvinfo(true);
     assert!(result.is_ok(), "{:?}", result.err().unwrap());
 
-    let result = client_socket.sctp_connectx(&[bindaddr]).await;
+    let result = client_socket.connectx(&[bindaddr]).await;
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
     let (connected, client_assoc_id) = result.unwrap();
     let result = connected
         .options()
-        .sctp_subscribe_events(&[Event::Shutdown], SubscribeEventAssocId::All);
+        .subscribe_events(&[Event::Shutdown], SubscribeEventAssocId::All);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
     let accept = listener.accept().await;
@@ -223,10 +223,10 @@ async fn test_shutdown_event() {
 async fn a_zero_linger_aborts_the_association_on_close() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let (connected, _) = client_socket.sctp_connectx(&[bindaddr]).await.unwrap();
+    let (connected, _) = client_socket.connectx(&[bindaddr]).await.unwrap();
     connected
         .options()
-        .sctp_subscribe_events(
+        .subscribe_events(
             &[Event::Association, Event::Shutdown],
             SubscribeEventAssocId::All,
         )
@@ -259,10 +259,10 @@ async fn test_get_status() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
 
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let result = client_socket.options().sctp_request_rcvinfo(true);
+    let result = client_socket.options().request_rcvinfo(true);
     assert!(result.is_ok(), "{:?}", result.err().unwrap());
 
-    let result = client_socket.sctp_connectx(&[bindaddr]).await;
+    let result = client_socket.connectx(&[bindaddr]).await;
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
     let (connected, client_assoc_id) = result.unwrap();
 
@@ -270,7 +270,7 @@ async fn test_get_status() {
     assert!(accept.is_ok(), "{:#?}", accept.err().unwrap());
     let (accepted, client_addr) = accept.unwrap();
 
-    let result = connected.sctp_get_status(0);
+    let result = connected.status(0);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
     let status = result.unwrap();
     assert_eq!(status.state, ConnState::Established);
@@ -280,7 +280,7 @@ async fn test_get_status() {
         client_assoc_id, status.assoc_id
     );
 
-    let result = accepted.sctp_get_status(0);
+    let result = accepted.status(0);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
     let status = result.unwrap();
     assert!(matches!(status.state, ConnState::Established));
@@ -311,7 +311,7 @@ async fn futures_are_send() {
     ));
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
     let addrs = [bindaddr];
-    let connect = client.sctp_connectx(&addrs);
+    let connect = client.connectx(&addrs);
     assert_send(&connect);
     let (connected, _) = connect.await.unwrap();
     assert_send(&connected.recv());
@@ -344,7 +344,7 @@ async fn send_waits_for_room_instead_of_failing_with_would_block() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
     set_send_buffer(client.as_raw_fd());
-    let (connected, _) = client.sctp_connectx(&[bindaddr]).await.unwrap();
+    let (connected, _) = client.connectx(&[bindaddr]).await.unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
 
     let data = SendData {
@@ -394,7 +394,7 @@ async fn send_after_peer_closed_fails_without_sigpipe() {
 
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
-    let (connected, _) = client.sctp_connectx(&[bindaddr]).await.unwrap();
+    let (connected, _) = client.connectx(&[bindaddr]).await.unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
     drop(accepted);
     // The association has ended once the client reads the end of the stream.
@@ -434,9 +434,9 @@ async fn send_after_peer_closed_fails_without_sigpipe() {
 async fn pair_receiving_rcvinfo_and_nxtinfo() -> (ConnectedSocket, ConnectedSocket) {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
-    client.options().sctp_request_rcvinfo(true).unwrap();
-    client.options().sctp_request_nxtinfo(true).unwrap();
-    let (receiving, _) = client.sctp_connectx(&[bindaddr]).await.unwrap();
+    client.options().request_rcvinfo(true).unwrap();
+    client.options().request_nxtinfo(true).unwrap();
+    let (receiving, _) = client.connectx(&[bindaddr]).await.unwrap();
     let (sending, _) = listener.accept().await.unwrap();
     (sending, receiving)
 }
@@ -477,7 +477,7 @@ async fn recv_returns_rcvinfo_and_nxtinfo_together() {
     // The data I/O event adds an `SCTP_SNDRCV` control message.
     receiving
         .options()
-        .sctp_subscribe_events(&[Event::DataIo], SubscribeEventAssocId::All)
+        .subscribe_events(&[Event::DataIo], SubscribeEventAssocId::All)
         .unwrap();
     send_two_messages(&sending).await;
     assert_first_with_infos(receiving.recv().await.unwrap());
@@ -583,14 +583,14 @@ async fn pair_for_long_messages(
     // Retransmit quickly when the receive window reopens.
     client
         .options()
-        .sctp_set_rto_info(RtoInfo {
+        .set_rto_info(RtoInfo {
             assoc_id: 0,
             initial: 10,
             max: 10,
             min: 10,
         })
         .unwrap();
-    let (sending, _) = client.sctp_connectx(&[bindaddr]).await.unwrap();
+    let (sending, _) = client.connectx(&[bindaddr]).await.unwrap();
     let (receiving, _) = listener.accept().await.unwrap();
     Some((sending, receiving))
 }
@@ -698,8 +698,8 @@ async fn recv_rejects_messages_longer_than_4_mib() {
             panic!(
                 "send/receive of {} octets did not complete within 10 seconds; sender: {:?}; receiver: {:?}",
                 len,
-                sending.sctp_get_status(0),
-                receiving.sctp_get_status(0),
+                sending.status(0),
+                receiving.status(0),
             )
         })
         .unwrap();
@@ -722,7 +722,7 @@ async fn recv_limit_is_set_per_socket_and_inherited_on_accept() {
     assert_eq!(listener.options().max_message_size(), 4 << 20);
     listener.options().set_max_message_size(1000);
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
-    let (sending, _) = client.sctp_connectx(&[bindaddr]).await.unwrap();
+    let (sending, _) = client.connectx(&[bindaddr]).await.unwrap();
     let (receiving, _) = listener.accept().await.unwrap();
     assert_eq!(receiving.options().max_message_size(), 1000);
     for len in [1001, 1000] {

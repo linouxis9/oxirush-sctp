@@ -47,18 +47,18 @@ impl Listener {
 
     /// The local address as `getsockname` reports it, with the port the kernel chose for port 0:
     /// one of several bound addresses, or the wildcard address when bound to it or not bound.
-    /// [`sctp_getladdrs`][Self::sctp_getladdrs] lists them all.
+    /// [`local_addrs`][Self::local_addrs] lists them all.
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         sys::local_addr(self.as_fd())
     }
 
     /// Add or remove local addresses.
-    pub fn sctp_bindx(&self, addrs: &[SocketAddr], flags: BindxFlags) -> std::io::Result<()> {
+    pub fn bindx(&self, addrs: &[SocketAddr], flags: BindxFlags) -> std::io::Result<()> {
         sys::sctp_bindx_internal(self.as_fd(), addrs, flags)
     }
 
     /// Query listening addresses; use association ID zero.
-    pub fn sctp_getladdrs(&self, assoc_id: AssociationId) -> std::io::Result<Vec<SocketAddr>> {
+    pub fn local_addrs(&self, assoc_id: AssociationId) -> std::io::Result<Vec<SocketAddr>> {
         sys::sctp_getladdrs_internal(self.as_fd(), assoc_id)
     }
 

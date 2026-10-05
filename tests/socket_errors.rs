@@ -38,7 +38,7 @@ async fn refused_connect_completes_with_association_events() {
         if subscribed {
             client
                 .options()
-                .sctp_subscribe_events(&[Event::Association], SubscribeEventAssocId::All)
+                .subscribe_events(&[Event::Association], SubscribeEventAssocId::All)
                 .unwrap();
         }
         let result = tokio::time::timeout(Duration::from_secs(2), client.connect(address))
@@ -53,11 +53,11 @@ async fn successful_connect_keeps_its_association_notification() {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let listener = socket.listen(1).unwrap();
-    let address = listener.sctp_getladdrs(0).unwrap()[0];
+    let address = listener.local_addrs(0).unwrap()[0];
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     client
         .options()
-        .sctp_subscribe_events(&[Event::Association], SubscribeEventAssocId::All)
+        .subscribe_events(&[Event::Association], SubscribeEventAssocId::All)
         .unwrap();
     let (client, _) = tokio::time::timeout(Duration::from_secs(2), client.connect(address))
         .await
@@ -81,7 +81,7 @@ async fn peer_abort_without_notifications_completes_receive() {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let listener = socket.listen(1).unwrap();
-    let address = listener.sctp_getladdrs(0).unwrap()[0];
+    let address = listener.local_addrs(0).unwrap()[0];
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     let (client, _) = client.connect(address).await.unwrap();
     let (peer, _) = listener.accept().await.unwrap();
@@ -98,12 +98,12 @@ async fn positive_linger_is_rejected_without_changing_close_behavior() {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let listener = socket.listen(1).unwrap();
-    let address = listener.sctp_getladdrs(0).unwrap()[0];
+    let address = listener.local_addrs(0).unwrap()[0];
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     let (client, _) = client.connect(address).await.unwrap();
     let (peer, _) = listener.accept().await.unwrap();
     peer.options()
-        .sctp_subscribe_events(
+        .subscribe_events(
             &[Event::Shutdown, Event::Association],
             SubscribeEventAssocId::All,
         )
@@ -134,10 +134,10 @@ async fn aborted_partial_delivery_does_not_contaminate_another_sender() {
         let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
         socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
         set_int(&socket, libc::SO_RCVBUF, 8192);
-        socket.options().sctp_request_rcvinfo(rcvinfo).unwrap();
+        socket.options().request_rcvinfo(rcvinfo).unwrap();
         let listener = socket.into_endpoint(2).unwrap();
-        listener.options().sctp_request_rcvinfo(rcvinfo).unwrap();
-        let address = listener.sctp_getladdrs(0).unwrap()[0];
+        listener.options().request_rcvinfo(rcvinfo).unwrap();
+        let address = listener.local_addrs(0).unwrap()[0];
         let a = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
         set_int(&a, libc::SO_SNDBUF, 1 << 20);
         let (a, _) = a.connect(address).await.unwrap();
@@ -158,7 +158,7 @@ async fn aborted_partial_delivery_does_not_contaminate_another_sender() {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let b = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
         let (b, _) = b.connect(address).await.unwrap();
-        let b_address = b.sctp_getladdrs(0).unwrap()[0];
+        let b_address = b.local_addrs(0).unwrap()[0];
         b.send_data(SendData {
             payload: b"hello from B".to_vec(),
             snd_info: None,

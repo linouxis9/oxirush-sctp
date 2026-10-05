@@ -41,7 +41,7 @@ async fn sockets_close_their_descriptor_whatever_happens_to_them() {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let listener = socket.listen(10).unwrap();
-    let address = listener.sctp_getladdrs(0).unwrap()[0];
+    let address = listener.local_addrs(0).unwrap()[0];
     let with_listener = open_fds();
 
     // A connect dropped before it completes, as `tokio::time::timeout` does.
@@ -49,7 +49,7 @@ async fn sockets_close_their_descriptor_whatever_happens_to_them() {
     for _ in 0..10 {
         let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
         let addresses = [address];
-        let mut connect = Box::pin(client.sctp_connectx(&addresses));
+        let mut connect = Box::pin(client.connectx(&addresses));
         let polled = std::future::poll_fn(|cx| Poll::Ready(connect.as_mut().poll(cx))).await;
         if polled.is_pending() {
             cancelled += 1;
@@ -65,7 +65,7 @@ async fn sockets_close_their_descriptor_whatever_happens_to_them() {
     assert_eq!(
         open_fds(),
         with_listener,
-        "a cancelled `sctp_connectx` leaks the descriptor"
+        "a cancelled `connectx` leaks the descriptor"
     );
 
     // A refused connect.
@@ -83,7 +83,7 @@ async fn sockets_close_their_descriptor_whatever_happens_to_them() {
     // Connected and accepted sockets.
     for _ in 0..10 {
         let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-        let (connected, _) = client.sctp_connectx(&[address]).await.unwrap();
+        let (connected, _) = client.connectx(&[address]).await.unwrap();
         let (accepted, _) = listener.accept().await.unwrap();
         drop(connected);
         drop(accepted);

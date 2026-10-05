@@ -91,7 +91,7 @@ use oxirush_sctp::{
 fn listen() -> std::io::Result<Listener> {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
     socket.bind("0.0.0.0:38412".parse().unwrap())?;
-    socket.options().sctp_subscribe_events(
+    socket.options().subscribe_events(
         &[Event::Association, Event::Shutdown],
         SubscribeEventAssocId::All,
     )?;
@@ -144,7 +144,7 @@ A dropped socket shuts its association down. With `options().set_linger(Some(Dur
 
 ### Multihoming
 
-`sctp_bindx` binds several local addresses and `sctp_connectx` gives several addresses of the peer. The addresses of one call share a port, which the kernel chooses for port 0.
+`bindx` binds several local addresses and `connectx` gives several addresses of the peer. The addresses of one call share a port, which the kernel chooses for port 0.
 
 ```rust,no_run
 use oxirush_sctp::{BindxFlags, ConnectedSocket, Socket, SocketToAssociation};
@@ -152,10 +152,10 @@ use std::net::SocketAddr;
 
 async fn connect(local: &[SocketAddr], peer: &[SocketAddr]) -> std::io::Result<ConnectedSocket> {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.sctp_bindx(local, BindxFlags::Add)?;
-    let (association, id) = socket.sctp_connectx(peer).await?;
-    println!("local addresses {:?}", association.sctp_getladdrs(id)?);
-    println!("peer addresses {:?}", association.sctp_getpaddrs(id)?);
+    socket.bindx(local, BindxFlags::Add)?;
+    let (association, id) = socket.connectx(peer).await?;
+    println!("local addresses {:?}", association.local_addrs(id)?);
+    println!("peer addresses {:?}", association.peer_addrs(id)?);
     Ok(association)
 }
 ```
@@ -172,13 +172,13 @@ use oxirush_sctp::{ConnectedSocket, Socket};
 fn configure(socket: &Socket) -> std::io::Result<()> {
     let options = socket.options();
     options.set_nodelay(true)?; // send small messages at once
-    options.sctp_setup_init_params(4, 4, 0, 0)?; // four streams each way
+    options.set_init_params(4, 4, 0, 0)?; // four streams each way
     options.set_max_message_size(64 << 10); // refuse longer received messages
     Ok(())
 }
 
 fn report(association: &ConnectedSocket) -> std::io::Result<()> {
-    let status = association.sctp_get_status(0)?;
+    let status = association.status(0)?;
     println!(
         "{:?}, {} outgoing streams, primary path {}",
         status.state, status.outstreams, status.peer_primary.address
@@ -222,7 +222,7 @@ async fn echo() -> std::io::Result<()> {
 | --- | --- | --- |
 | `Socket` | `Socket::new_v4`, `Socket::new_v6` | binds, then becomes one of the next three |
 | `Listener` | `Socket::listen` | accepts associations |
-| `ConnectedSocket` | `Socket::connect`, `Socket::sctp_connectx`, `Listener::accept`, `OneToManyEndpoint::peeloff` | sends and receives on one association |
+| `ConnectedSocket` | `Socket::connect`, `Socket::connectx`, `Listener::accept`, `OneToManyEndpoint::peeloff` | sends and receives on one association |
 | `OneToManyEndpoint` | `Socket::into_endpoint` | sends and receives on many associations |
 | `SocketOptions` | `options()` on the four above | reads and sets options |
 
@@ -232,7 +232,7 @@ async fn echo() -> std::io::Result<()> {
 - A received message longer than `options().max_message_size()`, 4 MiB by default, is discarded and reported as an `InvalidData` error. The next `recv` returns the message after it.
 - `send` waits for room in the send buffer. A dropped `send` future has sent nothing.
 - A sent message must fit in the send buffer (`SO_SNDBUF`): a longer one fails with `EMSGSIZE`. An empty one fails with `EINVAL`, as does a stream that the association does not have.
-- `ReceivedData::stream_id`, `ppid` and `assoc_id` read the receive information (`SCTP_RCVINFO`) that every socket requests. They return `None` after `options().sctp_request_rcvinfo(false)`, and for the empty message that ends an association.
+- `ReceivedData::stream_id`, `ppid` and `assoc_id` read the receive information (`SCTP_RCVINFO`) that every socket requests. They return `None` after `options().request_rcvinfo(false)`, and for the empty message that ends an association.
 
 ### Payload protocol identifiers
 
@@ -250,18 +250,18 @@ async fn echo() -> std::io::Result<()> {
 | 6.1.5 `SCTP_SHUTDOWN_EVENT` | `Notification::Shutdown` |
 | 6.1.11 `SCTP_SEND_FAILED_EVENT` | `Notification::SendFailure` |
 | 6.1: the other notifications | `Notification::Unsupported`, with their type and octets |
-| 8.1.1 `SCTP_RTOINFO` | `sctp_set_rto_info`, `sctp_get_rto_info` |
-| 8.1.3 `SCTP_INITMSG` | `sctp_setup_init_params` |
+| 8.1.1 `SCTP_RTOINFO` | `set_rto_info`, `rto_info` |
+| 8.1.3 `SCTP_INITMSG` | `set_init_params` |
 | 8.1.4 `SO_LINGER` | `set_linger`, off or zero |
 | 8.1.5 `SCTP_NODELAY` | `set_nodelay`, `nodelay` |
 | 8.1.12 `SCTP_PEER_ADDR_PARAMS` | `peer_address_params`, `set_peer_address_params`, `request_heartbeat`: heartbeat and retransmission limit |
-| 8.1.28 `SCTP_EVENT` | `sctp_subscribe_events`, `sctp_unsubscribe_events` |
-| 8.1.29 `SCTP_RECVRCVINFO`, 8.1.30 `SCTP_RECVNXTINFO` | `sctp_request_rcvinfo`, `sctp_request_nxtinfo` |
-| 8.1.31 `SCTP_DEFAULT_SNDINFO` | `sctp_set_default_sendinfo` |
-| 8.2.1 `SCTP_STATUS` | `sctp_get_status` |
-| 9.1 `sctp_bindx`, 9.9 `sctp_connectx` | `sctp_bindx`, `sctp_connectx` |
+| 8.1.28 `SCTP_EVENT` | `subscribe_events`, `unsubscribe_events` |
+| 8.1.29 `SCTP_RECVRCVINFO`, 8.1.30 `SCTP_RECVNXTINFO` | `request_rcvinfo`, `request_nxtinfo` |
+| 8.1.31 `SCTP_DEFAULT_SNDINFO` | `set_default_sendinfo` |
+| 8.2.1 `SCTP_STATUS` | `status` |
+| 9.1 `sctp_bindx`, 9.9 `sctp_connectx` | `bindx`, `connectx` |
 | 9.2 `sctp_peeloff` | `OneToManyEndpoint::peeloff` |
-| 9.3 `sctp_getpaddrs`, 9.5 `sctp_getladdrs` | `sctp_getpaddrs`, `sctp_getladdrs` |
+| 9.3 `sctp_getpaddrs`, 9.5 `sctp_getladdrs` | `peer_addrs`, `local_addrs` |
 
 The rest is not wrapped: among others authentication, partial reliability, the association parameters, the choice of the primary path and the buffer sizes. The interfaces that the RFC deprecates are left out on purpose.
 

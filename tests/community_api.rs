@@ -30,7 +30,7 @@ async fn subscription_failure_retains_kernel_source_and_attempts_later_events() 
     assert!(!event_enabled(&socket, Event::Association));
     let error = socket
         .options()
-        .sctp_subscribe_events(
+        .subscribe_events(
             &[Event::Unknown, Event::Association],
             SubscribeEventAssocId::All,
         )
@@ -52,7 +52,7 @@ async fn subscription_failure_retains_kernel_source_and_attempts_later_events() 
     assert_eq!(failures[0].1.raw_os_error(), Some(libc::EINVAL));
     let error = socket
         .options()
-        .sctp_unsubscribe_events(
+        .unsubscribe_events(
             &[Event::Unknown, Event::Association],
             SubscribeEventAssocId::All,
         )
@@ -74,7 +74,7 @@ async fn subscription_failure_retains_kernel_source_and_attempts_later_events() 
 fn server() -> Listener {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    socket.options().sctp_request_rcvinfo(true).unwrap();
+    socket.options().request_rcvinfo(true).unwrap();
     socket.listen(2).unwrap()
 }
 
@@ -99,7 +99,7 @@ async fn borrowed_send_converts_host_ppid_without_changing_legacy_wire_order() {
     let server = server();
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     let (client, _) = socket
-        .connect(server.sctp_getladdrs(0).unwrap()[0])
+        .connect(server.local_addrs(0).unwrap()[0])
         .await
         .unwrap();
     let (peer, _) = server.accept().await.unwrap();
@@ -139,9 +139,9 @@ async fn one_to_many_connected_endpoint_can_connect_another_peer() {
     let b = server();
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     let client = socket.into_endpoint(2).unwrap();
-    let assoc_a = client.connect(&[a.sctp_getladdrs(0).unwrap()[0]]).unwrap();
+    let assoc_a = client.connect(&[a.local_addrs(0).unwrap()[0]]).unwrap();
     let (peer_a, _) = a.accept().await.unwrap();
-    let assoc_b = client.connect(&[b.sctp_getladdrs(0).unwrap()[0]]).unwrap();
+    let assoc_b = client.connect(&[b.local_addrs(0).unwrap()[0]]).unwrap();
     let (peer_b, _) = tokio::time::timeout(std::time::Duration::from_secs(2), b.accept())
         .await
         .unwrap()
@@ -186,7 +186,7 @@ async fn one_to_many_connected_endpoint_can_connect_another_peer() {
         .unwrap();
     expect_message(&peer_b, b"still B", 60).await;
     let c = server();
-    let assoc_c = client.connect(&[c.sctp_getladdrs(0).unwrap()[0]]).unwrap();
+    let assoc_c = client.connect(&[c.local_addrs(0).unwrap()[0]]).unwrap();
     let (peer_c, _) = tokio::time::timeout(std::time::Duration::from_secs(2), c.accept())
         .await
         .unwrap()
@@ -214,8 +214,8 @@ async fn one_to_many_endpoint_can_initiate_multiple_outgoing_associations() {
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let client = socket.into_endpoint(2).unwrap();
-    let addr_a = a.sctp_getladdrs(0).unwrap()[0];
-    let addr_b = b.sctp_getladdrs(0).unwrap()[0];
+    let addr_a = a.local_addrs(0).unwrap()[0];
+    let addr_b = b.local_addrs(0).unwrap()[0];
     let assoc_a = client.connect(&[addr_a]).unwrap();
     let assoc_b = client.connect(&[addr_b]).unwrap();
     assert_ne!(assoc_a, assoc_b);
@@ -275,7 +275,7 @@ async fn heartbeat_and_path_settings_roundtrip_on_defaults_and_established_paths
         params
     );
     let server = server();
-    let address = server.sctp_getladdrs(0).unwrap()[0];
+    let address = server.local_addrs(0).unwrap()[0];
     let (client, _) = socket.connect(address).await.unwrap();
     let (_peer, _) = server.accept().await.unwrap();
     let mut params = client.options().peer_address_params(0, address).unwrap();
@@ -310,13 +310,13 @@ async fn confirmed_peer_address_is_a_typed_notification() {
         "127.0.0.1:0".parse().unwrap(),
         "127.0.0.2:0".parse().unwrap(),
     ];
-    socket.sctp_bindx(&addresses, BindxFlags::Add).unwrap();
+    socket.bindx(&addresses, BindxFlags::Add).unwrap();
     let server = socket.listen(2).unwrap();
-    let addresses = server.sctp_getladdrs(0).unwrap();
+    let addresses = server.local_addrs(0).unwrap();
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     client
         .options()
-        .sctp_subscribe_events(&[Event::Address], SubscribeEventAssocId::All)
+        .subscribe_events(&[Event::Address], SubscribeEventAssocId::All)
         .unwrap();
     // The server announces its second address, which stays unconfirmed until it acknowledges
     // a heartbeat.
@@ -362,7 +362,7 @@ async fn send_failure_notification_preserves_payload_and_metadata() {
     let client = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     client
         .options()
-        .sctp_subscribe_events(&[Event::SendFailureEvent], SubscribeEventAssocId::All)
+        .subscribe_events(&[Event::SendFailureEvent], SubscribeEventAssocId::All)
         .unwrap();
     let client = client.into_endpoint(1).unwrap();
     client
@@ -414,7 +414,7 @@ async fn concurrent_receivers_preserve_record_boundaries_and_streams() {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     socket.options().set_nodelay(true).unwrap();
     let (sender, _) = socket
-        .connect(server.sctp_getladdrs(0).unwrap()[0])
+        .connect(server.local_addrs(0).unwrap()[0])
         .await
         .unwrap();
     let (receiver, _) = server.accept().await.unwrap();
@@ -453,9 +453,9 @@ async fn concurrent_receivers_preserve_record_boundaries_and_streams() {
 async fn ipv6_borrowed_send_and_path_controls_preserve_native_addresses() {
     let server = Socket::new_v6(SocketToAssociation::OneToOne).unwrap();
     server.bind("[::1]:0".parse().unwrap()).unwrap();
-    server.options().sctp_request_rcvinfo(true).unwrap();
+    server.options().request_rcvinfo(true).unwrap();
     let server = server.listen(1).unwrap();
-    let address = server.sctp_getladdrs(0).unwrap()[0];
+    let address = server.local_addrs(0).unwrap()[0];
     assert!(address.is_ipv6());
     let socket = Socket::new_v6(SocketToAssociation::OneToOne).unwrap();
     let (client, _) = socket.connect(address).await.unwrap();
@@ -497,14 +497,14 @@ async fn connected_bindx_adds_and_removes_local_addresses() {
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     client.bind("127.0.0.2:0".parse().unwrap()).unwrap();
     let (client, _) = client
-        .connect(server.sctp_getladdrs(0).unwrap()[0])
+        .connect(server.local_addrs(0).unwrap()[0])
         .await
         .unwrap();
     let (_peer, _) = server.accept().await.unwrap();
-    let port = client.sctp_getladdrs(0).unwrap()[0].port();
+    let port = client.local_addrs(0).unwrap()[0].port();
     let added = std::net::SocketAddr::from(([127, 0, 0, 3], port));
-    client.sctp_bindx(&[added], BindxFlags::Add).unwrap();
-    assert!(client.sctp_getladdrs(0).unwrap().contains(&added));
-    client.sctp_bindx(&[added], BindxFlags::Remove).unwrap();
-    assert!(!client.sctp_getladdrs(0).unwrap().contains(&added));
+    client.bindx(&[added], BindxFlags::Add).unwrap();
+    assert!(client.local_addrs(0).unwrap().contains(&added));
+    client.bindx(&[added], BindxFlags::Remove).unwrap();
+    assert!(!client.local_addrs(0).unwrap().contains(&added));
 }
