@@ -304,6 +304,42 @@ async fn heartbeat_and_path_settings_roundtrip_on_defaults_and_established_paths
 }
 
 #[tokio::test]
+async fn confirmed_peer_address_is_a_typed_notification() {
+    let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
+    let addresses = [
+        "127.0.0.1:0".parse().unwrap(),
+        "127.0.0.2:0".parse().unwrap(),
+    ];
+    socket.sctp_bindx(&addresses, BindxFlags::Add).unwrap();
+    let server = socket.listen(2).unwrap();
+    let addresses = server.sctp_getladdrs(0).unwrap();
+    let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
+    client
+        .options()
+        .sctp_subscribe_events(&[Event::Address], SubscribeEventAssocId::All)
+        .unwrap();
+    // The server announces its second address, which stays unconfirmed until it acknowledges
+    // a heartbeat.
+    let (client, assoc_id) = client.connect(addresses[0]).await.unwrap();
+    client
+        .options()
+        .request_heartbeat(assoc_id, addresses[1])
+        .unwrap();
+    let NotificationOrData::Notification(Notification::PeerAddressChange(change)) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), client.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    else {
+        panic!("not a peer address change");
+    };
+    assert_eq!(
+        (change.address, change.state, change.assoc_id),
+        (addresses[1], PeerAddressState::Confirmed, assoc_id)
+    );
+}
+
+#[tokio::test]
 async fn send_failure_notification_preserves_payload_and_metadata() {
     // A bound, non-listening SCTP port answers INIT with ABORT instead of silently timing out.
     let refused = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
