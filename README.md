@@ -4,252 +4,276 @@
 [![Documentation](https://docs.rs/oxirush-sctp/badge.svg)](https://docs.rs/oxirush-sctp)
 [![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg)](https://github.com/linouxis9/oxirush-sctp/blob/main/LICENSE)
 
-Async Rust APIs for the Linux kernel SCTP stack, per RFC 6458, on Tokio. It is a maintained fork of [sctp-rs](https://github.com/gabhijit/ellora) 0.3.1 by Abhijit Gadgil.
+Async SCTP sockets for [Tokio](https://tokio.rs) on Linux. `send` and `recv` move one whole message at a time, with its stream and payload protocol identifier, over the kernel's SCTP implementation and its sockets API ([RFC 6458](https://www.rfc-editor.org/rfc/rfc6458.html)).
 
-## Features
+- **One-to-one sockets**, which connect, listen and accept like TCP ones, and **one-to-many sockets**, which carry many associations each
+- **Multihoming**: several local and peer addresses in one association
+- **Notifications**: an association comes up, is shut down or is lost, a peer address changes state, a message could not be delivered
+- **No `libsctp`**: the crate makes the system calls itself
 
-- **Kernel SCTP, no `libsctp`** — system calls through `libc`, using Rust socket addresses
-- **Explicit socket roles** — `Socket` configures and binds; `Listener` accepts one-to-one associations; `ConnectedSocket` owns one association; `OneToManyEndpoint` shares I/O across multiple associations
-- **Multi-homing** — local address changes, multihomed connects, address lists and association peel-off
-- **Whole messages** — `recv` assembles complete records through `MSG_EOR`, retaining partial delivery across cancellation; records over a configurable limit, 4 MiB by default, are drained and reported as `InvalidData`
-- **Waiting sends** — borrowed `send` and owned `send_data` wait for capacity and never raise `SIGPIPE`; `SendOptions` uses host-order PPIDs
-- **Notifications and ancillary data** — typed association, shutdown, peer-address and modern send-failure events; unsupported notifications preserve their type and bytes; bounded `SCTP_RCVINFO`/`SCTP_NXTINFO` parsing
-- **Shared configuration** — `options()` borrows the same implementation on every role; kernel settings and the receive limit survive consuming transitions
-- **Owned descriptors** — nonblocking, close-on-exec sockets with Tokio deregistration before close; `AsFd` and `AsRawFd` support additional kernel options
+It is not an SCTP implementation. The protocol runs in the Linux kernel, so the crate serves neither other systems nor SCTP over DTLS (WebRTC data channels). It wraps the part of RFC 6458 [listed below](#rfc-6458-coverage).
 
-### Changes from sctp-rs 0.3.1
+## Requirements
 
-The first release separates socket roles and configuration. Existing callers need the new crate name and the API migration below. `ConnectedSocket::from_rawfd` is unsafe and restricted to established nonblocking `SOCK_STREAM` SCTP descriptors. `Notification` is non-exhaustive, unsupported notifications preserve their bytes, and `ReceivedData` includes the sender's address.
-
-The fork also fixes partial-record truncation, ancillary parsing, stale readiness, descriptor leaks on failures and cancelled connects, lost kernel error codes, oversized address lists and short notifications. The [changelog](CHANGELOG.md) records the earlier fixes.
-
-## Quick start
+- Linux 5.0 or later with SCTP. `sudo modprobe sctp` loads the kernel module, which some distributions ship in a separate package of extra kernel modules. Without it, creating a socket fails with `EPROTONOSUPPORT`, or `ESOCKTNOSUPPORT` for a one-to-many socket.
+- A Tokio runtime with the I/O driver (`#[tokio::main]`, or `enable_io` on a runtime builder). Sockets register with it when they are created, and panic without it.
+- Rust 1.85 or later.
 
 ```toml
 [dependencies]
 oxirush-sctp = "0.1"
+tokio = { version = "1", features = ["macros", "rt"] }
 ```
-
-Requires Rust 1.85 or later and Linux 5.0 or later with SCTP available.
 
 ## Usage
 
-### Accept an association and receive messages
+### A client and a server
 
-```rust,no_run
-use oxirush_sctp::{NotificationOrData, Socket, SocketToAssociation};
+Both sides send on stream 1 with a payload protocol identifier, and read them back from what they receive.
+
+```rust
+use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
+    // Stream 1, and the payload protocol identifier of NGAP.
+    let options = SendOptions {
+        stream_id: 1,
+        ppid: 60,
+        ..Default::default()
+    };
+
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.bind("127.0.0.1:38412".parse().unwrap())?;
-    socket.options().set_nodelay(true)?;
-    socket.options().set_max_message_size(1 << 20);
-    let listener = socket.listen(10)?;
-    let (association, _peer) = listener.accept().await?;
+    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    let listener = socket.listen(5)?;
+    let address = listener.local_addr()?;
+
+    let server = async {
+        let (association, peer) = listener.accept().await?;
+        if let NotificationOrData::Data(message) = association.recv().await? {
+            println!(
+                "{peer} sent {:?} on stream {:?} with PPID {:?}",
+                String::from_utf8_lossy(&message.payload),
+                message.stream_id(),
+                message.ppid()
+            );
+            association.send(b"pong", options).await?;
+        }
+        std::io::Result::Ok(())
+    };
+    let client = async {
+        let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+        let (association, _) = socket.connect(address).await?;
+        association.send(b"ping", options).await?;
+        if let NotificationOrData::Data(message) = association.recv().await? {
+            let answer = String::from_utf8_lossy(&message.payload);
+            println!("the server answered {answer:?}");
+        }
+        std::io::Result::Ok(())
+    };
+    let (server, client) = tokio::join!(server, client);
+    server.and(client)
+}
+```
+
+This is `examples/hello.rs`: `cargo run --example hello`.
+
+### Several associations, and how each one ends
+
+A listener accepts one `ConnectedSocket` for each association. Subscribe to events before listening: the accepted associations inherit the subscription.
+
+```rust,no_run
+use oxirush_sctp::{
+    AssocChangeState, ConnectedSocket, Event, Listener, Notification, NotificationOrData, Socket,
+    SocketToAssociation, SubscribeEventAssocId,
+};
+
+fn listen() -> std::io::Result<Listener> {
+    let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    socket.bind("0.0.0.0:38412".parse().unwrap())?;
+    socket.options().sctp_subscribe_events(
+        &[Event::Association, Event::Shutdown],
+        SubscribeEventAssocId::All,
+    )?;
+    socket.listen(5)
+}
+
+async fn accept(listener: Listener) -> std::io::Result<()> {
     loop {
-        match association.recv().await? {
-            NotificationOrData::Notification(_notification) => {}
-            NotificationOrData::Data(data) if data.payload.is_empty() => break,
-            NotificationOrData::Data(data) => println!("{} bytes", data.payload.len()),
+        let (association, _peer) = listener.accept().await?;
+        tokio::spawn(serve(association));
+    }
+}
+
+async fn serve(association: ConnectedSocket) {
+    loop {
+        match association.recv().await {
+            Ok(NotificationOrData::Data(message)) if message.payload.is_empty() => break,
+            Ok(NotificationOrData::Data(message)) => println!("{} octets", message.payload.len()),
+            Ok(NotificationOrData::Notification(Notification::Shutdown(_))) => {
+                println!("the peer shuts the association down")
+            }
+            Ok(NotificationOrData::Notification(Notification::AssociationChange(change)))
+                if change.state == AssocChangeState::CommLost =>
+            {
+                println!("the association is lost")
+            }
+            Ok(NotificationOrData::Notification(_)) => {}
+            Err(error) => {
+                println!("{error}");
+                break;
+            }
         }
     }
+}
+```
+
+`examples/server.rs` runs this against a peer that closes its association and one that aborts it.
+
+On a `ConnectedSocket`, the end of the association reaches `recv` as follows. The notifications come first, when subscribed.
+
+| What happened | `recv` returns | Notifications |
+| --- | --- | --- |
+| The peer closed its socket or shut the association down | a message with an empty payload, on every call | `Shutdown`, then `AssociationChange` with `ShutdownComplete` |
+| The peer aborted the association | an error, `ConnectionReset`, once; later calls wait forever | `AssociationChange` with `CommLost` |
+| This side called `shutdown(Shutdown::Write)` | nothing: the call waits forever | `AssociationChange` with `ShutdownComplete` |
+
+A `OneToManyEndpoint` learns of the end of an association from the notifications only.
+
+A dropped socket shuts its association down. With `options().set_linger(Some(Duration::ZERO))` it aborts it instead. Other durations are refused, because closing would then block the runtime.
+
+### Multihoming
+
+`sctp_bindx` binds several local addresses and `sctp_connectx` gives several addresses of the peer. The addresses of one call share a port, which the kernel chooses for port 0.
+
+```rust,no_run
+use oxirush_sctp::{BindxFlags, ConnectedSocket, Socket, SocketToAssociation};
+use std::net::SocketAddr;
+
+async fn connect(local: &[SocketAddr], peer: &[SocketAddr]) -> std::io::Result<ConnectedSocket> {
+    let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    socket.sctp_bindx(local, BindxFlags::Add)?;
+    let (association, id) = socket.sctp_connectx(peer).await?;
+    println!("local addresses {:?}", association.sctp_getladdrs(id)?);
+    println!("peer addresses {:?}", association.sctp_getpaddrs(id)?);
+    Ok(association)
+}
+```
+
+`examples/multihoming.rs` does it on loopback addresses. Subscribe to `Event::Address` to receive a `Notification::PeerAddressChange` when a path changes state. `options().peer_address_params`, `set_peer_address_params` and `request_heartbeat` read and set the heartbeat and the retransmission limit of a path.
+
+### Status and options
+
+Every socket type has `options()`. What is set before `listen` or `connect` stays, and accepted associations inherit it.
+
+```rust,no_run
+use oxirush_sctp::{ConnectedSocket, Socket};
+
+fn configure(socket: &Socket) -> std::io::Result<()> {
+    let options = socket.options();
+    options.set_nodelay(true)?; // send small messages at once
+    options.sctp_setup_init_params(4, 4, 0, 0)?; // four streams each way
+    options.set_max_message_size(64 << 10); // refuse longer received messages
+    Ok(())
+}
+
+fn report(association: &ConnectedSocket) -> std::io::Result<()> {
+    let status = association.sctp_get_status(0)?;
+    println!(
+        "{:?}, {} outgoing streams, primary path {}",
+        status.state, status.outstreams, status.peer_primary.address
+    );
     Ok(())
 }
 ```
 
-`examples/src/ping.rs` and `examples/src/pong.rs` provide a client and server:
+`examples/server.rs` sets options before it listens and prints the status of each association it accepts. For an option the crate does not wrap, the sockets implement `AsFd` and `AsRawFd`.
+
+### One socket for many associations
+
+A one-to-many socket needs no accept: its messages arrive on one `recv`, each with the association it belongs to.
+
+```rust,no_run
+use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
+
+async fn echo() -> std::io::Result<()> {
+    let socket = Socket::new_v4(SocketToAssociation::OneToMany)?;
+    socket.bind("0.0.0.0:38412".parse().unwrap())?;
+    let endpoint = socket.into_endpoint(5)?;
+    loop {
+        if let NotificationOrData::Data(message) = endpoint.recv().await? {
+            let options = SendOptions {
+                assoc_id: message.assoc_id().unwrap(),
+                ..Default::default()
+            };
+            endpoint.send(&message.payload, options).await?;
+        }
+    }
+}
+```
+
+`connect` starts an association without waiting for it: subscribe to `Event::Association` to learn whether it came up. `send_to` sends to an address, and starts an association if there is none. `peeloff` moves one association to a `ConnectedSocket` of its own.
+
+## Reference
+
+### Socket types
+
+| Type | Comes from | Does |
+| --- | --- | --- |
+| `Socket` | `Socket::new_v4`, `Socket::new_v6` | binds, then becomes one of the next three |
+| `Listener` | `Socket::listen` | accepts associations |
+| `ConnectedSocket` | `Socket::connect`, `Socket::sctp_connectx`, `Listener::accept`, `OneToManyEndpoint::peeloff` | sends and receives on one association |
+| `OneToManyEndpoint` | `Socket::into_endpoint` | sends and receives on many associations |
+| `SocketOptions` | `options()` on the four above | reads and sets options |
+
+### Messages
+
+- `recv` returns a whole message, however many reads it takes. A dropped `recv` future loses nothing: the next call continues the message.
+- A received message longer than `options().max_message_size()`, 4 MiB by default, is discarded and reported as an `InvalidData` error. The next `recv` returns the message after it.
+- `send` waits for room in the send buffer. A dropped `send` future has sent nothing.
+- A sent message must fit in the send buffer (`SO_SNDBUF`): a longer one fails with `EMSGSIZE`. An empty one fails with `EINVAL`, as does a stream that the association does not have.
+- `ReceivedData::stream_id`, `ppid` and `assoc_id` read the receive information (`SCTP_RCVINFO`) that every socket requests. They return `None` after `options().sctp_request_rcvinfo(false)`, and for the empty message that ends an association.
+
+### Payload protocol identifiers
+
+`SendOptions::ppid` and `ReceivedData::ppid` are plain numbers: 60 is NGAP. The lower-level `SendInfo::ppid`, `RcvInfo::ppid` and `NxtInfo::ppid` hold the identifier as the kernel carries it, in network byte order: `60_u32.to_be()`.
+
+### RFC 6458 coverage
+
+| RFC 6458 | Provided by |
+| --- | --- |
+| 3.1, 4.1: socket, bind, listen, accept, connect, send, receive, shutdown, close | the socket types; a dropped socket is closed |
+| 5.3.4 `SCTP_SNDINFO` | `SendOptions`, `SendInfo` |
+| 5.3.5 `SCTP_RCVINFO`, 5.3.6 `SCTP_NXTINFO` | `ReceivedData::rcv_info`, `nxt_info` |
+| 6.1.1 `SCTP_ASSOC_CHANGE` | `Notification::AssociationChange` |
+| 6.1.2 `SCTP_PEER_ADDR_CHANGE` | `Notification::PeerAddressChange` |
+| 6.1.5 `SCTP_SHUTDOWN_EVENT` | `Notification::Shutdown` |
+| 6.1.11 `SCTP_SEND_FAILED_EVENT` | `Notification::SendFailure` |
+| 6.1: the other notifications | `Notification::Unsupported`, with their type and octets |
+| 8.1.1 `SCTP_RTOINFO` | `sctp_set_rto_info`, `sctp_get_rto_info` |
+| 8.1.3 `SCTP_INITMSG` | `sctp_setup_init_params` |
+| 8.1.4 `SO_LINGER` | `set_linger`, off or zero |
+| 8.1.5 `SCTP_NODELAY` | `set_nodelay`, `nodelay` |
+| 8.1.12 `SCTP_PEER_ADDR_PARAMS` | `peer_address_params`, `set_peer_address_params`, `request_heartbeat`: heartbeat and retransmission limit |
+| 8.1.28 `SCTP_EVENT` | `sctp_subscribe_events`, `sctp_unsubscribe_events` |
+| 8.1.29 `SCTP_RECVRCVINFO`, 8.1.30 `SCTP_RECVNXTINFO` | `sctp_request_rcvinfo`, `sctp_request_nxtinfo` |
+| 8.1.31 `SCTP_DEFAULT_SNDINFO` | `sctp_set_default_sendinfo` |
+| 8.2.1 `SCTP_STATUS` | `sctp_get_status` |
+| 9.1 `sctp_bindx`, 9.9 `sctp_connectx` | `sctp_bindx`, `sctp_connectx` |
+| 9.2 `sctp_peeloff` | `OneToManyEndpoint::peeloff` |
+| 9.3 `sctp_getpaddrs`, 9.5 `sctp_getladdrs` | `sctp_getpaddrs`, `sctp_getladdrs` |
+
+The rest is not wrapped: among others authentication, partial reliability, the association parameters, the choice of the primary path and the buffer sizes. The interfaces that the RFC deprecates are left out on purpose.
+
+## Examples
 
 ```bash
-cargo run --example pong -- --help
-cargo run --example ping -- --help
+cargo run --example hello        # a client and a server
+cargo run --example server       # options, several associations, their status and how each one ends
+cargo run --example multihoming  # two addresses on each side
 ```
 
-### Send borrowed messages
-
-```rust,no_run
-use oxirush_sctp::{ConnectedSocket, SendOptions};
-
-async fn send_ngap(socket: &ConnectedSocket, encoded_pdu: &[u8]) -> std::io::Result<()> {
-    socket.send(encoded_pdu, SendOptions {
-        stream_id: 1,
-        ppid: 60,
-        ..Default::default()
-    }).await
-}
-```
-
-`SendOptions::ppid` is a logical identifier in host byte order. The low-level `send_data`/`SendInfo` API uses wire-order PPIDs and retains kernel send flags such as EOF and ABORT. A send waits for capacity; cancelling before completion sends no part of the record.
-
-Receive assembly assumes `SCTP_FRAGMENT_INTERLEAVE` level 0. It does not enable the RFC's explicit send-EOR mode, which the Linux SCTP API does not provide.
-
-### Manage one-to-many associations
-
-```rust,no_run
-use oxirush_sctp::{Event, OneToManyEndpoint, Socket, SocketToAssociation, SubscribeEventAssocId};
-
-fn endpoint() -> std::io::Result<OneToManyEndpoint> {
-    let socket = Socket::new_v4(SocketToAssociation::OneToMany)?;
-    socket.bind("127.0.0.1:0".parse().unwrap())?;
-    socket.options().sctp_subscribe_events(&[Event::Association], SubscribeEventAssocId::All)?;
-    let endpoint = socket.into_endpoint(10)?;
-    let _association = endpoint.connect(&["127.0.0.1:38412".parse().unwrap()])?;
-    Ok(endpoint)
-}
-```
-
-`connect` initiates an association without consuming the endpoint. Association notifications report whether establishment succeeds. `send` selects `SendOptions::assoc_id`; `send_to` supplies a peer address and can initiate an association. Incoming and outgoing associations share `recv`. Receive metadata is enabled by default so each message identifies its association; callers can explicitly disable it through `options().sctp_request_rcvinfo(false)`, losing that identity.
-
-`peeloff` transfers one association and its queued messages into a `ConnectedSocket`, inheriting the receive limit. It rejects peeling an association during a partially delivered record already held by the endpoint: finish or drain that record first. A one-to-many endpoint has no `accept` method, and a one-to-one listener performs no shared association I/O.
-
-### Observe and configure peer paths
-
-All configuration uses `options()`. Subscribe to `Event::Address` for `Notification::PeerAddressChange`, or `Event::SendFailureEvent` for `Notification::SendFailure`. Unsupported formats retain their original bytes.
-
-Batch subscription attempts every event. Its `io::Error` contains `EventSubscriptionError`; downcast `error.get_ref()` and inspect `failures()` for each original errno.
-
-`peer_address_params`, `set_peer_address_params` and `request_heartbeat` control heartbeat intervals and path retransmission limits. Intervals use whole milliseconds; disabling heartbeats preserves the configured interval. PMTU, SACK delay and other unrelated path settings remain intact.
-
-### Closing an association
-
-Dropping a socket starts graceful shutdown by default. `options().set_linger(None)` selects that behavior; `options().set_linger(Some(std::time::Duration::ZERO))` aborts on drop. Positive linger durations return `InvalidInput` because Linux close can block the Tokio runtime.
-
-### Migrating existing code
-
-| Earlier API | First-release API |
-| --- | --- |
-| `socket.set_nodelay(true)` and other configuration | `socket.options().set_nodelay(true)`; all roles share `SocketOptions` |
-| `socket.sctp_recv()` | `association.recv()` or `endpoint.recv()` |
-| `association.sctp_send(data)` | `association.send_data(data)` |
-| One-to-many `socket.listen(backlog)` | `socket.into_endpoint(backlog)` |
-| One-to-many consuming `socket.connect(addr)` | `endpoint.connect(&[addr])`; completion arrives as a notification |
-| `listener.sctp_peeloff(id)` | `endpoint.peeloff(id)` |
-| One-to-many `listener.sctp_send(addr, data)` | `endpoint.send_data(Some(addr), data)` or borrowed `endpoint.send_to(...)` |
-
-One-to-many `Socket::listen` and consuming `Socket::connect` now return `InvalidInput` before initiating the incompatible operation. Single-event subscription uses a one-element slice with `sctp_subscribe_events`/`sctp_unsubscribe_events`. Address operations and association status queries keep their SCTP names. Unsafe raw-descriptor import preserves unique ownership; peeled-off descriptors should be obtained through `endpoint.peeloff`.
-
-## Architecture
-
-One private `SocketCore` owns each Tokio registration, descriptor, partial record and receive limit. `Socket` moves that core into a `Listener`, `ConnectedSocket` or `OneToManyEndpoint` without re-registering the descriptor. Accept and peel-off create independently owned association cores with inherited receive limits.
-
-`SocketOptions` borrows the core and implements configuration once for every role. Public roles expose their own operations: listeners accept, associations exchange records, and endpoints manage multiple associations.
-
-`src/internal/sys/` separates descriptor lifecycle, addresses, socket options and message syscalls. Notification decoding has no socket dependencies; ancillary parsing checks initialized byte slices before reading native integer layouts. `src/internal/receive.rs` assembles records directly into their buffers and retains state across cancelled receives.
-
-## References
-
-- [RFC 6458](https://www.rfc-editor.org/rfc/rfc6458.html): SCTP sockets API
-- 3GPP TS 38.412: NG signalling transport (NGAP over SCTP)
-- 3GPP TS 36.412: S1 signalling transport (S1AP over SCTP)
-
-### RFC 6458 compatibility
-
-This section captures the current support for `SCTP` features with [RFC 6458](https://www.rfc-editor.org/rfc/rfc6458.txt) as a reference. In particular, features marked as `DEPRECATED` in the said RFC are not implemented. Since the Sockets Extension API defined in the RFC describes an API based on C programming language, there is not one to one mapping in the implementation, see notes for further details.
-
-Notification rows describe typed variants; other notifications are delivered
-as `Notification::Unsupported` with their type and raw octets.
-
-| Section | Compatibility | Notes |
-| ---- | ---- | ---- |
-| 3.1.1 | yes | |
-| 3.1.2 | yes | |
-| 3.1.3 | yes | |
-| 3.1.4 | yes | See Note 2. |
-| 3.1.5 | yes | See Note 1. |
-| 3.1.6 | yes | |
-| 4.1.1 | yes | |
-| 4.1.2 | yes | |
-| 4.1.3 | yes | |
-| 4.1.4 | yes | |
-| 4.1.5 | yes | |
-| 4.1.6 | yes | See Note 1. |
-| 4.1.7 | yes | |
-| 4.1.8 | yes | See Note 2. |
-| 4.1.9 | yes | |
-| 5.3.1 | no | Initialization is exposed through `SCTP_INITMSG`, not ancillary `SCTP_INIT`. |
-| 5.3.2 | N/A | |
-| 5.3.3 | N/A | |
-| 5.3.4 | yes | |
-| 5.3.5 | yes | |
-| 5.3.6 | yes | `NxtInfo` |
-| 5.3.7 | no | |
-| 5.3.8 | no | |
-| 5.3.9 | no | |
-| 5.3.10 | no | |
-| 6.1.1 | yes | |
-| 6.1.2 | yes | `PeerAddressChange` |
-| 6.1.3 | no | |
-| 6.1.4 | N/A | |
-| 6.1.5 | yes | |
-| 6.1.6 | no | |
-| 6.1.7 | no | |
-| 6.1.8 | no | |
-| 6.1.9 | no | |
-| 6.1.10 | no | |
-| 6.1.11 | yes | `SendFailure`; the deprecated format stays available as raw bytes. |
-| 6.2.1 | N/A | |
-| 6.2.2 | yes | |
-| 8.1.1 | yes | |
-| 8.1.2 | no | |
-| 8.1.3 | yes | |
-| 8.1.4 | partial | `SocketOptions::set_linger`: disabled or zero only; positive durations return `InvalidInput`. |
-| 8.1.5 | yes | |
-| 8.1.6 | no | |
-| 8.1.7 | no | |
-| 8.1.8 | no | |
-| 8.1.9 | no | |
-| 8.1.10 | no | |
-| 8.1.11 | no | |
-| 8.1.12 | partial | Heartbeat and path retransmission controls; other parameters via `AsFd`. |
-| 8.1.13 | N/A | |
-| 8.1.14 | N/A | |
-| 8.1.15 | no | |
-| 8.1.16 | no | |
-| 8.1.17 | no | |
-| 8.1.18 | no | |
-| 8.1.19 | no | |
-| 8.1.20 | no | |
-| 8.1.21 | no | |
-| 8.1.22 | N/A | |
-| 8.1.23 | no | |
-| 8.1.24 | no | |
-| 8.1.25 | no | |
-| 8.1.26 | no | |
-| 8.1.27 | no | |
-| 8.1.28 | yes | `SocketOptions::sctp_subscribe_events` / `sctp_unsubscribe_events` |
-| 8.1.29 | yes | `sctp_request_rcvinfo` |
-| 8.1.30 | yes | `sctp_request_nxtinfo` |
-| 8.1.31 | yes | |
-| 8.1.32 | no | |
-| 8.2.1 | yes | |
-| 8.2.2 | no | |
-| 8.2.3 | no | |
-| 8.2.4 | no | |
-| 8.2.5 | no | |
-| 8.2.6 | no | |
-| 8.3.1 | no | |
-| 8.3.2 | no | |
-| 8.3.3 | no | |
-| 8.3.4 | no | |
-| 8.3.5 | no | |
-| 9.1 | yes | Available on unconnected, listening and connected sockets. |
-| 9.2 | yes | `OneToManyEndpoint::peeloff` |
-| 9.3 | yes | `sctp_getpaddrs` |
-| 9.4 | N/A | Address lists are owned Rust vectors. See Note 3. |
-| 9.5 | yes | `sctp_getladdrs` |
-| 9.6 | N/A | Address lists are owned Rust vectors. See Note 3. |
-| 9.7 | N/A | |
-| 9.8 | N/A | |
-| 9.9 | yes | `Socket::sctp_connectx` |
-| 9.10 | N/A | |
-| 9.11 | N/A | |
-| 9.12 | no | |
-| 9.13 | no | |
-
-Notes:
-1. The `drop` implementation on the socket 'close'es the socket, hence no explicit `close` call supported.
-2. The async `send`, `send_to`, `send_data` and `recv` methods wrap the message-oriented kernel operations.
-3. This API is not required to be implemented in Rust.
+Each one runs both sides on loopback and needs no argument.
 
 ## Tests
 
@@ -257,7 +281,7 @@ Notes:
 cargo test
 ```
 
-The tests open SCTP associations over loopback, so the kernel's `sctp` module must be available. The connect-timeout test needs `unshare` and `ip`, and the 4 MiB message tests need `net.core.wmem_max` and `net.core.rmem_max` large enough; each skips otherwise. Sender errors in the receive-limit tests fail immediately, and a timeout bounds the send/receive pair.
+The tests open SCTP associations over loopback, so the kernel's `sctp` module must be available. The connect-timeout test needs `unshare` and `ip`, and the 4 MiB message tests need `net.core.wmem_max` and `net.core.rmem_max` large enough; each skips otherwise.
 
 ## Documentation
 
@@ -287,8 +311,4 @@ Licensed under either of
 
 at your option.
 
-## Acknowledgements
-
-oxirush-sctp is a fork of [sctp-rs](https://github.com/gabhijit/ellora) by Abhijit Gadgil and the [Ellora contributors](AUTHORS.md).
-
-Fixes that apply to sctp-rs are also worth offering [upstream](https://github.com/gabhijit/ellora).
+oxirush-sctp started as a fork of [sctp-rs](https://github.com/gabhijit/ellora).

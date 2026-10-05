@@ -33,12 +33,12 @@ pub struct Socket {
 impl Socket {
     /// Create a nonblocking, close-on-exec IPv4 socket registered with Tokio.
     ///
-    /// Without SCTP in the kernel (`modprobe sctp`) this is `EPROTONOSUPPORT`.
+    /// Without SCTP in the kernel (`modprobe sctp`) this fails with `EPROTONOSUPPORT`, or
+    /// `ESOCKTNOSUPPORT` for a one-to-many socket.
     ///
     /// # Panics
     ///
-    /// Outside a Tokio runtime with the I/O driver enabled, as does
-    /// [`new_v6`][Self::new_v6].
+    /// Outside a Tokio runtime with the I/O driver enabled.
     pub fn new_v4(style: SocketToAssociation) -> std::io::Result<Self> {
         Ok(Self {
             core: SocketCore::new(libc::AF_INET, style)?,
@@ -47,6 +47,7 @@ impl Socket {
 
     /// Create a nonblocking, close-on-exec IPv6 socket registered with Tokio.
     /// Linux IPv6 sockets also support IPv4 addresses unless `IPV6_V6ONLY` is enabled.
+    /// It fails and panics as [`new_v4`][Self::new_v4] does.
     pub fn new_v6(style: SocketToAssociation) -> std::io::Result<Self> {
         Ok(Self {
             core: SocketCore::new(libc::AF_INET6, style)?,
