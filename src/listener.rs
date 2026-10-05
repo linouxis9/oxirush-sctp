@@ -9,6 +9,19 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 /// Accepting creates a separate [`ConnectedSocket`] for each association. For shared
 /// multi-association I/O, use [`OneToManyEndpoint`][crate::OneToManyEndpoint].
 ///
+/// ```no_run
+/// # async fn serve(listener: oxirush_sctp::Listener) -> std::io::Result<()> {
+/// loop {
+///     let (association, peer) = listener.accept().await?;
+///     tokio::spawn(async move {
+///         while let Ok(received) = association.recv().await {
+///             println!("{peer}: {received:?}");
+///         }
+///     });
+/// }
+/// # }
+/// ```
+///
 /// ```compile_fail
 /// fn receive_on_listener(listener: &oxirush_sctp::Listener) {
 ///     let _ = listener.recv();
@@ -20,7 +33,8 @@ pub struct Listener {
 }
 
 impl Listener {
-    /// Accept the next association. Its receive limit starts at the listener's current limit.
+    /// Accept the next association. Its receive limit starts at the listener's current limit,
+    /// and it inherits the listener's kernel options and event subscriptions.
     pub async fn accept(&self) -> std::io::Result<(ConnectedSocket, SocketAddr)> {
         let (core, address) = self.core.accept().await?;
         Ok((ConnectedSocket::from_core(core), address))

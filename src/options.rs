@@ -9,6 +9,24 @@ use std::os::fd::AsFd;
 /// Kernel options and the receive limit belong to the underlying socket. Moving a socket into
 /// a listener, association or endpoint preserves them; accepted and peeled-off associations
 /// inherit the receive limit. Association IDs are ignored by Linux on one-to-one sockets.
+///
+/// ```
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> std::io::Result<()> {
+/// use oxirush_sctp::{Event, Socket, SocketToAssociation, SubscribeEventAssocId};
+///
+/// let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+/// let options = socket.options();
+/// options.set_nodelay(true)?;
+/// options.sctp_setup_init_params(4, 4, 0, 0)?; // four streams each way
+/// options.sctp_subscribe_events(
+///     &[Event::Association, Event::Shutdown],
+///     SubscribeEventAssocId::All,
+/// )?;
+/// assert!(options.nodelay()?);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct SocketOptions<'a> {
     pub(crate) core: &'a SocketCore,
@@ -16,7 +34,8 @@ pub struct SocketOptions<'a> {
 
 impl SocketOptions<'_> {
     /// Subscribe to events. Every event is attempted; errors retain all failed events and errno
-    /// values in [`EventSubscriptionError`][crate::EventSubscriptionError].
+    /// values in [`EventSubscriptionError`][crate::EventSubscriptionError]. Associations
+    /// accepted from a listener inherit its subscriptions.
     pub fn sctp_subscribe_events(
         &self,
         events: &[Event],
@@ -35,7 +54,8 @@ impl SocketOptions<'_> {
     }
 
     /// Set outgoing/incoming stream counts, INIT retry count and timeout in milliseconds for
-    /// associations established after this call (`SCTP_INITMSG`).
+    /// associations established after this call (`SCTP_INITMSG`). A zero leaves that value
+    /// unchanged; by default Linux opens ten outgoing streams.
     pub fn sctp_setup_init_params(
         &self,
         ostreams: u16,

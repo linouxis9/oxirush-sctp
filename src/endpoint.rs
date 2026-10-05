@@ -14,6 +14,30 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 /// Subscribe to association events before connecting to observe establishment and failure.
 /// Each association can be peeled into its own [`ConnectedSocket`]; this type never accepts.
 ///
+/// ```
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> std::io::Result<()> {
+/// use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
+///
+/// let socket = Socket::new_v4(SocketToAssociation::OneToMany)?;
+/// socket.bind("127.0.0.1:0".parse().unwrap())?;
+/// let endpoint = socket.into_endpoint(5)?;
+/// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+/// # let (client, _) = client.connect(endpoint.local_addr()?).await?;
+/// # client.send(b"request", SendOptions::default()).await?;
+///
+/// // Answer a message on the association it came from.
+/// if let NotificationOrData::Data(message) = endpoint.recv().await? {
+///     let options = SendOptions {
+///         assoc_id: message.assoc_id().unwrap(),
+///         ..Default::default()
+///     };
+///     endpoint.send(b"answer", options).await?;
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
 /// ```compile_fail
 /// fn accept_endpoint(endpoint: &oxirush_sctp::OneToManyEndpoint) {
 ///     let _ = endpoint.accept();

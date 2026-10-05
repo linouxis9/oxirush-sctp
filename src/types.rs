@@ -23,7 +23,10 @@ pub enum SocketToAssociation {
     OneToMany,
 }
 
-/// NotificationOrData: A type returned by a `recv` call.
+/// What a `recv` call returns: a message or a notification.
+///
+/// A message with an empty payload is the end of the association: the peer closed it or shut it
+/// down, and every later `recv` returns the same. SCTP has no empty messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotificationOrData {
     /// SCTP Notification received by a `recv` call.
@@ -73,12 +76,12 @@ impl ReceivedData {
     }
 }
 
-/// Structure Represnting Data to be Sent.
+/// Structure Representing Data to be Sent.
 ///
-/// This structure contains actual paylod and optional ancillary data.
+/// This structure contains actual payload and optional ancillary data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendData {
-    /// Received Message Payload.
+    /// Message payload.
     pub payload: Vec<u8>,
 
     /// Optional ancillary information used to send the data.
@@ -171,14 +174,16 @@ pub struct PeerAddressParams {
     pub path_max_retrans: u16,
 }
 
-/// Structure representing Ancilliary Send Information (See Section 5.3.4 of RFC 6458)
+/// Structure representing Ancillary Send Information (See Section 5.3.4 of RFC 6458)
 #[repr(C)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SendInfo {
     /// Stream ID of the stream to send the data on.
     pub sid: u16,
 
-    /// Flags to be used while sending the data.
+    /// Flags to be used while sending the data, from `enum sctp_sinfo_flags`: 1 sends
+    /// unordered. On a one-to-many socket, 4 aborts the association (`SCTP_ABORT`) and 0x200
+    /// with an empty payload shuts it down (`SCTP_EOF`); a one-to-one socket refuses both.
     pub flags: u16,
 
     /// Application Protocol ID to be used while sending the data.
@@ -245,7 +250,7 @@ pub struct RcvInfo {
     pub assoc_id: AssociationId,
 }
 
-/// Structure representing Ancillary next information (See Section 5.3.5)
+/// Structure representing Ancillary next information (See Section 5.3.6 of RFC 6458)
 #[repr(C)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct NxtInfo {
@@ -362,12 +367,13 @@ pub struct SendFailure {
 
 /// AssociationChange: Structure returned as notification for Association Change.
 ///
-/// To subscribe to this notification type, An application should call `sctp_subscribe_event` using
-/// the [`Event`] type as [`Event::Association`].
+/// To subscribe to this notification type, an application should call
+/// [`sctp_subscribe_events`][crate::SocketOptions::sctp_subscribe_events] using the [`Event`]
+/// type as [`Event::Association`].
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssociationChange {
-    /// Type of the Notification always `SCTP_ASSOC_CHAGE`
+    /// Type of the Notification always `SCTP_ASSOC_CHANGE`
     pub ev_type: Event,
 
     /// Notification Flags. Unused currently.
@@ -379,7 +385,9 @@ pub struct AssociationChange {
     /// Association Change state. See also [`AssocChangeState`].
     pub state: AssocChangeState,
 
-    /// Error when state is an error state and error information is available.
+    /// Error cause when the association was lost or could not start (RFC 9260, Section 3.3.10),
+    /// in network byte order as Linux delivers it: `u16::from_be(error)` is 12 after the peer's
+    /// application aborted.
     pub error: u16,
 
     /// Maximum number of outbound streams.
@@ -391,14 +399,16 @@ pub struct AssociationChange {
     /// Association ID for the event.
     pub assoc_id: AssociationId,
 
-    /// Additional data for the event.
+    /// Additional data for the event: the error causes of the ABORT when the peer aborted the
+    /// association.
     pub info: Vec<u8>,
 }
 
-/// Shutdown: Structure rreturned as notification for Shutdown Event.
+/// Shutdown: Structure returned as notification when the peer shuts the association down.
 ///
-///To subscribe to this notification type, An application should call `sctp_subscribe_event` using
-///the [`Event`] ty[e as [`Event::Shutdown`]
+/// To subscribe to this notification type, an application should call
+/// [`sctp_subscribe_events`][crate::SocketOptions::sctp_subscribe_events] using the [`Event`]
+/// type as [`Event::Shutdown`].
 #[repr(C)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shutdown {
@@ -422,7 +432,8 @@ pub struct Shutdown {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Event {
-    /// Event to receive ancillary information with every `recv`.
+    /// The deprecated `SCTP_SNDRCV` ancillary data, which this crate does not parse: see
+    /// [`sctp_request_rcvinfo`][crate::SocketOptions::sctp_request_rcvinfo].
     DataIo = (1 << 15),
 
     /// Event related to association change.
@@ -431,7 +442,8 @@ pub enum Event {
     /// Event related to peer address change.
     Address,
 
-    /// Event related to send failure.
+    /// The deprecated send failure notification, delivered as [`Notification::Unsupported`]:
+    /// subscribe to [`Event::SendFailureEvent`] instead.
     SendFailure,
 
     /// Event related to error received from the peer.
@@ -461,11 +473,10 @@ pub enum Event {
     /// Event related to stream change.
     StreamChange,
 
-    /// Send Failure Event indication. (The actual received information is different from the one
-    /// received in the `SendFailed` event.)
+    /// A message could not be delivered: [`Notification::SendFailure`].
     SendFailureEvent,
 
-    /// Unknown Event: Used only when unknwon value is received as a `Notification`.
+    /// Unknown Event: Used only when unknown value is received as a `Notification`.
     Unknown,
 }
 
@@ -492,6 +503,9 @@ impl Event {
 }
 
 /// SubscribeEventAssocId: AssociationID Used for Event Subscription
+///
+/// A one-to-one socket ignores it: a subscription made before `listen` or `connect` applies to
+/// the associations accepted or established afterwards.
 ///
 /// Note: repr should be same as `AssociationId` (ie. `i32`)
 #[repr(i32)]
@@ -528,13 +542,13 @@ pub enum AssocChangeState {
     /// SCTP communication up.
     CommUp = 0,
 
-    /// SCTP communication lost.
+    /// SCTP communication lost: the peer aborted the association or became unreachable.
     CommLost,
 
     /// SCTP communication restarted.
     Restart,
 
-    /// Shutdown complete.
+    /// Shutdown complete: the association ended gracefully.
     ShutdownComplete,
 
     /// Cannot start association.
@@ -572,22 +586,32 @@ pub(crate) enum CmsgType {
     DstAddrV6,
 }
 
-/// Constants related to `enum sctp_sstat_state`
+/// State of an association (`enum sctp_sstat_state`, RFC 9260 Section 4).
 #[repr(i32)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ConnState {
+    /// No association.
     #[default]
     Empty = 0,
+    /// Closed.
     Closed,
+    /// INIT sent.
     CookieWait,
+    /// COOKIE ECHO sent.
     CookieEchoed,
+    /// Established: messages can be exchanged.
     Established,
+    /// Shutdown requested locally, waiting for outstanding data to be acknowledged.
     ShutdownPending,
+    /// SHUTDOWN sent.
     ShutdownSent,
+    /// SHUTDOWN received from the peer.
     ShutdownReceived,
+    /// SHUTDOWN ACK sent.
     ShutdownAckSent,
 
-    Unknown, // Should never be seen.
+    /// A state this crate does not know. Should never be seen.
+    Unknown,
 }
 
 impl ConnState {
@@ -607,29 +631,46 @@ impl ConnState {
     }
 }
 
-/// PeerAddress: Structure representing SCTP Peer Address.
+/// PeerAddress: one path to the peer (`struct sctp_paddrinfo`, RFC 6458 Section 8.2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeerAddress {
+    /// Association of the path.
     pub assoc_id: AssociationId,
+    /// The peer's address.
     pub address: std::net::SocketAddr,
+    /// State of the path, from `enum sctp_spinfo_state`: 0 inactive, 1 potentially failed,
+    /// 2 active, 3 unconfirmed.
     pub state: i32,
+    /// Congestion window in octets.
     pub cwnd: u32,
+    /// Smoothed round-trip time, as the kernel reports it.
     pub srtt: u32,
+    /// Retransmission timeout in milliseconds.
     pub rto: u32,
+    /// Path MTU in octets.
     pub mtu: u32,
 }
 
-/// ConnStatus: Status of an SCTP Connection
+/// ConnStatus: status of an association (`SCTP_STATUS`, RFC 6458 Section 8.2.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnStatus {
+    /// Association ID.
     pub assoc_id: AssociationId,
+    /// State of the association.
     pub state: ConnState,
+    /// The peer's receive window in octets.
     pub rwnd: u32,
+    /// Number of DATA chunks sent and not yet acknowledged.
     pub unacked_data: u16,
+    /// Number of DATA chunks received and not yet read.
     pub pending_data: u16,
+    /// Number of inbound streams: the peer sends on streams below it.
     pub instreams: u16,
+    /// Number of outbound streams: [`SendOptions::stream_id`] must be below it.
     pub outstreams: u16,
+    /// Size in octets above which a message is fragmented.
     pub fragmentation_pt: u32,
+    /// The primary path to the peer.
     pub peer_primary: PeerAddress,
 }
 

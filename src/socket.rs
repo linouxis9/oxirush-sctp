@@ -8,6 +8,23 @@ use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 
 /// An SCTP socket before it becomes a listener, association or one-to-many endpoint.
+///
+/// ```
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> std::io::Result<()> {
+/// use oxirush_sctp::{Socket, SocketToAssociation};
+///
+/// let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+/// socket.bind("127.0.0.1:0".parse().unwrap())?;
+/// let listener = socket.listen(5)?;
+///
+/// let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+/// let (association, _id) = client.connect(listener.local_addr()?).await?;
+/// let (_accepted, peer) = listener.accept().await?;
+/// assert_eq!(association.local_addr()?, peer);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug)]
 pub struct Socket {
     core: SocketCore,
@@ -15,6 +32,13 @@ pub struct Socket {
 
 impl Socket {
     /// Create a nonblocking, close-on-exec IPv4 socket registered with Tokio.
+    ///
+    /// Without SCTP in the kernel (`modprobe sctp`) this is `EPROTONOSUPPORT`.
+    ///
+    /// # Panics
+    ///
+    /// Outside a Tokio runtime with the I/O driver enabled, as does
+    /// [`new_v6`][Self::new_v6].
     pub fn new_v4(style: SocketToAssociation) -> std::io::Result<Self> {
         Ok(Self {
             core: SocketCore::new(libc::AF_INET, style)?,

@@ -9,6 +9,34 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 /// One association established by [`Socket::connect`][crate::Socket::connect],
 /// accepted by a [`Listener`][crate::Listener], or peeled off a
 /// [`OneToManyEndpoint`][crate::OneToManyEndpoint].
+///
+/// ```
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> std::io::Result<()> {
+/// use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
+/// # let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+/// # socket.bind("127.0.0.1:0".parse().unwrap())?;
+/// # let listener = socket.listen(5)?;
+/// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+/// # let (association, _) = client.connect(listener.local_addr()?).await?;
+/// # let (peer, _) = listener.accept().await?;
+///
+/// let options = SendOptions {
+///     stream_id: 1,
+///     ppid: 60,
+///     ..Default::default()
+/// };
+/// association.send(b"request", options).await?;
+/// match peer.recv().await? {
+///     NotificationOrData::Data(message) if message.payload.is_empty() => println!("closed"),
+///     NotificationOrData::Data(message) => {
+///         assert_eq!((message.stream_id(), message.ppid()), (Some(1), Some(60)));
+///     }
+///     NotificationOrData::Notification(notification) => println!("{notification:?}"),
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug)]
 pub struct ConnectedSocket {
     core: SocketCore,
@@ -45,6 +73,10 @@ impl ConnectedSocket {
 
     /// Initiate shutdown. SCTP shutdown is association-wide and does not provide TCP half-close
     /// semantics; see RFC 6458 section 4.1.7.
+    ///
+    /// Linux reports the end of a shutdown that this socket started with `Shutdown::Write` as a
+    /// `ShutdownComplete` association notification only: without
+    /// [`Event::Association`][crate::Event::Association], `recv` then waits forever.
     pub fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
         sys::shutdown_internal(self.as_fd(), how)
     }
@@ -76,7 +108,9 @@ impl ConnectedSocket {
         sys::sctp_get_status_internal(self.as_fd(), assoc_id)
     }
 
-    /// Receive a complete record or notification. Empty data indicates peer shutdown.
+    /// Receive a complete record or notification. Empty data indicates peer shutdown, and
+    /// every later call returns it again. An aborted or lost association is an error such as
+    /// `ConnectionReset`, after which nothing more arrives.
     ///
     /// Records split across reads are assembled until `MSG_EOR`. Cancellation retains the
     /// partial record for the next call; concurrent readers share one assembler. Records over
@@ -88,6 +122,10 @@ impl ConnectedSocket {
 
     /// Send a borrowed complete record, waiting for capacity. PPID is in host byte order.
     /// Dropping the future before completion sends no part of this record.
+    ///
+    /// An empty payload and a stream the association does not have
+    /// ([`ConnStatus::outstreams`]) are `EINVAL`, a record longer than the send buffer
+    /// (`SO_SNDBUF`) is `EMSGSIZE`, and an association that has ended is `EPIPE`.
     pub async fn send(&self, payload: &[u8], options: SendOptions) -> std::io::Result<()> {
         let info = options.wire_info();
         self.core.send(None, payload, Some(&info)).await
