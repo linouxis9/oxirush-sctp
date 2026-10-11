@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/oxirush-sctp.svg)](https://crates.io/crates/oxirush-sctp)
 [![Documentation](https://docs.rs/oxirush-sctp/badge.svg)](https://docs.rs/oxirush-sctp)
-[![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg)](https://github.com/linouxis9/oxirush-sctp/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg)](https://github.com/linouxis9/oxirush-sctp/blob/main/COPYRIGHT)
 
 Async SCTP sockets for [Tokio](https://tokio.rs) on Linux. `send` and `recv` move one whole message at a time, with its stream and payload protocol identifier, over the kernel's SCTP implementation and its sockets API ([RFC 6458](https://www.rfc-editor.org/rfc/rfc6458.html)).
 
@@ -306,7 +306,7 @@ All commits should be signed-off with `git commit -s` to indicate your agreement
 
 Licensed under either of
 
-* Apache License, Version 2.0 ([LICENSE-Apache2](LICENSE-Apache2) or <http://www.apache.org/licenses/LICENSE-2.0>)
+* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
 * MIT License ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
 
 at your option.
