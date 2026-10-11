@@ -41,7 +41,7 @@ impl SocketOptions<'_> {
         events: &[Event],
         assoc_id: SubscribeEventAssocId,
     ) -> std::io::Result<()> {
-        sys::sctp_subscribe_events_internal(self.core.as_fd(), events, assoc_id, true)
+        self.core.subscribe_events(events, assoc_id, true)
     }
 
     /// Unsubscribe from events, with the same attempt-all error behavior as subscription.
@@ -50,7 +50,7 @@ impl SocketOptions<'_> {
         events: &[Event],
         assoc_id: SubscribeEventAssocId,
     ) -> std::io::Result<()> {
-        sys::sctp_subscribe_events_internal(self.core.as_fd(), events, assoc_id, false)
+        self.core.subscribe_events(events, assoc_id, false)
     }
 
     /// Set outgoing/incoming stream counts, INIT retry count and timeout in milliseconds for

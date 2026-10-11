@@ -1,8 +1,11 @@
 //! One registered descriptor and its record state, shared by the public socket roles.
-use crate::{AssociationId, ConnState, NotificationOrData, SendInfo, SocketToAssociation};
+use crate::{
+    AssocChangeState, AssociationId, ConnState, Event, Notification, NotificationOrData,
+    ReceivedData, SendInfo, SocketToAssociation, SubscribeEventAssocId,
+};
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 use tokio::io::{unix::AsyncFd, Interest};
 
@@ -17,7 +20,20 @@ pub(crate) struct SocketCore {
     style: SocketToAssociation,
     partial: Mutex<Option<PartialMessage>>,
     max_message_size: AtomicUsize,
+    // How the association of a one-to-one socket ended, once `recv` has seen it: `RUNNING`,
+    // `SHUT_DOWN`, or the error number of an association that was aborted or lost. Linux
+    // reports either end once, or not at all, and `recv` repeats it.
+    end: AtomicI32,
+    // This side has shut the association down for writing. Linux says that such a shutdown
+    // is complete in an association change notification, and in nothing else.
+    write_shutdown: AtomicBool,
+    // Association changes are subscribed for `recv` alone, to learn of that, and not passed
+    // on to the caller, who has not asked for them.
+    quiet_association_events: AtomicBool,
 }
+
+const RUNNING: i32 = 0;
+const SHUT_DOWN: i32 = -1;
 
 impl SocketCore {
     pub(crate) fn new(domain: libc::c_int, style: SocketToAssociation) -> std::io::Result<Self> {
@@ -34,6 +50,9 @@ impl SocketCore {
             style,
             partial: Mutex::new(None),
             max_message_size: AtomicUsize::new(DEFAULT_MAX_MESSAGE_SIZE),
+            end: AtomicI32::new(RUNNING),
+            write_shutdown: AtomicBool::new(false),
+            quiet_association_events: AtomicBool::new(false),
         })
     }
 
@@ -126,8 +145,15 @@ impl SocketCore {
 
     pub(crate) async fn recv(&self) -> std::io::Result<NotificationOrData> {
         loop {
+            if let Some(end) = self.end() {
+                return end;
+            }
             let mut guard = self.fd.ready(Interest::READABLE | Interest::ERROR).await?;
-            if let Ok(result) = guard.try_io(|inner| {
+            // Another task may have seen the end while this one waited.
+            if let Some(end) = self.end() {
+                return end;
+            }
+            let received = guard.try_io(|inner| {
                 let mut partial = self.partial.lock().unwrap_or_else(PoisonError::into_inner);
                 receive::receive_message(
                     &mut partial,
@@ -135,10 +161,118 @@ impl SocketCore {
                     self.style == SocketToAssociation::OneToOne,
                     |buffer| sys::sctp_recvmsg_once(inner.as_fd(), buffer),
                 )
-            }) {
-                return result;
+            });
+            if let Ok(result) = received {
+                if let Some(result) = self.note_end(result) {
+                    return result;
+                }
             }
         }
+    }
+
+    // What `recv` returns once the association of a one-to-one socket has ended.
+    fn end(&self) -> Option<std::io::Result<NotificationOrData>> {
+        match self.end.load(Ordering::Acquire) {
+            RUNNING => None,
+            SHUT_DOWN => Some(Ok(NotificationOrData::Data(ReceivedData {
+                payload: vec![],
+                from: None,
+                rcv_info: None,
+                nxt_info: None,
+            }))),
+            error => Some(Err(std::io::Error::from_raw_os_error(error))),
+        }
+    }
+
+    // Remembers the end of the association of a one-to-one socket when `received` is its
+    // last sign. `None` for a notification that the caller has not subscribed to.
+    fn note_end(
+        &self,
+        received: std::io::Result<NotificationOrData>,
+    ) -> Option<std::io::Result<NotificationOrData>> {
+        if self.style != SocketToAssociation::OneToOne {
+            return Some(received);
+        }
+        match &received {
+            Ok(NotificationOrData::Notification(Notification::AssociationChange(change))) => {
+                if change.state == AssocChangeState::ShutdownComplete {
+                    self.set_end(SHUT_DOWN);
+                }
+                if self.quiet_association_events.load(Ordering::Acquire) {
+                    return None;
+                }
+            }
+            Err(error) => {
+                // The error of a socket whose association is gone is the last thing Linux
+                // says of it. Another error leaves the association as it was.
+                let gone = sys::sctp_get_status_internal(self.as_fd(), 0)
+                    .is_err_and(|status| status.raw_os_error() == Some(libc::EINVAL));
+                if let (Some(number), true) = (error.raw_os_error(), gone) {
+                    self.set_end(number);
+                }
+            }
+            Ok(_) => {}
+        }
+        Some(received)
+    }
+
+    fn set_end(&self, end: i32) {
+        if self
+            .end
+            .compare_exchange(RUNNING, end, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            // Nothing more arrives, so nothing would wake the other tasks that wait in
+            // `recv`. Shutting the read side down does: the socket is then readable for
+            // good. It fails with `ENOTCONN` on a socket without an association, after it
+            // has done that.
+            let _ = sys::shutdown_internal(self.as_fd(), std::net::Shutdown::Read);
+        }
+    }
+
+    pub(crate) fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
+        if how == std::net::Shutdown::Write && self.style == SocketToAssociation::OneToOne {
+            self.write_shutdown.store(true, Ordering::Release);
+            if !sys::sctp_event_subscribed_internal(self.as_fd(), Event::Association)? {
+                self.subscribe_association_events(true)?;
+                self.quiet_association_events.store(true, Ordering::Release);
+            }
+        }
+        sys::shutdown_internal(self.as_fd(), how)
+    }
+
+    fn subscribe_association_events(&self, on: bool) -> std::io::Result<()> {
+        sys::sctp_subscribe_event_internal(
+            self.as_fd(),
+            Event::Association,
+            SubscribeEventAssocId::All,
+            on,
+        )
+    }
+
+    pub(crate) fn subscribe_events(
+        &self,
+        events: &[Event],
+        assoc_id: SubscribeEventAssocId,
+        on: bool,
+    ) -> std::io::Result<()> {
+        let association = events.contains(&Event::Association);
+        if association && !on && self.write_shutdown.load(Ordering::Acquire) {
+            // `recv` still needs them: they stay subscribed and are no longer passed on.
+            self.quiet_association_events.store(true, Ordering::Release);
+            let others: Vec<Event> = events
+                .iter()
+                .filter(|event| **event != Event::Association)
+                .cloned()
+                .collect();
+            return sys::sctp_subscribe_events_internal(self.as_fd(), &others, assoc_id, on);
+        }
+        sys::sctp_subscribe_events_internal(self.as_fd(), events, assoc_id, on)?;
+        if association && on {
+            self.quiet_association_events
+                .store(false, Ordering::Release);
+        }
+        Ok(())
     }
 
     pub(crate) async fn send(

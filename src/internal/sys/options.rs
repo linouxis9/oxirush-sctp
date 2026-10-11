@@ -66,6 +66,29 @@ pub(crate) fn sctp_subscribe_event_internal(
     }
 }
 
+// Whether the socket, or the association of a one-to-one socket, has `event` subscribed.
+pub(crate) fn sctp_event_subscribed_internal(
+    fd: BorrowedFd<'_>,
+    event: Event,
+) -> std::io::Result<bool> {
+    // `struct sctp_event` as integers alone, for the kernel to write over.
+    #[repr(C)]
+    struct Query {
+        assoc_id: AssociationId,
+        event: u16,
+        on: u8,
+    }
+    let query = Query {
+        assoc_id: SubscribeEventAssocId::Future.into(),
+        event: event as u16,
+        on: 0,
+    };
+    // Safety: `getsockopt` writes a `struct sctp_event` over `query`, which has its layout
+    // and takes any octets.
+    let answer = unsafe { getsockopt_internal(fd, SOL_SCTP, SCTP_EVENT, query)? };
+    Ok(answer.on != 0)
+}
+
 pub(crate) fn sctp_subscribe_events_internal(
     fd: BorrowedFd<'_>,
     events: &[Event],

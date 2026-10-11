@@ -130,15 +130,15 @@ async fn serve(association: ConnectedSocket) {
 
 `examples/server.rs` runs this against a peer that closes its association and one that aborts it.
 
-On a `ConnectedSocket`, the end of the association reaches `recv` as follows. The notifications come first, when subscribed.
+On a `ConnectedSocket`, the end of the association reaches `recv` as follows, and stays: every later call returns it again, and none waits. The notifications come first, when subscribed.
 
 | What happened | `recv` returns | Notifications |
 | --- | --- | --- |
-| The peer closed its socket or shut the association down | a message with an empty payload, on every call | `Shutdown`, then `AssociationChange` with `ShutdownComplete` |
-| The peer aborted the association | an error, `ConnectionReset`, once; later calls wait forever | `AssociationChange` with `CommLost` |
-| This side called `shutdown(Shutdown::Write)` | nothing: the call waits forever | `AssociationChange` with `ShutdownComplete` |
+| The peer closed its socket or shut the association down | a message with an empty payload | `Shutdown`, then `AssociationChange` with `ShutdownComplete` |
+| This side called `shutdown(Shutdown::Write)`, and the peer has answered | a message with an empty payload, after what the peer had still sent | `AssociationChange` with `ShutdownComplete` |
+| The peer aborted the association | an error, `ConnectionReset` | `AssociationChange` with `CommLost` |
 
-A `OneToManyEndpoint` learns of the end of an association from the notifications only.
+An association that is lost in another way ends with the error that Linux gives its socket. A `OneToManyEndpoint` learns of the end of an association from the notifications only.
 
 A dropped socket shuts its association down. With `options().set_linger(Some(Duration::ZERO))` it aborts it instead. Other durations are refused, because closing would then block the runtime.
 
@@ -231,7 +231,7 @@ async fn echo() -> std::io::Result<()> {
 - `recv` returns a whole message, however many reads it takes. A dropped `recv` future loses nothing: the next call continues the message.
 - A received message longer than `options().max_message_size()`, 4 MiB by default, is discarded and reported as an `InvalidData` error. The next `recv` returns the message after it.
 - `send` waits for room in the send buffer. A dropped `send` future has sent nothing.
-- A sent message must fit in the send buffer (`SO_SNDBUF`): a longer one fails with `EMSGSIZE`. An empty one fails with `EINVAL`, as does a stream that the association does not have.
+- A sent message must fit in the send buffer (`SO_SNDBUF`): a longer one fails with `EMSGSIZE`. An empty one fails with `EINVAL`, as does a stream that the association does not have. After the end of the association a send fails with `EPIPE`.
 - `ReceivedData::stream_id`, `ppid` and `assoc_id` read the receive information (`SCTP_RCVINFO`) that every socket requests. They return `None` after `options().request_rcvinfo(false)`, and for the empty message that ends an association.
 
 ### Payload protocol identifiers

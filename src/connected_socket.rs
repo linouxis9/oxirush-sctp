@@ -74,11 +74,14 @@ impl ConnectedSocket {
     /// Initiate shutdown. SCTP shutdown is association-wide and does not provide TCP half-close
     /// semantics; see RFC 6458 section 4.1.7.
     ///
-    /// Linux reports the end of a shutdown that this socket started with `Shutdown::Write` as a
-    /// `ShutdownComplete` association notification only: without
-    /// [`Event::Association`][crate::Event::Association], `recv` then waits forever.
+    /// After `Shutdown::Write`, [`recv`][Self::recv] returns what the peer had still sent, then
+    /// the empty message that ends an association, once the peer has answered the shutdown.
+    /// Linux says so in an association change notification alone, which this call subscribes
+    /// to for `recv`. `recv` passes these notifications on only if
+    /// [`Event::Association`][crate::Event::Association] is subscribed through
+    /// [`options`][Self::options].
     pub fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
-        sys::shutdown_internal(self.as_fd(), how)
+        self.core.shutdown(how)
     }
 
     /// The local address as `getsockname` reports it, with the port the kernel chose for port 0:
@@ -108,9 +111,10 @@ impl ConnectedSocket {
         sys::sctp_get_status_internal(self.as_fd(), assoc_id)
     }
 
-    /// Receive a complete record or notification. Empty data indicates peer shutdown, and
-    /// every later call returns it again. An aborted or lost association is an error such as
-    /// `ConnectionReset`, after which nothing more arrives.
+    /// Receive a complete record or notification. Empty data says that the association was
+    /// shut down, by the peer or by [`shutdown`][Self::shutdown] on this side. An aborted or
+    /// lost association is an error such as `ConnectionReset`. Either end stays: every later
+    /// call returns it again, and none waits.
     ///
     /// Records split across reads are assembled until `MSG_EOR`. Cancellation retains the
     /// partial record for the next call; concurrent readers share one assembler. Records over
