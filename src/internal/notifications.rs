@@ -20,14 +20,14 @@ pub(crate) fn notification_from_message(data: &[u8]) -> Notification {
         data: data.to_vec(),
     };
     if data.len() < 2 {
-        log::warn!("Notification of {} octets.", data.len());
+        tracing::warn!("Notification of {} octets.", data.len());
         return unsupported();
     }
     let notification_type = u16::from_ne_bytes(data[0..2].try_into().unwrap());
     if data.len() < 8 || u32::from_ne_bytes(data[4..8].try_into().unwrap()) as usize != data.len() {
         return unsupported();
     }
-    log::trace!(
+    tracing::trace!(
         "notification_type: {notification_type:x}, SCTP_ASSOC_CHANGE: {SCTP_ASSOC_CHANGE:x}"
     );
     match notification_type {
@@ -61,7 +61,7 @@ pub(crate) fn notification_from_message(data: &[u8]) -> Notification {
             })
         }
         SCTP_ASSOC_CHANGE if data.len() >= ASSOC_CHANGE_LEN => {
-            log::debug!("SCTP_ASSOC_CHANGE Notification Received.");
+            tracing::debug!("SCTP_ASSOC_CHANGE Notification Received.");
             let assoc_change = AssociationChange {
                 ev_type: Event::from_u16(u16::from_ne_bytes(data[0..2].try_into().unwrap())),
                 flags: u16::from_ne_bytes(data[2..4].try_into().unwrap()),
@@ -78,7 +78,7 @@ pub(crate) fn notification_from_message(data: &[u8]) -> Notification {
             Notification::AssociationChange(assoc_change)
         }
         SCTP_SHUTDOWN if data.len() == SHUTDOWN_LEN => {
-            log::debug!("SCTP_SHUTDOWN Notification Received.");
+            tracing::debug!("SCTP_SHUTDOWN Notification Received.");
             let shutdown = Shutdown {
                 ev_type: Event::from_u16(u16::from_ne_bytes(data[0..2].try_into().unwrap())),
                 flags: u16::from_ne_bytes(data[2..4].try_into().unwrap()),
@@ -88,7 +88,7 @@ pub(crate) fn notification_from_message(data: &[u8]) -> Notification {
             Notification::Shutdown(shutdown)
         }
         _ => {
-            log::debug!(
+            tracing::debug!(
                 "Unsupported notification received: type {:x}, {} octets.",
                 notification_type,
                 data.len()

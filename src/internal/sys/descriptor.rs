@@ -12,7 +12,7 @@ pub(crate) fn sctp_peeloff_internal(
     fd: BorrowedFd<'_>,
     assoc_id: AssociationId,
 ) -> std::io::Result<OwnedFd> {
-    log::debug!("Peeling off socket for Association ID: {assoc_id:?}");
+    tracing::debug!("Peeling off socket for Association ID: {assoc_id:?}");
 
     use crate::types::internal::{PeeloffArg, PeeloffFlagsArg};
 
@@ -43,7 +43,7 @@ pub(crate) fn sctp_peeloff_internal(
         );
         if result < 0 {
             let error = std::io::Error::last_os_error();
-            log::error!("Error: {error} during `sctp_peeloff` using `getsockopt`.");
+            tracing::error!("Error: {error} during `sctp_peeloff` using `getsockopt`.");
             Err(error)
         } else {
             // Safety: the kernel returned a new descriptor, which nothing else owns.
@@ -63,11 +63,11 @@ pub(crate) fn sctp_socket_internal(
 ) -> std::io::Result<OwnedFd> {
     let socket_type = match assoc {
         crate::SocketToAssociation::OneToOne => {
-            log::debug!("Creating TCP Style Socket.");
+            tracing::debug!("Creating TCP Style Socket.");
             libc::SOCK_STREAM
         }
         crate::SocketToAssociation::OneToMany => {
-            log::debug!("Creating UDP Style Socket.");
+            tracing::debug!("Creating UDP Style Socket.");
             libc::SOCK_SEQPACKET
         }
     };
@@ -96,7 +96,7 @@ pub(crate) fn sctp_listen_internal(fd: BorrowedFd<'_>, backlog: i32) -> std::io:
     let result = unsafe { libc::listen(fd.as_raw_fd(), backlog) };
     if result < 0 {
         let error = std::io::Error::last_os_error();
-        log::error!("Error: {error} during `sctp_listen`.");
+        tracing::error!("Error: {error} during `sctp_listen`.");
         Err(error)
     } else {
         Ok(())
@@ -115,7 +115,7 @@ pub(crate) fn initiate_connect(
     }
     let mut addrs_u8: Vec<u8> = vec![];
 
-    log::debug!("Connecting to {addrs:?} using `getsockopt`");
+    tracing::debug!("Connecting to {addrs:?} using `getsockopt`");
 
     for addr in addrs {
         let ossockaddr: OsSocketAddr = (*addr).into();
@@ -150,7 +150,7 @@ pub(crate) fn initiate_connect(
         if result < 0 {
             let last_error = std::io::Error::last_os_error();
             if last_error.raw_os_error() != Some(libc::EINPROGRESS) {
-                log::error!("Error: '{last_error}' while connecting using `getsockopt`.");
+                tracing::error!("Error: '{last_error}' while connecting using `getsockopt`.");
                 return Err(last_error);
             }
         }
@@ -210,7 +210,7 @@ pub(crate) fn shutdown_internal(
 ) -> std::io::Result<()> {
     use std::net::Shutdown;
 
-    log::debug!("Calling 'shutdown' on socket with flags: {how:?}");
+    tracing::debug!("Calling 'shutdown' on socket with flags: {how:?}");
     let flags = match how {
         Shutdown::Read => libc::SHUT_RD,
         Shutdown::Write => libc::SHUT_WR,

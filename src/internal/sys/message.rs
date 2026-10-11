@@ -58,7 +58,7 @@ pub(crate) fn sctp_recvmsg_once(fd: BorrowedFd<'_>, buffer: &mut [u8]) -> std::i
 
 fn ancillary_info(mut control: &[u8], flags: libc::c_int) -> (Option<RcvInfo>, Option<NxtInfo>) {
     if flags & libc::MSG_CTRUNC != 0 {
-        log::warn!("Control messages truncated, `RcvInfo` or `NxtInfo` may be missing.");
+        tracing::warn!("Control messages truncated, `RcvInfo` or `NxtInfo` may be missing.");
     }
 
     let mut rcv_info = None;

@@ -12,7 +12,7 @@ pub(crate) fn sctp_bindx_internal(
     addrs: &[SocketAddr],
     flags: BindxFlags,
 ) -> std::io::Result<()> {
-    log::debug!("Binding following addresses to socket: {addrs:#?}");
+    tracing::debug!("Binding following addresses to socket: {addrs:#?}");
 
     let mut addrs_u8: Vec<u8> = vec![];
 
@@ -29,7 +29,7 @@ pub(crate) fn sctp_bindx_internal(
         BindxFlags::Remove => SCTP_SOCKOPT_BINDX_REM,
     };
 
-    log::trace!("addrs_len: {addrs_len}, addrs_u8: {addrs_u8:?}, flags: {flags}");
+    tracing::trace!("addrs_len: {addrs_len}, addrs_u8: {addrs_u8:?}, flags: {flags}");
 
     // Safety: The passed vector is valid during the function call and hence the passed reference
     // to raw data is valid.
@@ -44,7 +44,7 @@ pub(crate) fn sctp_bindx_internal(
 
         if result < 0 {
             let error = std::io::Error::last_os_error();
-            log::error!("Error: {error} during `sctp_bindx` using `setsockopt`.");
+            tracing::error!("Error: {error} during `sctp_bindx` using `setsockopt`.");
             Err(error)
         } else {
             Ok(())
@@ -88,7 +88,7 @@ fn sctp_getaddrs_internal(
     } else {
         "peer"
     };
-    log::debug!("Getting {addr_type} Addresses for the SCTP Association {assoc_id:?}");
+    tracing::debug!("Getting {addr_type} Addresses for the SCTP Association {assoc_id:?}");
 
     // `struct sctp_getaddrs` is the association ID, the number of addresses and the packed
     // addresses. The kernel fails with `ENOMEM` if they do not fit: the buffer then grows.
@@ -116,7 +116,9 @@ fn sctp_getaddrs_internal(
                 capacity *= 2;
                 continue;
             }
-            log::error!("Error: {error} while getting {addr_type} addresses using  `getsockopt`.");
+            tracing::error!(
+                "Error: {error} while getting {addr_type} addresses using  `getsockopt`."
+            );
             return Err(error);
         }
 
@@ -131,7 +133,7 @@ fn sctp_getaddrs_internal(
             return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
         }
         let addr_count = u32::from_ne_bytes(returned[4..8].try_into().unwrap());
-        log::trace!("Got {addr_count} addresses");
+        tracing::trace!("Got {addr_count} addresses");
 
         // Now for each of the 'addresses', we get the family and then interpret each of the
         // addresses accordingly, checking that it is within what the kernel returned.
@@ -165,7 +167,7 @@ fn sctp_getaddrs_internal(
             let socketaddr = os_socketaddr
                 .into_addr()
                 .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
-            log::trace!("Got Address: {socketaddr:#?}");
+            tracing::trace!("Got Address: {socketaddr:#?}");
             peeraddrs.push(socketaddr);
             offset += len;
         }

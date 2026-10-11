@@ -104,12 +104,12 @@ pub(super) fn receive_message(
 
         if piece.len == 0 && !piece.notification {
             if message.received > 0 {
-                log::warn!(
+                tracing::warn!(
                     "End of stream after {} octets of a message.",
                     message.received
                 );
             }
-            log::debug!("Received end of stream.");
+            tracing::debug!("Received end of stream.");
             return Ok(NotificationOrData::Data(ReceivedData {
                 payload: vec![],
                 from: None,
@@ -133,7 +133,7 @@ pub(super) fn receive_message(
             _ => one_association || message.from == piece.from,
         };
         if continued && (piece.notification != message.notification || !same_message) {
-            log::warn!(
+            tracing::warn!(
                 "Dropping {} octets of a message whose delivery was aborted.",
                 message.received
             );
@@ -161,12 +161,12 @@ pub(super) fn receive_message(
             ));
         }
         if message.notification {
-            log::debug!("Received Notification.");
+            tracing::debug!("Received Notification.");
             return Ok(NotificationOrData::Notification(notification_from_message(
                 &message.payload,
             )));
         }
-        log::debug!("Received Data.");
+        tracing::debug!("Received Data.");
         return Ok(NotificationOrData::Data(ReceivedData {
             payload: message.payload,
             from: message.from,
