@@ -27,7 +27,7 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
         sock_and_assoc_id.err().unwrap()
     );
     let (connected, assoc_id) = sock_and_assoc_id.unwrap();
-    eprintln!("assoc_id: {}", assoc_id);
+    eprintln!("assoc_id: {assoc_id}");
 
     let laddrs = connected.local_addrs(assoc_id);
     assert!(laddrs.is_ok(), "{:#?}", laddrs.err().unwrap());
@@ -380,7 +380,7 @@ async fn connect_in_network_namespace_times_out() {
 
     let result = client_socket.connect(connect_addr).await;
     let err = result.err().unwrap();
-    assert_eq!(err.raw_os_error(), Some(libc::ETIMEDOUT), "{}", err);
+    assert_eq!(err.raw_os_error(), Some(libc::ETIMEDOUT), "{err}");
 }
 
 #[test]
@@ -403,6 +403,6 @@ fn connect_reports_why_the_association_did_not_start() {
         Ok(Some(0)) => {}
         // The test harness exits with 101 when a test fails.
         Ok(Some(101)) => panic!("`connect_in_network_namespace_times_out` failed"),
-        other => eprintln!("no network namespace with `ip` ({:?}); skipping", other),
+        other => eprintln!("no network namespace with `ip` ({other:?}); skipping"),
     }
 }

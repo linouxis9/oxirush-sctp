@@ -228,7 +228,7 @@ pub(crate) fn request_nxtinfo_internal(fd: BorrowedFd<'_>, on: bool) -> std::io:
 }
 
 pub(crate) fn sctp_set_nodelay_internal(fd: BorrowedFd<'_>, nodelay: bool) -> std::io::Result<()> {
-    log::debug!("Setting `SCTP_NODELAY` to {}.", nodelay);
+    log::debug!("Setting `SCTP_NODELAY` to {nodelay}.");
     setsockopt_internal(fd, SOL_SCTP, SCTP_NODELAY, &libc::c_int::from(nodelay))
 }
 
@@ -242,7 +242,7 @@ pub(crate) fn set_linger_internal(
     fd: BorrowedFd<'_>,
     linger: Option<std::time::Duration>,
 ) -> std::io::Result<()> {
-    log::debug!("Setting `SO_LINGER` to {:?}.", linger);
+    log::debug!("Setting `SO_LINGER` to {linger:?}.");
     if linger.is_some_and(|duration| !duration.is_zero()) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -260,7 +260,7 @@ pub(crate) fn sctp_set_rto_info_internal(
     fd: BorrowedFd<'_>,
     rto_info: RtoInfo,
 ) -> std::io::Result<()> {
-    log::debug!("Setting `SCTP_RTOINFO` to {:?}.", rto_info);
+    log::debug!("Setting `SCTP_RTOINFO` to {rto_info:?}.");
     setsockopt_internal(fd, SOL_SCTP, SCTP_RTOINFO, &rto_info)
 }
 
@@ -277,7 +277,7 @@ pub(crate) fn sctp_get_rto_info_internal(
 }
 
 pub(crate) fn set_reuseaddr_internal(fd: BorrowedFd<'_>, reuseaddr: bool) -> std::io::Result<()> {
-    log::debug!("Setting `SO_REUSEADDR` to {}.", reuseaddr);
+    log::debug!("Setting `SO_REUSEADDR` to {reuseaddr}.");
     setsockopt_internal(
         fd,
         libc::SOL_SOCKET,
@@ -336,7 +336,7 @@ pub(crate) unsafe fn getsockopt_internal<T>(
     } else if len as usize != size {
         Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("`getsockopt` returned {} bytes instead of {}", len, size),
+            format!("`getsockopt` returned {len} bytes instead of {size}"),
         ))
     } else {
         Ok(value)

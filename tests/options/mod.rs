@@ -320,7 +320,7 @@ async fn reuseaddr_allows_binding_a_bound_address() {
 
     let without = create_client_socket(SocketToAssociation::OneToOne, true);
     let error = without.bind(address).unwrap_err();
-    assert_eq!(error.raw_os_error(), Some(libc::EADDRINUSE), "{}", error);
+    assert_eq!(error.raw_os_error(), Some(libc::EADDRINUSE), "{error}");
 
     let with = create_client_socket(SocketToAssociation::OneToOne, true);
     with.options().set_reuseaddr(true).unwrap();

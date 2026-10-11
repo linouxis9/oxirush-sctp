@@ -28,9 +28,7 @@ pub(crate) fn notification_from_message(data: &[u8]) -> Notification {
         return unsupported();
     }
     log::trace!(
-        "notification_type: {:x}, SCTP_ASSOC_CHANGE: {:x}",
-        notification_type,
-        SCTP_ASSOC_CHANGE
+        "notification_type: {notification_type:x}, SCTP_ASSOC_CHANGE: {SCTP_ASSOC_CHANGE:x}"
     );
     match notification_type {
         value if value == Event::Address as u16 && data.len() == 148 => {

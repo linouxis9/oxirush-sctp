@@ -211,8 +211,7 @@ async fn test_shutdown_event() {
     {
         assert_eq!(
             client_assoc_id, assoc_id,
-            "client_assoc_id: {}, Event assoc_id: {}",
-            client_assoc_id, assoc_id
+            "client_assoc_id: {client_assoc_id}, Event assoc_id: {assoc_id}"
         );
     } else {
         panic!("Should never come here!: {:#?}", data);
@@ -574,10 +573,7 @@ async fn pair_for_long_messages(
     if (get_int_option(&client, libc::SOL_SOCKET, libc::SO_SNDBUF) as usize) < max_size
         || (get_int_option(&listener, libc::SOL_SOCKET, libc::SO_RCVBUF) as usize) < receive_buffer
     {
-        eprintln!(
-            "`net.core.[rw]mem_max` are too small for {} octets",
-            max_size
-        );
+        eprintln!("`net.core.[rw]mem_max` are too small for {max_size} octets");
         return None;
     }
     // Retransmit quickly when the receive window reopens.
@@ -705,7 +701,7 @@ async fn recv_rejects_messages_longer_than_4_mib() {
         .unwrap();
         match received {
             Err(error) if len > max => {
-                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{}", error)
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}")
             }
             Ok(received) if len <= max => assert!(data_payload(received) == payload),
             Ok(NotificationOrData::Data(data)) => {
@@ -735,7 +731,7 @@ async fn recv_limit_is_set_per_socket_and_inherited_on_accept() {
             .unwrap();
         match receiving.recv().await {
             Err(error) if len > 1000 => {
-                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{}", error)
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}")
             }
             Ok(received) if len == 1000 => assert!(data_payload(received) == long_payload(len)),
             other => panic!("{} octets: {:?}", len, other.map(|_| ())),

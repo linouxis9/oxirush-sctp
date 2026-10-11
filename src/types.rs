@@ -142,7 +142,7 @@ impl std::fmt::Display for EventSubscriptionError {
             if index != 0 {
                 f.write_str("; ")?;
             }
-            write!(f, "{:?}: {}", event, error)?;
+            write!(f, "{event:?}: {error}")?;
         }
         Ok(())
     }

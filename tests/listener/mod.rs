@@ -110,7 +110,7 @@ async fn listening_getladdrs_and_getpaddrs_of_many_addresses() {
             listener.bindx(&more, BindxFlags::Add).unwrap();
 
             let mut laddrs = listener.local_addrs(0).unwrap();
-            assert_eq!(laddrs.len(), 20, "{:?}", laddrs);
+            assert_eq!(laddrs.len(), 20, "{laddrs:?}");
             laddrs.sort();
             // IPv6 sockets report IPv4 addresses as IPv4-mapped IPv6 addresses.
             let expected: Vec<SocketAddr> = (1..=20)
@@ -132,7 +132,7 @@ async fn listening_getladdrs_and_getpaddrs_of_many_addresses() {
                 .unwrap();
             let (accepted, _) = listener.accept().await.unwrap();
             let paddrs = connected.peer_addrs(0).unwrap();
-            assert_eq!(paddrs.len(), 20, "{:?}", paddrs);
+            assert_eq!(paddrs.len(), 20, "{paddrs:?}");
             assert_eq!(accepted.local_addrs(0).unwrap().len(), 20);
             port
         };
