@@ -17,7 +17,7 @@ It is not an SCTP implementation. The protocol runs in the Linux kernel, so the 
 
 - Linux 5.0 or later with SCTP. `sudo modprobe sctp` loads the kernel module, which some distributions ship in a separate package of extra kernel modules. Without it, creating a socket fails with `EPROTONOSUPPORT`, or `ESOCKTNOSUPPORT` for a one-to-many socket.
 - A Tokio runtime with the I/O driver (`#[tokio::main]`, or `enable_io` on a runtime builder). Sockets register with it when they are created, and panic without it.
-- Rust 1.85 or later.
+- Rust 1.88 or later.
 
 ```toml
 [dependencies]

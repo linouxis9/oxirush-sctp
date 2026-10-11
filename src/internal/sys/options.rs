@@ -148,7 +148,12 @@ pub(crate) fn set_peer_address_params_internal(
     params: PeerAddressParams,
 ) -> std::io::Result<()> {
     let millis = params.heartbeat_interval.as_millis();
-    if params.heartbeat_interval.subsec_nanos() % 1_000_000 != 0 || millis > u32::MAX as u128 {
+    if !params
+        .heartbeat_interval
+        .subsec_nanos()
+        .is_multiple_of(1_000_000)
+        || millis > u32::MAX as u128
+    {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "heartbeat interval must fit whole u32 milliseconds",
