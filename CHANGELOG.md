@@ -114,6 +114,9 @@ sctp-rs.
   messages of a `recvmsg`) and `receive` (the assembly of messages from any
   sequence of parts).
 - A `SECURITY.md` that says how to report a vulnerability.
+- `benches/`, a package of its own that times a message through an
+  association with criterion and profiles it with pprof. The published
+  crate does not have it.
 
 ### Requirements
 

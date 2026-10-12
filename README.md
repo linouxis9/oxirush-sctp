@@ -330,6 +330,11 @@ association to a `ConnectedSocket` of its own.
   `recv` returns the message after it.
 - `send` waits for room in the send buffer. A dropped `send` future has
   sent nothing.
+- A message shorter than a packet, sent while the one before it is not
+  acknowledged, waits for that acknowledgement, which the peer may delay by
+  200 ms: SCTP gathers small messages as TCP does. With
+  `options().set_nodelay(true)` it leaves at once. The benchmark below took
+  200 ms a message without it, and 9 µs with it.
 - A sent message must fit in the send buffer (`SO_SNDBUF`): a longer one
   fails with `EMSGSIZE`. An empty one fails with `EINVAL`, as does a stream
   that the association does not have. After the end of the association a
@@ -371,6 +376,32 @@ module must be available. The connect-timeout test needs `unshare` and
 CI runs for a minute each: a notification of any octets, the control
 messages of a `recvmsg`, and the assembly of messages from any sequence of
 parts.
+
+## Benchmarks
+
+`benches/` is a package of its own, which the published crate does not
+have. It times a message through an association over the loopback
+interface with [criterion](https://crates.io/crates/criterion), and
+profiles it with [pprof](https://crates.io/crates/pprof):
+
+```bash
+cd benches
+cargo bench --bench messages                # every benchmark
+cargo bench --bench messages -- 1400        # those whose name has it
+
+# Ten seconds of one benchmark under the profiler, then where the time went
+cargo bench --bench messages -- --profile-time 10 send-recv/65536
+go tool pprof -top target/criterion/send-recv/65536/profile/profile.pb
+```
+
+The profile is one that Go's `pprof` reads. With `PROFILE=flamegraph` in
+the environment it is `flamegraph.svg`, in the same directory.
+
+On one core of an AMD Ryzen 7 5700G with Linux 7.0 and Rust 1.98.1, a
+message sent on one end of an association and received on the other takes
+8.8 µs for 64 octets, 9.1 µs for 1400, 14.2 µs for 16 KiB and 39 µs for
+64 KiB, which `recv` assembles from several reads. More than nine tenths of
+that time is in the system calls.
 
 ## Documentation
 

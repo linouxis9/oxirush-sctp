@@ -1,0 +1,25 @@
+# The benchmarks and the profiler of oxirush-sctp. A package of its own, so
+# that the crate keeps its dependencies: nothing here is published.
+[package]
+name = "oxirush-sctp-benches"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0 OR MIT"
+
+[dev-dependencies]
+oxirush-sctp = { path = ".." }
+tokio = { version = "1.32", features = ["macros", "rt"] }
+criterion = { version = "0.5", default-features = false }
+pprof = { version = "0.15", features = ["criterion", "protobuf-codec", "flamegraph"] }
+
+[[bench]]
+name = "messages"
+harness = false
+
+# Symbols for the profiles.
+[profile.bench]
+debug = true
+
+# Not a member of a workspace that the crate may be in.
+[workspace]
