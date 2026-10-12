@@ -1,5 +1,5 @@
-//! A client and a server exchange one message each on stream 1, with a payload protocol
-//! identifier.
+//! A client and a server exchange a message on a stream, with a payload
+//! protocol identifier.
 //!
 //! ```text
 //! cargo run --example hello
@@ -9,7 +9,7 @@ use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
-    // Stream 1, and the payload protocol identifier of NGAP.
+    // Stream 1, and the payload protocol identifier of NGAP
     let options = SendOptions {
         stream_id: 1,
         ppid: 60,
@@ -22,14 +22,11 @@ async fn main() -> std::io::Result<()> {
     let address = listener.local_addr()?;
 
     let server = async {
-        let (association, peer) = listener.accept().await?;
+        let (association, _peer) = listener.accept().await?;
         if let NotificationOrData::Data(message) = association.recv().await? {
-            println!(
-                "{peer} sent {:?} on stream {:?} with PPID {:?}",
-                String::from_utf8_lossy(&message.payload),
-                message.stream_id(),
-                message.ppid()
-            );
+            let text = String::from_utf8_lossy(&message.payload);
+            let (stream, ppid) = (message.stream_id(), message.ppid());
+            println!("server: {text:?} on stream {stream:?} with PPID {ppid:?}");
             association.send(b"pong", options).await?;
         }
         std::io::Result::Ok(())
@@ -39,8 +36,7 @@ async fn main() -> std::io::Result<()> {
         let (association, _) = socket.connect(address).await?;
         association.send(b"ping", options).await?;
         if let NotificationOrData::Data(message) = association.recv().await? {
-            let answer = String::from_utf8_lossy(&message.payload);
-            println!("the server answered {answer:?}");
+            println!("client: {:?}", String::from_utf8_lossy(&message.payload));
         }
         std::io::Result::Ok(())
     };

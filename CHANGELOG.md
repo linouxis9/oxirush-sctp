@@ -110,8 +110,11 @@ sctp-rs.
 - `Notification::PeerAddressChange` and `Notification::SendFailure`, typed.
 - `ConnStatus`, `ConnState`, `PeerAddress` and the other status types are
   exported and documented, as is every public item.
-- The examples `hello`, `server` and `multihoming`, which run both sides on
-  loopback, replace `ping` and `pong`.
+- The examples `hello`, `notifications`, `association_end`, `multihoming`,
+  `options`, `one_to_many` and `server`, which run both sides on loopback,
+  replace `ping` and `pong`. The README shows all but the last: a test
+  compares the two, and what each prints with the text that the README
+  shows under it.
 - Three `cargo fuzz` targets under `fuzz/`, which CI runs for a minute each:
   `notification` (a notification of any octets), `ancillary` (the control
   messages of a `recvmsg`) and `receive` (the assembly of messages from any

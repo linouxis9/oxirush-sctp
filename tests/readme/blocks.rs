@@ -1,0 +1,331 @@
+// The Rust blocks of the README and of the documentation, each as a function.
+// `tests/readme.rs` writes this file and says how: do not edit it.
+#![allow(unused)]
+
+use std::cell::RefCell;
+
+thread_local!(static PRINTED: RefCell<String> = const { RefCell::new(String::new()) });
+
+// What a block prints is kept, to be compared with what its page shows.
+macro_rules! println {
+    () => {
+        PRINTED.with(|printed| printed.borrow_mut().push('\n'))
+    };
+    // The line is made first, where the block is: its arguments may have a
+    // `?` or an `await`.
+    ($($argument:tt)*) => {{
+        let line = format!($($argument)*);
+        PRINTED.with(|printed| {
+            let mut printed = printed.borrow_mut();
+            printed.push_str(&line);
+            printed.push('\n');
+        })
+    }};
+}
+
+/// What `block` prints.
+pub fn printed(block: fn()) -> String {
+    PRINTED.with(|printed| printed.borrow_mut().clear());
+    block();
+    PRINTED.with(|printed| printed.take())
+}
+
+pub const BLOCKS: &[fn()] = &[
+    block_1,
+    block_2,
+    block_3,
+    block_4,
+    block_5,
+    block_6,
+    block_7,
+];
+
+/// The Rust block 1 of README.md.
+fn block_1() {
+    use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
+
+    #[tokio::main(flavor = "current_thread")]
+    async fn main() -> std::io::Result<()> {
+        // Stream 1, and the payload protocol identifier of NGAP
+        let options = SendOptions {
+            stream_id: 1,
+            ppid: 60,
+            ..Default::default()
+        };
+
+        let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+        socket.bind("127.0.0.1:0".parse().unwrap())?;
+        let listener = socket.listen(5)?;
+        let address = listener.local_addr()?;
+
+        let server = async {
+            let (association, _peer) = listener.accept().await?;
+            if let NotificationOrData::Data(message) = association.recv().await? {
+                let text = String::from_utf8_lossy(&message.payload);
+                let (stream, ppid) = (message.stream_id(), message.ppid());
+                println!("server: {text:?} on stream {stream:?} with PPID {ppid:?}");
+                association.send(b"pong", options).await?;
+            }
+            std::io::Result::Ok(())
+        };
+        let client = async {
+            let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+            let (association, _) = socket.connect(address).await?;
+            association.send(b"ping", options).await?;
+            if let NotificationOrData::Data(message) = association.recv().await? {
+                println!("client: {:?}", String::from_utf8_lossy(&message.payload));
+            }
+            std::io::Result::Ok(())
+        };
+        let (server, client) = tokio::join!(server, client);
+        server.and(client)
+    }
+    main().unwrap();
+}
+
+/// The Rust block 2 of README.md.
+fn block_2() {
+    use oxirush_sctp::{
+        Event, Notification, NotificationOrData, SendOptions, Socket, SocketToAssociation,
+        SubscribeEventAssocId,
+    };
+
+    #[tokio::main(flavor = "current_thread")]
+    async fn main() -> std::io::Result<()> {
+        // Subscribe before listening: the accepted associations inherit it
+        let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+        socket.bind("127.0.0.1:0".parse().unwrap())?;
+        socket.options().subscribe_events(
+            &[Event::Association, Event::Shutdown],
+            SubscribeEventAssocId::All,
+        )?;
+        let listener = socket.listen(5)?;
+
+        // A peer that sends one message and closes its socket
+        let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
+        let (peer, _) = peer.connect(listener.local_addr()?).await?;
+        peer.send(b"hello", SendOptions::default()).await?;
+        drop(peer);
+
+        let (association, _) = listener.accept().await?;
+        loop {
+            match association.recv().await? {
+                NotificationOrData::Notification(Notification::AssociationChange(change)) => {
+                    println!("association change: {:?}", change.state)
+                }
+                NotificationOrData::Notification(Notification::Shutdown(_)) => {
+                    println!("the peer shuts the association down")
+                }
+                NotificationOrData::Notification(other) => println!("{other:?}"),
+                // An empty message is the end of the association
+                NotificationOrData::Data(message) if message.payload.is_empty() => break,
+                NotificationOrData::Data(message) => println!("{} octets", message.payload.len()),
+            }
+        }
+        Ok(())
+    }
+    main().unwrap();
+}
+
+/// The Rust block 3 of README.md.
+fn block_3() {
+    use oxirush_sctp::{ConnectedSocket, Listener, NotificationOrData, Socket, SocketToAssociation};
+    use std::time::Duration;
+
+    /// The two ends of a new association of `listener`.
+    async fn connected(listener: &Listener) -> std::io::Result<(ConnectedSocket, ConnectedSocket)> {
+        let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+        let (peer, _) = socket.connect(listener.local_addr()?).await?;
+        let (accepted, _) = listener.accept().await?;
+        Ok((accepted, peer))
+    }
+
+    #[tokio::main(flavor = "current_thread")]
+    async fn main() -> std::io::Result<()> {
+        let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+        socket.bind("127.0.0.1:0".parse().unwrap())?;
+        let listener = socket.listen(5)?;
+
+        // The peer closes its socket: an empty message, at every call from then on
+        let (association, peer) = connected(&listener).await?;
+        drop(peer);
+        for _ in 0..2 {
+            if let NotificationOrData::Data(message) = association.recv().await? {
+                println!("closed: a message of {} octets", message.payload.len());
+            }
+        }
+
+        // The peer aborts, as a socket does that is dropped with a linger of
+        // zero: an error
+        let (association, peer) = connected(&listener).await?;
+        peer.options().set_linger(Some(Duration::ZERO))?;
+        drop(peer);
+        let end = association.recv().await.map(|_| ());
+        println!("aborted: {:?}", end.map_err(|error| error.kind()));
+        Ok(())
+    }
+    main().unwrap();
+}
+
+/// The Rust block 4 of README.md.
+fn block_4() {
+    use oxirush_sctp::{BindxFlags, Socket, SocketToAssociation};
+    use std::net::{IpAddr, SocketAddr};
+    use std::time::Duration;
+
+    fn addresses(first: &str, second: &str) -> [SocketAddr; 2] {
+        [first.parse().unwrap(), second.parse().unwrap()]
+    }
+
+    fn ips(addresses: &[SocketAddr]) -> Vec<IpAddr> {
+        addresses.iter().map(SocketAddr::ip).collect()
+    }
+
+    #[tokio::main(flavor = "current_thread")]
+    async fn main() -> std::io::Result<()> {
+        // With port 0 the kernel chooses one port for both addresses
+        let server = Socket::new_v4(SocketToAssociation::OneToOne)?;
+        server.bindx(&addresses("127.0.0.1:0", "127.0.0.2:0"), BindxFlags::Add)?;
+        let listener = server.listen(5)?;
+        let server_addresses = listener.local_addrs(0)?;
+
+        let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+        client.bindx(&addresses("127.0.0.1:0", "127.0.0.3:0"), BindxFlags::Add)?;
+        let (client, id) = client.connectx(&server_addresses).await?;
+        let (accepted, _) = listener.accept().await?;
+
+        println!("client: {:?}", ips(&client.local_addrs(id)?));
+        println!("server: {:?}", ips(&client.peer_addrs(id)?));
+        println!("the server sees: {:?}", ips(&accepted.peer_addrs(0)?));
+        println!(
+            "primary path: {}",
+            client.status(id)?.peer_primary.address.ip()
+        );
+
+        // Probe every path each second instead of each 30 seconds
+        for address in client.peer_addrs(id)? {
+            let mut path = client.options().peer_address_params(id, address)?;
+            path.heartbeat_interval = Duration::from_secs(1);
+            client.options().set_peer_address_params(path)?;
+            let path = client.options().peer_address_params(id, address)?;
+            println!(
+                "{}: heartbeat every {:?}, lost after {} retransmissions",
+                address.ip(),
+                path.heartbeat_interval,
+                path.path_max_retrans
+            );
+        }
+        Ok(())
+    }
+    main().unwrap();
+}
+
+/// The Rust block 5 of README.md.
+fn block_5() {
+    use oxirush_sctp::{Socket, SocketToAssociation};
+
+    #[tokio::main(flavor = "current_thread")]
+    async fn main() -> std::io::Result<()> {
+        // What is set before `listen` or `connect` stays, and the accepted
+        // associations inherit it
+        let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+        socket.bind("127.0.0.1:0".parse().unwrap())?;
+        let options = socket.options();
+        options.set_nodelay(true)?; // send small messages at once
+        options.set_init_params(4, 4, 0, 0)?; // four streams each way
+        options.set_max_message_size(64 << 10); // refuse longer received messages
+        let listener = socket.listen(5)?;
+
+        let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
+        let (_peer, _) = peer.connect(listener.local_addr()?).await?;
+        let (association, _) = listener.accept().await?;
+
+        let status = association.status(0)?;
+        println!(
+            "{:?}, {} outgoing and {} incoming streams",
+            status.state, status.outstreams, status.instreams
+        );
+        let options = association.options();
+        println!(
+            "nodelay {}, messages of {} octets at most",
+            options.nodelay()?,
+            options.max_message_size()
+        );
+        Ok(())
+    }
+    main().unwrap();
+}
+
+/// The Rust block 6 of README.md.
+fn block_6() {
+    use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
+
+    #[tokio::main(flavor = "current_thread")]
+    async fn main() -> std::io::Result<()> {
+        let socket = Socket::new_v4(SocketToAssociation::OneToMany)?;
+        socket.bind("127.0.0.1:0".parse().unwrap())?;
+        let endpoint = socket.into_endpoint(5)?;
+
+        let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
+        let (peer, _) = peer.connect(endpoint.local_addr()?).await?;
+        peer.send(b"ping", SendOptions::default()).await?;
+
+        // A message comes with its association, which the answer names
+        if let NotificationOrData::Data(message) = endpoint.recv().await? {
+            println!("endpoint: {:?}", String::from_utf8_lossy(&message.payload));
+            let options = SendOptions {
+                assoc_id: message.assoc_id().unwrap(),
+                ..Default::default()
+            };
+            endpoint.send(b"pong", options).await?;
+        }
+        if let NotificationOrData::Data(message) = peer.recv().await? {
+            println!("peer: {:?}", String::from_utf8_lossy(&message.payload));
+        }
+        Ok(())
+    }
+    main().unwrap();
+}
+
+/// The Rust block 1 of src/lib.rs.
+fn block_7() {
+    use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
+
+    #[tokio::main(flavor = "current_thread")]
+    async fn main() -> std::io::Result<()> {
+        // Stream 1, and the payload protocol identifier of NGAP
+        let options = SendOptions {
+            stream_id: 1,
+            ppid: 60,
+            ..Default::default()
+        };
+
+        let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+        socket.bind("127.0.0.1:0".parse().unwrap())?;
+        let listener = socket.listen(5)?;
+        let address = listener.local_addr()?;
+
+        let server = async {
+            let (association, _peer) = listener.accept().await?;
+            if let NotificationOrData::Data(message) = association.recv().await? {
+                let text = String::from_utf8_lossy(&message.payload);
+                let (stream, ppid) = (message.stream_id(), message.ppid());
+                println!("server: {text:?} on stream {stream:?} with PPID {ppid:?}");
+                association.send(b"pong", options).await?;
+            }
+            std::io::Result::Ok(())
+        };
+        let client = async {
+            let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+            let (association, _) = socket.connect(address).await?;
+            association.send(b"ping", options).await?;
+            if let NotificationOrData::Data(message) = association.recv().await? {
+                println!("client: {:?}", String::from_utf8_lossy(&message.payload));
+            }
+            std::io::Result::Ok(())
+        };
+        let (server, client) = tokio::join!(server, client);
+        server.and(client)
+    }
+    main().unwrap();
+}

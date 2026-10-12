@@ -2,114 +2,17 @@
 
 [![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg)](https://github.com/linouxis9/oxirush-sctp/blob/main/COPYRIGHT)
 
-> This crate is not on crates.io yet. Until its first release, depend on the
-> repository: `oxirush-sctp = { git = "https://github.com/linouxis9/oxirush-sctp" }`.
-
-Async SCTP sockets for [Tokio](https://tokio.rs) on Linux. `send` and `recv`
-move one whole message at a time, with its stream and its payload protocol
-identifier, over the SCTP implementation of the kernel and its sockets API
-([RFC 6458](https://www.rfc-editor.org/rfc/rfc6458.html)).
-
-- **One-to-one sockets**, which connect, listen and accept like TCP ones,
-  and **one-to-many sockets**, which carry many associations each
-- **Multihoming**: several local and peer addresses in one association
-- **Notifications**: an association comes up, is shut down or is lost, a
-  peer address changes state, a message could not be delivered
-- **No `libsctp`**: the crate makes the system calls itself
-
-It is one of the OxiRush crates for mobile core networks, with
-[oxirush-nas](https://github.com/linouxis9/oxirush-nas) (NAS messages),
-[oxirush-security](https://github.com/linouxis9/oxirush-security) (the
-security functions of NAS),
-[oxirush-ngap](https://github.com/linouxis9/oxirush-ngap) (NGAP),
-[oxirush-s1ap](https://github.com/linouxis9/oxirush-s1ap) (S1AP) and
-[oxirush-gtp-u](https://github.com/linouxis9/oxirush-gtp-u) (GTP-U). NGAP
-and S1AP are carried over SCTP.
-
-## Installation
-
-```toml
-[dependencies]
-oxirush-sctp = { git = "https://github.com/linouxis9/oxirush-sctp" }
-tokio = { version = "1", features = ["macros", "rt"] }
-```
-
-It needs:
-
-- Linux 5.0 or later with SCTP. `sudo modprobe sctp` loads the kernel
-  module, which some distributions ship in a separate package of extra
-  kernel modules. Without it, creating a socket fails with
-  `EPROTONOSUPPORT`, or `ESOCKTNOSUPPORT` for a one-to-many socket.
-- A Tokio runtime with the I/O driver (`#[tokio::main]`, or `enable_io` on
-  a runtime builder). Sockets register with it when they are created, and
-  panic without it.
-- Rust 1.88 or later.
-
-Diagnostics go through [`tracing`](https://crates.io/crates/tracing).
-
-## Terms
-
-| Term | Meaning |
-| --- | --- |
-| SCTP | Stream Control Transmission Protocol (RFC 9260): a transport that carries whole messages, in order within a stream, between two endpoints that may each have several addresses |
-| Association | What SCTP has in the place of a TCP connection |
-| Stream | One of the numbered sequences of messages of an association. Messages of two streams do not wait for each other |
-| PPID | Payload protocol identifier: a number that travels with each message and says what it carries. 60 is NGAP and 18 is S1AP |
-| One-to-one socket | A socket with one association, which is used like a TCP socket |
-| One-to-many socket | A socket with many associations, which is used like a UDP socket |
-| Multihoming | An association between several addresses of each side: when a path fails, another carries it |
-| Notification | A message of the kernel about an association, which `recv` returns in the place of data when it is subscribed |
-
-## What it covers
-
-Sockets of both kinds, with the options of RFC 6458 that the table below
-names: each row is a section of the RFC and what gives it here.
-
-| RFC 6458 | Provided by |
-| --- | --- |
-| 3.1, 4.1: socket, bind, listen, accept, connect, send, receive, shutdown, close | the socket types; a dropped socket is closed |
-| 5.3.4 `SCTP_SNDINFO` | `SendOptions`, `SendInfo` |
-| 5.3.5 `SCTP_RCVINFO`, 5.3.6 `SCTP_NXTINFO` | `ReceivedData::rcv_info`, `nxt_info` |
-| 6.1.1 `SCTP_ASSOC_CHANGE` | `Notification::AssociationChange` |
-| 6.1.2 `SCTP_PEER_ADDR_CHANGE` | `Notification::PeerAddressChange` |
-| 6.1.5 `SCTP_SHUTDOWN_EVENT` | `Notification::Shutdown` |
-| 6.1.11 `SCTP_SEND_FAILED_EVENT` | `Notification::SendFailure` |
-| 6.1: the other notifications | `Notification::Unsupported`, with their type and octets |
-| 8.1.1 `SCTP_RTOINFO` | `set_rto_info`, `rto_info` |
-| 8.1.3 `SCTP_INITMSG` | `set_init_params` |
-| 8.1.4 `SO_LINGER` | `set_linger`, off or zero |
-| 8.1.5 `SCTP_NODELAY` | `set_nodelay`, `nodelay` |
-| 8.1.12 `SCTP_PEER_ADDR_PARAMS` | `peer_address_params`, `set_peer_address_params`, `request_heartbeat`: heartbeat and retransmission limit |
-| 8.1.28 `SCTP_EVENT` | `subscribe_events`, `unsubscribe_events` |
-| 8.1.29 `SCTP_RECVRCVINFO`, 8.1.30 `SCTP_RECVNXTINFO` | `request_rcvinfo`, `request_nxtinfo` |
-| 8.1.31 `SCTP_DEFAULT_SNDINFO` | `set_default_sendinfo` |
-| 8.2.1 `SCTP_STATUS` | `status` |
-| 9.1 `sctp_bindx`, 9.9 `sctp_connectx` | `bindx`, `connectx` |
-| 9.2 `sctp_peeloff` | `OneToManyEndpoint::peeloff` |
-| 9.3 `sctp_getpaddrs`, 9.5 `sctp_getladdrs` | `peer_addrs`, `local_addrs` |
-
-## What it does not do
-
-| Subject | Limit |
-| --- | --- |
-| SCTP itself | The protocol runs in the Linux kernel: the crate is not an SCTP implementation. |
-| Other systems | Linux only. |
-| SCTP over DTLS | The data channels of WebRTC are another stack: not served. |
-| The rest of RFC 6458 | Not wrapped: among others authentication, partial reliability, the association parameters, the choice of the primary path and the buffer sizes. The sockets implement `AsFd` and `AsRawFd` for them. The interfaces that the RFC deprecates are left out on purpose. |
-
-## Usage
-
-### A client and a server
-
-Both sides send on stream 1 with a payload protocol identifier, and read
-them back from what they receive.
+Async SCTP sockets for [Tokio](https://tokio.rs) on Linux, over the SCTP of
+the kernel and its sockets API
+([RFC 6458](https://www.rfc-editor.org/rfc/rfc6458.html)). `send` and `recv`
+move one whole message, with its stream and its payload protocol identifier.
 
 ```rust
 use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
-    // Stream 1, and the payload protocol identifier of NGAP.
+    // Stream 1, and the payload protocol identifier of NGAP
     let options = SendOptions {
         stream_id: 1,
         ppid: 60,
@@ -122,14 +25,11 @@ async fn main() -> std::io::Result<()> {
     let address = listener.local_addr()?;
 
     let server = async {
-        let (association, peer) = listener.accept().await?;
+        let (association, _peer) = listener.accept().await?;
         if let NotificationOrData::Data(message) = association.recv().await? {
-            println!(
-                "{peer} sent {:?} on stream {:?} with PPID {:?}",
-                String::from_utf8_lossy(&message.payload),
-                message.stream_id(),
-                message.ppid()
-            );
+            let text = String::from_utf8_lossy(&message.payload);
+            let (stream, ppid) = (message.stream_id(), message.ppid());
+            println!("server: {text:?} on stream {stream:?} with PPID {ppid:?}");
             association.send(b"pong", options).await?;
         }
         std::io::Result::Ok(())
@@ -139,8 +39,7 @@ async fn main() -> std::io::Result<()> {
         let (association, _) = socket.connect(address).await?;
         association.send(b"ping", options).await?;
         if let NotificationOrData::Data(message) = association.recv().await? {
-            let answer = String::from_utf8_lossy(&message.payload);
-            println!("the server answered {answer:?}");
+            println!("client: {:?}", String::from_utf8_lossy(&message.payload));
         }
         std::io::Result::Ok(())
     };
@@ -149,298 +48,349 @@ async fn main() -> std::io::Result<()> {
 }
 ```
 
-This is `examples/hello.rs`: `cargo run --example hello`.
+```text
+server: "ping" on stream Some(1) with PPID Some(60)
+client: "pong"
+```
 
-### Several associations, and how each one ends
+The text under a block is what the block prints.
 
-A listener accepts one `ConnectedSocket` for each association. Subscribe to
-events before listening: the accepted associations inherit the
-subscription.
+> This crate is not on crates.io yet.
 
-```rust,no_run
+## Install
+
+```toml
+[dependencies]
+oxirush-sctp = { git = "https://github.com/linouxis9/oxirush-sctp" }
+tokio = { version = "1", features = ["macros", "rt"] }
+```
+
+It needs Linux 5.0 or later with SCTP, which `sudo modprobe sctp` loads, a
+Tokio runtime with the I/O driver, and Rust 1.88 or later.
+
+## Notifications
+
+`recv` returns the notifications of the events that a socket subscribed
+to, in the place of data.
+
+```rust
 use oxirush_sctp::{
-    AssocChangeState, ConnectedSocket, Event, Listener, Notification, NotificationOrData, Socket,
-    SocketToAssociation, SubscribeEventAssocId,
+    Event, Notification, NotificationOrData, SendOptions, Socket, SocketToAssociation,
+    SubscribeEventAssocId,
 };
 
-fn listen() -> std::io::Result<Listener> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::io::Result<()> {
+    // Subscribe before listening: the accepted associations inherit it
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.bind("0.0.0.0:38412".parse().unwrap())?;
+    socket.bind("127.0.0.1:0".parse().unwrap())?;
     socket.options().subscribe_events(
         &[Event::Association, Event::Shutdown],
         SubscribeEventAssocId::All,
     )?;
-    socket.listen(5)
-}
+    let listener = socket.listen(5)?;
 
-async fn accept(listener: Listener) -> std::io::Result<()> {
-    loop {
-        let (association, _peer) = listener.accept().await?;
-        tokio::spawn(serve(association));
-    }
-}
+    // A peer that sends one message and closes its socket
+    let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    let (peer, _) = peer.connect(listener.local_addr()?).await?;
+    peer.send(b"hello", SendOptions::default()).await?;
+    drop(peer);
 
-async fn serve(association: ConnectedSocket) {
+    let (association, _) = listener.accept().await?;
     loop {
-        match association.recv().await {
-            Ok(NotificationOrData::Data(message)) if message.payload.is_empty() => break,
-            Ok(NotificationOrData::Data(message)) => println!("{} octets", message.payload.len()),
-            Ok(NotificationOrData::Notification(Notification::Shutdown(_))) => {
+        match association.recv().await? {
+            NotificationOrData::Notification(Notification::AssociationChange(change)) => {
+                println!("association change: {:?}", change.state)
+            }
+            NotificationOrData::Notification(Notification::Shutdown(_)) => {
                 println!("the peer shuts the association down")
             }
-            Ok(NotificationOrData::Notification(Notification::AssociationChange(change)))
-                if change.state == AssocChangeState::CommLost =>
-            {
-                println!("the association is lost")
-            }
-            Ok(NotificationOrData::Notification(_)) => {}
-            Err(error) => {
-                println!("{error}");
-                break;
-            }
+            NotificationOrData::Notification(other) => println!("{other:?}"),
+            // An empty message is the end of the association
+            NotificationOrData::Data(message) if message.payload.is_empty() => break,
+            NotificationOrData::Data(message) => println!("{} octets", message.payload.len()),
         }
     }
+    Ok(())
 }
 ```
 
-`examples/server.rs` runs this against a peer that closes its association
-and one that aborts it.
+```text
+association change: CommUp
+5 octets
+the peer shuts the association down
+association change: ShutdownComplete
+```
 
-On a `ConnectedSocket`, the end of the association reaches `recv` as
-follows, and stays: every later call returns it again, and none waits. The
-notifications come first, when subscribed.
+`Event::Address` subscribes to `Notification::PeerAddressChange`, the
+change of state of a path.
 
-| What happened | `recv` returns | Notifications |
-| --- | --- | --- |
-| The peer closed its socket or shut the association down | a message with an empty payload | `Shutdown`, then `AssociationChange` with `ShutdownComplete` |
-| This side called `shutdown(Shutdown::Write)`, and the peer has answered | a message with an empty payload, after what the peer had still sent | `AssociationChange` with `ShutdownComplete` |
-| The peer aborted the association | an error, `ConnectionReset` | `AssociationChange` with `CommLost` |
+## The end of an association
 
-An association that is lost in another way ends with the error that Linux
-gives its socket. A `OneToManyEndpoint` learns of the end of an association
-from the notifications only.
+```rust
+use oxirush_sctp::{ConnectedSocket, Listener, NotificationOrData, Socket, SocketToAssociation};
+use std::time::Duration;
 
-A dropped socket shuts its association down. With
-`options().set_linger(Some(Duration::ZERO))` it aborts it instead. Other
-durations are refused, because closing would then block the runtime.
+/// The two ends of a new association of `listener`.
+async fn connected(listener: &Listener) -> std::io::Result<(ConnectedSocket, ConnectedSocket)> {
+    let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    let (peer, _) = socket.connect(listener.local_addr()?).await?;
+    let (accepted, _) = listener.accept().await?;
+    Ok((accepted, peer))
+}
 
-### Multihoming
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::io::Result<()> {
+    let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    let listener = socket.listen(5)?;
+
+    // The peer closes its socket: an empty message, at every call from then on
+    let (association, peer) = connected(&listener).await?;
+    drop(peer);
+    for _ in 0..2 {
+        if let NotificationOrData::Data(message) = association.recv().await? {
+            println!("closed: a message of {} octets", message.payload.len());
+        }
+    }
+
+    // The peer aborts, as a socket does that is dropped with a linger of
+    // zero: an error
+    let (association, peer) = connected(&listener).await?;
+    peer.options().set_linger(Some(Duration::ZERO))?;
+    drop(peer);
+    let end = association.recv().await.map(|_| ());
+    println!("aborted: {:?}", end.map_err(|error| error.kind()));
+    Ok(())
+}
+```
+
+```text
+closed: a message of 0 octets
+closed: a message of 0 octets
+aborted: Err(ConnectionReset)
+```
+
+A dropped socket shuts its association down, and aborts it with a linger of
+zero. A `OneToManyEndpoint` learns of the end of an association from the
+notifications only.
+
+## Multihoming
 
 `bindx` binds several local addresses and `connectx` gives several
-addresses of the peer. The addresses of one call share a port, which the
-kernel chooses for port 0.
+addresses of the peer. The addresses of one call share a port.
 
-```rust,no_run
-use oxirush_sctp::{BindxFlags, ConnectedSocket, Socket, SocketToAssociation};
-use std::net::SocketAddr;
+```rust
+use oxirush_sctp::{BindxFlags, Socket, SocketToAssociation};
+use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
-async fn connect(local: &[SocketAddr], peer: &[SocketAddr]) -> std::io::Result<ConnectedSocket> {
-    let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.bindx(local, BindxFlags::Add)?;
-    let (association, id) = socket.connectx(peer).await?;
-    println!("local addresses {:?}", association.local_addrs(id)?);
-    println!("peer addresses {:?}", association.peer_addrs(id)?);
-    Ok(association)
+fn addresses(first: &str, second: &str) -> [SocketAddr; 2] {
+    [first.parse().unwrap(), second.parse().unwrap()]
+}
+
+fn ips(addresses: &[SocketAddr]) -> Vec<IpAddr> {
+    addresses.iter().map(SocketAddr::ip).collect()
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::io::Result<()> {
+    // With port 0 the kernel chooses one port for both addresses
+    let server = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    server.bindx(&addresses("127.0.0.1:0", "127.0.0.2:0"), BindxFlags::Add)?;
+    let listener = server.listen(5)?;
+    let server_addresses = listener.local_addrs(0)?;
+
+    let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    client.bindx(&addresses("127.0.0.1:0", "127.0.0.3:0"), BindxFlags::Add)?;
+    let (client, id) = client.connectx(&server_addresses).await?;
+    let (accepted, _) = listener.accept().await?;
+
+    println!("client: {:?}", ips(&client.local_addrs(id)?));
+    println!("server: {:?}", ips(&client.peer_addrs(id)?));
+    println!("the server sees: {:?}", ips(&accepted.peer_addrs(0)?));
+    println!(
+        "primary path: {}",
+        client.status(id)?.peer_primary.address.ip()
+    );
+
+    // Probe every path each second instead of each 30 seconds
+    for address in client.peer_addrs(id)? {
+        let mut path = client.options().peer_address_params(id, address)?;
+        path.heartbeat_interval = Duration::from_secs(1);
+        client.options().set_peer_address_params(path)?;
+        let path = client.options().peer_address_params(id, address)?;
+        println!(
+            "{}: heartbeat every {:?}, lost after {} retransmissions",
+            address.ip(),
+            path.heartbeat_interval,
+            path.path_max_retrans
+        );
+    }
+    Ok(())
 }
 ```
 
-`examples/multihoming.rs` does it on loopback addresses. Subscribe to
-`Event::Address` to receive a `Notification::PeerAddressChange` when a path
-changes state. `options().peer_address_params`, `set_peer_address_params`
-and `request_heartbeat` read and set the heartbeat and the retransmission
-limit of a path.
+```text
+client: [127.0.0.1, 127.0.0.3]
+server: [127.0.0.1, 127.0.0.2]
+the server sees: [127.0.0.1, 127.0.0.3]
+primary path: 127.0.0.1
+127.0.0.1: heartbeat every 1s, lost after 5 retransmissions
+127.0.0.2: heartbeat every 1s, lost after 5 retransmissions
+```
 
-### Status and options
+## Options and status
 
-Every socket type has `options()`. What is set before `listen` or `connect`
-stays, and accepted associations inherit it.
+Every socket type has `options()`. The sockets implement `AsFd` and
+`AsRawFd` for an option that the crate does not wrap.
 
-```rust,no_run
-use oxirush_sctp::{ConnectedSocket, Socket};
+```rust
+use oxirush_sctp::{Socket, SocketToAssociation};
 
-fn configure(socket: &Socket) -> std::io::Result<()> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::io::Result<()> {
+    // What is set before `listen` or `connect` stays, and the accepted
+    // associations inherit it
+    let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    socket.bind("127.0.0.1:0".parse().unwrap())?;
     let options = socket.options();
     options.set_nodelay(true)?; // send small messages at once
     options.set_init_params(4, 4, 0, 0)?; // four streams each way
     options.set_max_message_size(64 << 10); // refuse longer received messages
-    Ok(())
-}
+    let listener = socket.listen(5)?;
 
-fn report(association: &ConnectedSocket) -> std::io::Result<()> {
+    let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    let (_peer, _) = peer.connect(listener.local_addr()?).await?;
+    let (association, _) = listener.accept().await?;
+
     let status = association.status(0)?;
     println!(
-        "{:?}, {} outgoing streams, primary path {}",
-        status.state, status.outstreams, status.peer_primary.address
+        "{:?}, {} outgoing and {} incoming streams",
+        status.state, status.outstreams, status.instreams
+    );
+    let options = association.options();
+    println!(
+        "nodelay {}, messages of {} octets at most",
+        options.nodelay()?,
+        options.max_message_size()
     );
     Ok(())
 }
 ```
 
-`examples/server.rs` sets options before it listens and prints the status
-of each association it accepts. For an option the crate does not wrap, the
-sockets implement `AsFd` and `AsRawFd`.
+```text
+Established, 4 outgoing and 4 incoming streams
+nodelay true, messages of 65536 octets at most
+```
 
-### One socket for many associations
+## One socket for many associations
 
-A one-to-many socket needs no accept: its messages arrive on one `recv`,
-each with the association it belongs to.
-
-```rust,no_run
+```rust
 use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
 
-async fn echo() -> std::io::Result<()> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::io::Result<()> {
     let socket = Socket::new_v4(SocketToAssociation::OneToMany)?;
-    socket.bind("0.0.0.0:38412".parse().unwrap())?;
+    socket.bind("127.0.0.1:0".parse().unwrap())?;
     let endpoint = socket.into_endpoint(5)?;
-    loop {
-        if let NotificationOrData::Data(message) = endpoint.recv().await? {
-            let options = SendOptions {
-                assoc_id: message.assoc_id().unwrap(),
-                ..Default::default()
-            };
-            endpoint.send(&message.payload, options).await?;
-        }
+
+    let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    let (peer, _) = peer.connect(endpoint.local_addr()?).await?;
+    peer.send(b"ping", SendOptions::default()).await?;
+
+    // A message comes with its association, which the answer names
+    if let NotificationOrData::Data(message) = endpoint.recv().await? {
+        println!("endpoint: {:?}", String::from_utf8_lossy(&message.payload));
+        let options = SendOptions {
+            assoc_id: message.assoc_id().unwrap(),
+            ..Default::default()
+        };
+        endpoint.send(b"pong", options).await?;
     }
+    if let NotificationOrData::Data(message) = peer.recv().await? {
+        println!("peer: {:?}", String::from_utf8_lossy(&message.payload));
+    }
+    Ok(())
 }
 ```
 
-`connect` starts an association without waiting for it: subscribe to
-`Event::Association` to learn whether it came up. `send_to` sends to an
-address, and starts an association if there is none. `peeloff` moves one
-association to a `ConnectedSocket` of its own.
-
-## Reference
-
-### Socket types
-
-| Type | Comes from | Does |
-| --- | --- | --- |
-| `Socket` | `Socket::new_v4`, `Socket::new_v6` | binds, then becomes one of the next three |
-| `Listener` | `Socket::listen` | accepts associations |
-| `ConnectedSocket` | `Socket::connect`, `Socket::connectx`, `Listener::accept`, `OneToManyEndpoint::peeloff` | sends and receives on one association |
-| `OneToManyEndpoint` | `Socket::into_endpoint` | sends and receives on many associations |
-| `SocketOptions` | `options()` on the four above | reads and sets options |
-
-### Messages
-
-- `recv` returns a whole message, however many reads it takes. A dropped
-  `recv` future loses nothing: the next call continues the message.
-- A received message longer than `options().max_message_size()`, 4 MiB by
-  default, is discarded and reported as an `InvalidData` error. The next
-  `recv` returns the message after it.
-- `send` waits for room in the send buffer. A dropped `send` future has
-  sent nothing.
-- A message shorter than a packet, sent while the one before it is not
-  acknowledged, waits for that acknowledgement, which the peer may delay by
-  200 ms: SCTP gathers small messages as TCP does. With
-  `options().set_nodelay(true)` it leaves at once. The benchmark below took
-  200 ms a message without it, and 9 µs with it.
-- A received message holds the memory of its octets and no more.
-- A sent message must fit in the send buffer (`SO_SNDBUF`): a longer one
-  fails with `EMSGSIZE`. An empty one fails with `EINVAL`, as does a stream
-  that the association does not have. After the end of the association a
-  send fails with `EPIPE`.
-- `ReceivedData::stream_id`, `ppid` and `assoc_id` read the receive
-  information (`SCTP_RCVINFO`) that every socket requests. They return
-  `None` after `options().request_rcvinfo(false)`, and for the empty
-  message that ends an association.
-
-### Payload protocol identifiers
-
-`SendOptions::ppid` and `ReceivedData::ppid` are plain numbers: 60 is NGAP.
-The lower-level `SendInfo::ppid`, `RcvInfo::ppid` and `NxtInfo::ppid` hold
-the identifier as the kernel carries it, in network byte order:
-`60_u32.to_be()`.
-
-## Examples
-
-```bash
-cargo run --example hello        # a client and a server
-cargo run --example server       # options, several associations, their status and how each one ends
-cargo run --example multihoming  # two addresses on each side
+```text
+endpoint: "ping"
+peer: "pong"
 ```
 
-Each one runs both sides on loopback and needs no argument.
+`connect` starts an association without waiting for it, `send_to` sends to
+an address, and `peeloff` moves one association to a `ConnectedSocket` of
+its own.
 
-## Tests
+`examples/` has these programs, which `cargo run --example <name>` runs,
+and `server`, which serves several associations in a task each.
 
-```bash
+## Features
+
+The crate has no Cargo feature. Its diagnostics go through
+[`tracing`](https://crates.io/crates/tracing).
+
+## What it does not do
+
+- SCTP itself: the protocol runs in the Linux kernel.
+- Other systems than Linux.
+- SCTP over DTLS, the data channels of WebRTC.
+- The rest of RFC 6458: among others authentication, partial reliability
+  and the choice of the primary path.
+
+## Performance
+
+On one core of an AMD Ryzen 7 5700G, a message sent on one end of an
+association and received on the other, over the loopback interface, takes
+9 µs for 64 or 1400 octets and 40 µs for 64 KiB. Without
+`options().set_nodelay(true)` a small message can wait 200 ms for the
+acknowledgement of the one before it.
+[`benches/`](https://github.com/linouxis9/oxirush-sctp/blob/main/benches/README.md)
+has the benchmarks and how to profile.
+
+## Tests and fuzzing
+
+```sh
+sudo modprobe sctp
 cargo test
 ```
 
-The tests open SCTP associations over loopback, so the kernel's `sctp`
-module must be available. The connect-timeout test needs `unshare` and
-`ip`, and the 4 MiB message tests need `net.core.wmem_max` and
-`net.core.rmem_max` large enough; each skips otherwise.
+The tests open associations over the loopback interface. CI fuzzes three
+`cargo fuzz` targets for a minute each: what the kernel hands over is read
+without a panic.
 
-`fuzz/` has three `cargo fuzz` targets for what the kernel hands over, which
-CI runs for a minute each: a notification of any octets, the control
-messages of a `recvmsg`, and the assembly of messages from any sequence of
-parts.
+[The documentation](https://github.com/linouxis9/oxirush-sctp/blob/main/src/lib.rs)
+has the terms, the sections of RFC 6458 that the crate covers, the socket
+types, and the rules of `send` and `recv`: `cargo doc --open` builds it.
 
-## Benchmarks
+## The OxiRush family
 
-`benches/` is a package of its own, which the published crate does not
-have. It times a message through an association over the loopback
-interface with [criterion](https://crates.io/crates/criterion), and
-profiles it with [pprof](https://crates.io/crates/pprof):
-
-```bash
-cd benches
-cargo bench --bench messages                # every benchmark
-cargo bench --bench messages -- 1400        # those whose name has it
-
-# Ten seconds of one benchmark under the profiler, then where the time went
-cargo bench --bench messages -- --profile-time 10 send-recv/65536
-go tool pprof -top target/criterion/send-recv/65536/profile/profile.pb
-```
-
-The profile is one that Go's `pprof` reads. With `PROFILE=flamegraph` in
-the environment it is `flamegraph.svg`, in the same directory.
-
-On one core of an AMD Ryzen 7 5700G with Linux 7.0 and Rust 1.98.1, a
-message sent on one end of an association and received on the other takes
-8.9 µs for 64 octets, 9.0 µs for 1400, 14.6 µs for 16 KiB and 40 µs for
-64 KiB, which `recv` assembles from several reads. More than nine tenths of
-that time is in the system calls.
-
-## Documentation
-
-`cargo doc --open` builds the API reference. It will be on docs.rs with the
-first release.
+[oxirush-nas](https://github.com/linouxis9/oxirush-nas) (NAS messages),
+[oxirush-security](https://github.com/linouxis9/oxirush-security) (NAS
+security), [oxirush-ngap](https://github.com/linouxis9/oxirush-ngap)
+(NGAP), [oxirush-s1ap](https://github.com/linouxis9/oxirush-s1ap) (S1AP)
+and [oxirush-gtp-u](https://github.com/linouxis9/oxirush-gtp-u) (GTP-U).
+NGAP and S1AP are carried over SCTP.
 
 ## Contributing
 
-Contributions are welcome:
-
-1. Fork the repository.
-2. Create a branch for your change (`git checkout -b fix-peeloff-partial-message`).
-3. Sign off your commits (`git commit -s`).
-4. Open a pull request.
-
-To report a vulnerability, see
+Open a pull request with a test for what it changes. The programs of this
+page are those of `examples/`, and
+[`tests/readme.rs`](https://github.com/linouxis9/oxirush-sctp/blob/main/tests/readme.rs)
+checks what they print. Sign off your commits (`git commit -s`): by
+contributing you agree to the
+[Developer Certificate of Origin](https://developercertificate.org/).
 [SECURITY.md](https://github.com/linouxis9/oxirush-sctp/blob/main/SECURITY.md)
-and do not open a public issue.
-
-### Developer Certificate of Origin (DCO)
-
-By contributing to this project, you agree to the
-[Developer Certificate of Origin (DCO)](https://developercertificate.org/):
-you have the right to submit your contribution, and you license it under the
-licences of the project. Sign off every commit with `git commit -s` to say
-so.
+says how to report a vulnerability.
 
 ## License
 
-Licensed under either of
-
-* Apache License, Version 2.0
-  ([LICENSE-APACHE](https://github.com/linouxis9/oxirush-sctp/blob/main/LICENSE-APACHE)
-  or <http://www.apache.org/licenses/LICENSE-2.0>)
-* MIT License
-  ([LICENSE-MIT](https://github.com/linouxis9/oxirush-sctp/blob/main/LICENSE-MIT)
-  or <http://opensource.org/licenses/MIT>)
-
+Licensed under either of the Apache License, Version 2.0
+([LICENSE-APACHE](https://github.com/linouxis9/oxirush-sctp/blob/main/LICENSE-APACHE))
+or the MIT License
+([LICENSE-MIT](https://github.com/linouxis9/oxirush-sctp/blob/main/LICENSE-MIT)),
 at your option.
 
 oxirush-sctp started as a fork of [sctp-rs](https://github.com/gabhijit/ellora).
