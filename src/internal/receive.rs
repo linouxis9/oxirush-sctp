@@ -167,6 +167,9 @@ pub(super) fn receive_message(
             )));
         }
         tracing::debug!("Received Data.");
+        // The buffer had room for the largest read, 4 KiB at least, which a
+        // program that keeps many short messages would pay for each
+        message.payload.shrink_to_fit();
         return Ok(NotificationOrData::Data(ReceivedData {
             payload: message.payload,
             from: message.from,
@@ -218,6 +221,22 @@ mod tests {
             NotificationOrData::Data(data) => data.payload,
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// The buffer of a read has room for a whole packet of the kernel, and a
+    /// message is mostly much shorter: what `recv` returns keeps the octets
+    /// of the message and no more, in one read or in several.
+    #[test]
+    fn a_message_keeps_no_more_memory_than_its_octets() {
+        let mut partial = None;
+        let read = reader(vec![data(b"sixty-four octets, say", true, None)]);
+        let short = payload(receive_message(&mut partial, 1 << 20, true, read).unwrap());
+        assert_eq!(short.capacity(), short.len());
+
+        let (first, last) = (vec![1; 4000], vec![2; 300]);
+        let read = reader(vec![data(&first, false, None), data(&last, true, None)]);
+        let long = payload(receive_message(&mut partial, 1 << 20, true, read).unwrap());
+        assert_eq!((long.len(), long.capacity()), (4300, 4300));
     }
 
     #[test]

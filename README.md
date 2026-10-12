@@ -335,6 +335,7 @@ association to a `ConnectedSocket` of its own.
   200 ms: SCTP gathers small messages as TCP does. With
   `options().set_nodelay(true)` it leaves at once. The benchmark below took
   200 ms a message without it, and 9 µs with it.
+- A received message holds the memory of its octets and no more.
 - A sent message must fit in the send buffer (`SO_SNDBUF`): a longer one
   fails with `EMSGSIZE`. An empty one fails with `EINVAL`, as does a stream
   that the association does not have. After the end of the association a
@@ -399,7 +400,7 @@ the environment it is `flamegraph.svg`, in the same directory.
 
 On one core of an AMD Ryzen 7 5700G with Linux 7.0 and Rust 1.98.1, a
 message sent on one end of an association and received on the other takes
-8.8 µs for 64 octets, 9.1 µs for 1400, 14.2 µs for 16 KiB and 39 µs for
+8.9 µs for 64 octets, 9.0 µs for 1400, 14.6 µs for 16 KiB and 40 µs for
 64 KiB, which `recv` assembles from several reads. More than nine tenths of
 that time is in the system calls.
 

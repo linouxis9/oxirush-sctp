@@ -70,6 +70,9 @@ sctp-rs.
   returns that error again; and after `shutdown(Shutdown::Write)`, `recv`
   returns the empty message that ends an association when the shutdown is
   complete. In sctp-rs the later call waits forever in both cases.
+- A received message holds the memory of its octets and no more: the
+  buffer that it was read into has room for 4 KiB at least, which a message
+  of 64 octets kept.
 - The parts of a message of a multihomed peer may come from several of its
   addresses: a socket with one association keeps them together.
 - A notification too short for its type is `Unsupported`, where sctp-rs
