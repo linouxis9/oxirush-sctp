@@ -71,8 +71,7 @@ async fn listening_socket_one2many_connected_peeloff_success() {
                 AssociationChange { .. }
             ))
         ),
-        "{:#?}",
-        notification
+        "{notification:#?}"
     );
 
     if let NotificationOrData::Notification(Notification::AssociationChange(AssociationChange {
@@ -83,9 +82,9 @@ async fn listening_socket_one2many_connected_peeloff_success() {
     {
         let received = listener.peeloff(assoc_id);
         assert!(received.is_ok(), "{:#?}", received.err().unwrap());
-        assert!(state == AssocChangeState::CommUp, "{:#?}", state);
+        assert!(state == AssocChangeState::CommUp, "{state:#?}");
     } else {
-        panic!("Should never come here!: {:#?}", notification);
+        panic!("Should never come here!: {notification:#?}");
     };
 }
 

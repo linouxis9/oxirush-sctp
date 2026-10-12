@@ -1,8 +1,8 @@
 //! Descriptor creation, ownership and association lifecycle operations.
-use super::{getsockopt_internal, SOL_SCTP};
+use super::{SOL_SCTP, getsockopt_internal};
+use crate::AssociationId;
 use crate::consts::*;
 use crate::types::internal::ConnectxParam;
-use crate::AssociationId;
 use os_socketaddr::OsSocketAddr;
 use std::convert::TryInto;
 use std::net::SocketAddr;

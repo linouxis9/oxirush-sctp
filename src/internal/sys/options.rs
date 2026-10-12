@@ -352,13 +352,17 @@ pub(crate) unsafe fn getsockopt_internal<T>(
 ) -> std::io::Result<T> {
     let size = std::mem::size_of::<T>();
     let mut len = size as libc::socklen_t;
-    let result = libc::getsockopt(
-        fd.as_raw_fd(),
-        level,
-        name,
-        &mut value as *mut T as *mut libc::c_void,
-        &mut len,
-    );
+    // Safety: the kernel writes at most `len` octets, the size of `value`. That any octets
+    // it writes are a valid `T` is what the caller of this function answers for.
+    let result = unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            level,
+            name,
+            &mut value as *mut T as *mut libc::c_void,
+            &mut len,
+        )
+    };
     if result < 0 {
         Err(std::io::Error::last_os_error())
     } else if len as usize != size {

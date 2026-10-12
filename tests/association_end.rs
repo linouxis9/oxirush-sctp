@@ -51,8 +51,7 @@ async fn what_the_peer_sent_before_the_shutdown_is_received_first() {
     let received = recv(&client).await.unwrap();
     assert!(
         matches!(&received, NotificationOrData::Data(message) if message.payload == b"last words"),
-        "{:?}",
-        received
+        "{received:?}"
     );
     assert!(is_end(&recv(&client).await));
 }
@@ -72,8 +71,7 @@ async fn a_write_shutdown_with_association_events_ends_after_its_notification() 
             NotificationOrData::Notification(Notification::AssociationChange(change))
                 if change.state == AssocChangeState::ShutdownComplete
         ),
-        "{:?}",
-        received
+        "{received:?}"
     );
     for _ in 0..2 {
         assert!(is_end(&recv(&client).await));
@@ -100,7 +98,7 @@ async fn association_events_unsubscribed_after_a_write_shutdown_are_not_passed_o
     if matches!(received, Ok(NotificationOrData::Notification(_))) {
         received = recv(&client).await;
     }
-    assert!(is_end(&received), "{:?}", received);
+    assert!(is_end(&received), "{received:?}");
 }
 
 #[tokio::test]
@@ -136,8 +134,7 @@ async fn an_aborted_association_with_events_is_a_notification_then_an_error() {
             NotificationOrData::Notification(Notification::AssociationChange(change))
                 if change.state == AssocChangeState::CommLost
         ),
-        "{:?}",
-        received
+        "{received:?}"
     );
     for _ in 0..2 {
         let error = recv(&peer).await.unwrap_err();
@@ -170,7 +167,7 @@ async fn every_waiting_receiver_learns_of_the_end() {
             if abort {
                 assert_eq!(received.unwrap_err().raw_os_error(), Some(libc::ECONNRESET));
             } else {
-                assert!(is_end(&received), "{:?}", received);
+                assert!(is_end(&received), "{received:?}");
             }
         }
     }

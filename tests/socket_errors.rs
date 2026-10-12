@@ -176,7 +176,7 @@ async fn aborted_partial_delivery_does_not_contaminate_another_sender() {
                 assert_eq!(data.from, Some(b_address));
                 assert_eq!(data.rcv_info.is_some(), rcvinfo);
             }
-            other => panic!("not B's message: {:?}", other),
+            other => panic!("not B's message: {other:?}"),
         }
     }
 }

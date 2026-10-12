@@ -1,5 +1,5 @@
 //! One-to-one association listener.
-use crate::internal::{sys, SocketCore};
+use crate::internal::{SocketCore, sys};
 use crate::{AssociationId, BindxFlags, ConnectedSocket, SocketOptions};
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};

@@ -1,5 +1,5 @@
 //! Borrowed configuration shared by every SCTP socket role.
-use crate::internal::{sys, SocketCore};
+use crate::internal::{SocketCore, sys};
 use crate::{AssociationId, Event, PeerAddressParams, RtoInfo, SendInfo, SubscribeEventAssocId};
 use std::net::SocketAddr;
 use std::os::fd::AsFd;

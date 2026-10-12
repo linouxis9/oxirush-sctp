@@ -1,5 +1,5 @@
 //! SCTP socket creation and consuming role transitions.
-use crate::internal::{sys, SocketCore};
+use crate::internal::{SocketCore, sys};
 use crate::{
     AssociationId, BindxFlags, ConnectedSocket, Listener, OneToManyEndpoint, SocketOptions,
     SocketToAssociation,

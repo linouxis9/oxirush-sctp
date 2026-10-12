@@ -1,5 +1,5 @@
 //! One-to-many SCTP association endpoint.
-use crate::internal::{sys, SocketCore};
+use crate::internal::{SocketCore, sys};
 use crate::{
     AssociationId, BindxFlags, ConnStatus, ConnectedSocket, NotificationOrData, SendData,
     SendOptions, SocketOptions,

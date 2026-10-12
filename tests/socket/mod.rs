@@ -48,8 +48,7 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
     let data = result.unwrap();
     assert!(
         matches!(data, NotificationOrData::Data(ReceivedData { .. })),
-        "{:#?}",
-        data
+        "{data:#?}"
     );
 
     if let NotificationOrData::Data(ReceivedData {
@@ -61,8 +60,7 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
     {
         assert!(
             payload == b"hello world!".to_vec(),
-            "received_payload: {:?}",
-            payload,
+            "received_payload: {payload:?}",
         );
         assert!(rcv_info.is_some());
         let rcv_info = rcv_info.unwrap();
@@ -73,7 +71,7 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
         );
         assert!(nxt_info.is_none(), "{:#?}", nxt_info.unwrap());
     } else {
-        panic!("Should never come here!: {:#?}", data);
+        panic!("Should never come here!: {data:#?}");
     };
 
     // Now turn off Request Receive Info on client socket
@@ -89,8 +87,7 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
     let data = result.unwrap();
     assert!(
         matches!(data, NotificationOrData::Data(ReceivedData { .. })),
-        "{:#?}",
-        data
+        "{data:#?}"
     );
 
     if let NotificationOrData::Data(ReceivedData {
@@ -102,13 +99,12 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
     {
         assert!(
             payload == b"hello world!".to_vec(),
-            "received_payload: {:?}",
-            payload,
+            "received_payload: {payload:?}",
         );
         assert!(rcv_info.is_none(), "{:#?}", rcv_info.unwrap());
         assert!(nxt_info.is_none(), "{:#?}", nxt_info.unwrap());
     } else {
-        panic!("Should never come here!: {:#?}", data);
+        panic!("Should never come here!: {data:#?}");
     };
 }
 
@@ -161,8 +157,7 @@ async fn socket_send_recv_nxtinfo_test() {
     let data = result.unwrap();
     assert!(
         matches!(data, NotificationOrData::Data(ReceivedData { .. })),
-        "{:#?}",
-        data
+        "{data:#?}"
     );
 
     if let NotificationOrData::Data(ReceivedData {
@@ -174,13 +169,12 @@ async fn socket_send_recv_nxtinfo_test() {
     {
         assert!(
             payload == b"hello world!".to_vec(),
-            "received_payload: {:?}",
-            payload,
+            "received_payload: {payload:?}",
         );
         assert!(rcv_info.is_none(), "{:#?}", rcv_info.unwrap());
         assert!(nxt_info.is_some());
     } else {
-        panic!("Should never come here!: {:#?}", data);
+        panic!("Should never come here!: {data:#?}");
     };
 
     // First Receive nxtinfo should not be none.
@@ -189,8 +183,7 @@ async fn socket_send_recv_nxtinfo_test() {
     let data = result.unwrap();
     assert!(
         matches!(data, NotificationOrData::Data(ReceivedData { .. })),
-        "{:#?}",
-        data
+        "{data:#?}"
     );
 
     if let NotificationOrData::Data(ReceivedData {
@@ -202,13 +195,12 @@ async fn socket_send_recv_nxtinfo_test() {
     {
         assert!(
             payload == b"hello world!".to_vec(),
-            "received_payload: {:?}",
-            payload,
+            "received_payload: {payload:?}",
         );
         assert!(rcv_info.is_none(), "{:#?}", rcv_info.unwrap());
         assert!(nxt_info.is_none(), "{:#?}", nxt_info.unwrap());
     } else {
-        panic!("Should never come here!: {:#?}", data);
+        panic!("Should never come here!: {data:#?}");
     };
 }
 
@@ -243,8 +235,7 @@ async fn socket_init_params_set_ostreams_success() {
                 AssociationChange { .. }
             ))
         ),
-        "{:#?}",
-        notification
+        "{notification:#?}"
     );
 
     if let NotificationOrData::Notification(Notification::AssociationChange(AssociationChange {
@@ -255,18 +246,14 @@ async fn socket_init_params_set_ostreams_success() {
     {
         assert!(
             ib_streams == client_ostreams,
-            "client_ostreams: {}, ib_streams: {}",
-            client_ostreams,
-            ib_streams
+            "client_ostreams: {client_ostreams}, ib_streams: {ib_streams}"
         );
         assert!(
             ob_streams == client_istreams,
-            "client_istreams: {}, ob_streams: {}",
-            client_istreams,
-            ob_streams
+            "client_istreams: {client_istreams}, ob_streams: {ob_streams}"
         );
     } else {
-        panic!("Should never come here!: {:#?}", notification);
+        panic!("Should never come here!: {notification:#?}");
     };
 }
 

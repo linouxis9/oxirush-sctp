@@ -54,8 +54,7 @@ async fn connected_default_sendinfo_success() {
     let data = result.unwrap();
     assert!(
         matches!(data, NotificationOrData::Data(ReceivedData { .. })),
-        "{:#?}",
-        data
+        "{data:#?}"
     );
 
     if let NotificationOrData::Data(ReceivedData {
@@ -67,8 +66,7 @@ async fn connected_default_sendinfo_success() {
     {
         assert!(
             payload == b"hello world!".to_vec(),
-            "received_payload: {:?}",
-            payload,
+            "received_payload: {payload:?}",
         );
         assert!(rcv_info.is_some());
         let rcv_info = rcv_info.unwrap();
@@ -89,7 +87,7 @@ async fn connected_default_sendinfo_success() {
         );
         assert!(nxt_info.is_none(), "{:#?}", nxt_info.unwrap());
     } else {
-        panic!("Should never come here!: {:#?}", data);
+        panic!("Should never come here!: {data:#?}");
     };
 }
 
@@ -133,8 +131,7 @@ async fn connected_send_some_sendinfo_success() {
     let data = result.unwrap();
     assert!(
         matches!(data, NotificationOrData::Data(ReceivedData { .. })),
-        "{:#?}",
-        data
+        "{data:#?}"
     );
 
     if let NotificationOrData::Data(ReceivedData {
@@ -146,8 +143,7 @@ async fn connected_send_some_sendinfo_success() {
     {
         assert!(
             payload == b"hello world!".to_vec(),
-            "received_payload: {:?}",
-            payload,
+            "received_payload: {payload:?}",
         );
         assert!(rcv_info.is_some());
         let rcv_info = rcv_info.unwrap();
@@ -168,7 +164,7 @@ async fn connected_send_some_sendinfo_success() {
         );
         assert!(nxt_info.is_none(), "{:#?}", nxt_info.unwrap());
     } else {
-        panic!("Should never come here!: {:#?}", data);
+        panic!("Should never come here!: {data:#?}");
     };
 }
 #[tokio::test]
@@ -202,8 +198,7 @@ async fn test_shutdown_event() {
             data,
             NotificationOrData::Notification(Notification::Shutdown(Shutdown { .. }))
         ),
-        "{:#?}",
-        data
+        "{data:#?}"
     );
 
     if let NotificationOrData::Notification(Notification::Shutdown(Shutdown { assoc_id, .. })) =
@@ -214,7 +209,7 @@ async fn test_shutdown_event() {
             "client_assoc_id: {client_assoc_id}, Event assoc_id: {assoc_id}"
         );
     } else {
-        panic!("Should never come here!: {:#?}", data);
+        panic!("Should never come here!: {data:#?}");
     }
 }
 
@@ -248,8 +243,7 @@ async fn a_zero_linger_aborts_the_association_on_close() {
                 ..
             }))
         ),
-        "{:#?}",
-        data
+        "{data:#?}"
     );
 }
 
@@ -382,10 +376,12 @@ async fn send_after_peer_closed_fails_without_sigpipe() {
     // Safety: the signal sets are initialized by `sigemptyset` before use, and the mask is restored
     // before returning.
     unsafe fn sigpipe_set() -> libc::sigset_t {
-        let mut set = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
-        libc::sigemptyset(set.as_mut_ptr());
-        libc::sigaddset(set.as_mut_ptr(), libc::SIGPIPE);
-        set.assume_init()
+        unsafe {
+            let mut set = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+            libc::sigemptyset(set.as_mut_ptr());
+            libc::sigaddset(set.as_mut_ptr(), libc::SIGPIPE);
+            set.assume_init()
+        }
     }
     let sigpipe = unsafe { sigpipe_set() };
     let mut old_mask = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
@@ -399,7 +395,7 @@ async fn send_after_peer_closed_fails_without_sigpipe() {
     // The association has ended once the client reads the end of the stream.
     match connected.recv().await.unwrap() {
         NotificationOrData::Data(data) => assert!(data.payload.is_empty()),
-        other => panic!("not the end of the stream: {:?}", other),
+        other => panic!("not the end of the stream: {other:?}"),
     }
     let result = connected
         .send_data(SendData {
@@ -466,7 +462,7 @@ fn assert_first_with_infos(received: NotificationOrData) {
             let nxt_info = data.nxt_info.expect("no NxtInfo");
             assert_eq!((nxt_info.sid, nxt_info.length), (2, 14));
         }
-        other => panic!("not data: {:?}", other),
+        other => panic!("not data: {other:?}"),
     }
 }
 
@@ -598,7 +594,7 @@ fn long_payload(len: usize) -> Vec<u8> {
 fn data_payload(received: NotificationOrData) -> Vec<u8> {
     match received {
         NotificationOrData::Data(data) => data.payload,
-        other => panic!("not data: {:?}", other),
+        other => panic!("not data: {other:?}"),
     }
 }
 

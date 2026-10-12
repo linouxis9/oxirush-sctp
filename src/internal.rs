@@ -7,14 +7,14 @@ use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
-use tokio::io::{unix::AsyncFd, Interest};
+use tokio::io::{Interest, unix::AsyncFd};
 
 #[cfg(fuzzing)]
 pub(crate) mod fuzzing;
 mod notifications;
 mod receive;
 pub(crate) mod sys;
-use receive::{PartialMessage, DEFAULT_MAX_MESSAGE_SIZE};
+use receive::{DEFAULT_MAX_MESSAGE_SIZE, PartialMessage};
 
 #[derive(Debug)]
 pub(crate) struct SocketCore {
@@ -164,10 +164,10 @@ impl SocketCore {
                     |buffer| sys::sctp_recvmsg_once(inner.as_fd(), buffer),
                 )
             });
-            if let Ok(result) = received {
-                if let Some(result) = self.note_end(result) {
-                    return result;
-                }
+            if let Ok(result) = received
+                && let Some(result) = self.note_end(result)
+            {
+                return result;
             }
         }
     }

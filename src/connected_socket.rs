@@ -1,5 +1,5 @@
 //! A socket owning one SCTP association.
-use crate::internal::{sys, SocketCore};
+use crate::internal::{SocketCore, sys};
 use crate::{
     AssociationId, BindxFlags, ConnStatus, NotificationOrData, SendData, SendOptions, SocketOptions,
 };

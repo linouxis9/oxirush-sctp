@@ -138,7 +138,7 @@ async fn accepted_and_peeled_off_sockets_inherit_nodelay() {
         NotificationOrData::Notification(Notification::AssociationChange(change)) => {
             change.assoc_id
         }
-        other => panic!("not an association change: {:?}", other),
+        other => panic!("not an association change: {other:?}"),
     };
     let peeled = listener.peeloff(assoc_id).unwrap();
     assert!(peeled.options().nodelay().unwrap());
@@ -147,7 +147,7 @@ async fn accepted_and_peeled_off_sockets_inherit_nodelay() {
 async fn recv_data(socket: &ConnectedSocket) -> Vec<u8> {
     match socket.recv().await.unwrap() {
         NotificationOrData::Data(data) => data.payload,
-        other => panic!("not data: {:?}", other),
+        other => panic!("not data: {other:?}"),
     }
 }
 
@@ -186,10 +186,10 @@ async fn third_message_lag(nodelay: bool) -> std::time::Duration {
 async fn nodelay_does_not_hold_small_messages_while_data_is_unacknowledged() {
     // Without `SCTP_NODELAY` the scenario shows the stall, so the test does test something.
     let lag = third_message_lag(false).await;
-    assert!(lag >= std::time::Duration::from_millis(100), "{:?}", lag);
+    assert!(lag >= std::time::Duration::from_millis(100), "{lag:?}");
 
     let lag = third_message_lag(true).await;
-    assert!(lag < std::time::Duration::from_millis(50), "{:?}", lag);
+    assert!(lag < std::time::Duration::from_millis(50), "{lag:?}");
 }
 
 fn assert_close_on_exec_and_non_blocking<T: AsRawFd>(socket: &T) {
@@ -234,7 +234,7 @@ async fn descriptors_are_close_on_exec() {
         NotificationOrData::Notification(Notification::AssociationChange(change)) => {
             change.assoc_id
         }
-        other => panic!("not an association change: {:?}", other),
+        other => panic!("not an association change: {other:?}"),
     };
     assert_close_on_exec_and_non_blocking(&listener.peeloff(assoc_id).unwrap());
 }

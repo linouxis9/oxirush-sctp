@@ -216,7 +216,7 @@ mod tests {
     fn payload(record: NotificationOrData) -> Vec<u8> {
         match record {
             NotificationOrData::Data(data) => data.payload,
-            other => panic!("unexpected {:?}", other),
+            other => panic!("unexpected {other:?}"),
         }
     }
 

@@ -1,5 +1,5 @@
 //! Entry points for the fuzz targets of `fuzz/`.
-use super::receive::{receive_message, Piece};
+use super::receive::{Piece, receive_message};
 use super::{notifications, sys};
 use crate::{Notification, NotificationOrData, NxtInfo, RcvInfo};
 
