@@ -24,6 +24,14 @@ pub use options::SocketOptions;
 
 mod internal;
 
+// What `cargo fuzz` drives, which builds the crate with `--cfg fuzzing`: the readers of what
+// the kernel hands over. No other build has this module.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzzing {
+    pub use crate::internal::fuzzing::*;
+}
+
 mod consts;
 
 mod types;

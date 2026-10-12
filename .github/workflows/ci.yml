@@ -75,6 +75,23 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --check
+      - run: cargo fmt --check --manifest-path fuzz/Cargo.toml
+
+  fuzz:
+    name: Fuzz ${{ matrix.target }} (1 minute)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [notification, ancillary, receive]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      - run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60 -max_len=512
 
   package:
     name: Package

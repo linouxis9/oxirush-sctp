@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 use tokio::io::{unix::AsyncFd, Interest};
 
+#[cfg(fuzzing)]
+pub(crate) mod fuzzing;
 mod notifications;
 mod receive;
 pub(crate) mod sys;

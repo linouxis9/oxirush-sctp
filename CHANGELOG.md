@@ -109,6 +109,11 @@ sctp-rs.
   exported and documented, as is every public item.
 - The examples `hello`, `server` and `multihoming`, which run both sides on
   loopback, replace `ping` and `pong`.
+- Three `cargo fuzz` targets under `fuzz/`, which CI runs for a minute each:
+  `notification` (a notification of any octets), `ancillary` (the control
+  messages of a `recvmsg`) and `receive` (the assembly of messages from any
+  sequence of parts).
+- A `SECURITY.md` that says how to report a vulnerability.
 
 ### Requirements
 

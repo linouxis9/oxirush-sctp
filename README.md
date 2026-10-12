@@ -367,6 +367,11 @@ module must be available. The connect-timeout test needs `unshare` and
 `ip`, and the 4 MiB message tests need `net.core.wmem_max` and
 `net.core.rmem_max` large enough; each skips otherwise.
 
+`fuzz/` has three `cargo fuzz` targets for what the kernel hands over, which
+CI runs for a minute each: a notification of any octets, the control
+messages of a `recvmsg`, and the assembly of messages from any sequence of
+parts.
+
 ## Documentation
 
 `cargo doc --open` builds the API reference. It will be on docs.rs with the
