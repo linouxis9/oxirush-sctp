@@ -26,7 +26,7 @@ fn create_socket_bind_and_listen(
     assert!(listener.is_ok(), "{:#?}", listener.err().unwrap());
 
     let listener = listener.unwrap();
-    bindaddr.set_port(listener.local_addrs(0).unwrap()[0].port());
+    bindaddr.set_port(listener.local_addrs().unwrap()[0].port());
     (listener, bindaddr)
 }
 

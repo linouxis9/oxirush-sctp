@@ -92,6 +92,131 @@ pub(crate) struct PeerAddressParamsInternal {
     pub(crate) bytes: [u8; 156],
 }
 
+// `struct sctp_sndinfo`, with the payload protocol identifier as the kernel carries it, in
+// network byte order.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SndInfoWire {
+    pub(crate) sid: u16,
+    pub(crate) flags: u16,
+    pub(crate) ppid: u32,
+    pub(crate) context: u32,
+    pub(crate) assoc_id: AssociationId,
+}
+
+impl From<&crate::SendInfo> for SndInfoWire {
+    fn from(info: &crate::SendInfo) -> Self {
+        Self {
+            sid: info.sid,
+            flags: info.flags,
+            ppid: info.ppid.to_be(),
+            context: info.context,
+            assoc_id: info.assoc_id,
+        }
+    }
+}
+
+impl From<SndInfoWire> for crate::SendInfo {
+    fn from(wire: SndInfoWire) -> Self {
+        Self {
+            sid: wire.sid,
+            flags: wire.flags,
+            ppid: u32::from_be(wire.ppid),
+            context: wire.context,
+            assoc_id: wire.assoc_id,
+        }
+    }
+}
+
+// `struct sctp_rcvinfo`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct RcvInfoWire {
+    pub(crate) sid: u16,
+    pub(crate) ssn: u16,
+    pub(crate) flags: u16,
+    pub(crate) ppid: u32,
+    pub(crate) tsn: u32,
+    pub(crate) cumtsn: u32,
+    pub(crate) context: u32,
+    pub(crate) assoc_id: AssociationId,
+}
+
+impl From<RcvInfoWire> for crate::RcvInfo {
+    fn from(wire: RcvInfoWire) -> Self {
+        Self {
+            sid: wire.sid,
+            ssn: wire.ssn,
+            flags: wire.flags,
+            ppid: u32::from_be(wire.ppid),
+            tsn: wire.tsn,
+            cumtsn: wire.cumtsn,
+            context: wire.context,
+            assoc_id: wire.assoc_id,
+        }
+    }
+}
+
+// `struct sctp_nxtinfo`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct NxtInfoWire {
+    pub(crate) sid: u16,
+    pub(crate) flags: u16,
+    pub(crate) ppid: u32,
+    pub(crate) length: u32,
+    pub(crate) assoc_id: AssociationId,
+}
+
+impl From<NxtInfoWire> for crate::NxtInfo {
+    fn from(wire: NxtInfoWire) -> Self {
+        Self {
+            sid: wire.sid,
+            flags: wire.flags,
+            ppid: u32::from_be(wire.ppid),
+            length: wire.length,
+            assoc_id: wire.assoc_id,
+        }
+    }
+}
+
+// `struct sctp_rtoinfo`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct RtoInfoWire {
+    pub(crate) assoc_id: AssociationId,
+    pub(crate) initial: u32,
+    pub(crate) max: u32,
+    pub(crate) min: u32,
+}
+
+// `struct sctp_assocparams`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct AssocParamsWire {
+    pub(crate) assoc_id: AssociationId,
+    pub(crate) max_retransmissions: u16,
+    pub(crate) peer_addresses: u16,
+    pub(crate) peer_rwnd: u32,
+    pub(crate) local_rwnd: u32,
+    pub(crate) cookie_life: u32,
+}
+
+// `struct sctp_sack_info`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SackInfoWire {
+    pub(crate) assoc_id: AssociationId,
+    pub(crate) delay: u32,
+    pub(crate) frequency: u32,
+}
+
+// `struct sctp_prim`, which Linux packs and aligns to 4: an association and an address.
+#[repr(C, align(4))]
+pub(crate) struct PrimaryAddressWire {
+    pub(crate) bytes: [u8; 132],
+}
+
 use std::convert::{TryFrom, TryInto};
 
 use os_socketaddr::OsSocketAddr;
@@ -158,7 +283,6 @@ impl TryFrom<ConnStatusInternal> for ConnStatus {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use crate::{NxtInfo, RcvInfo, RtoInfo, SendInfo};
     use std::mem::{align_of, offset_of, size_of};
 
     #[test]
@@ -171,12 +295,17 @@ mod tests {
         assert_eq!(size_of::<PeeloffFlagsArg>(), 12);
         assert_eq!(offset_of!(ConnectxParam, addrs), 8);
         assert_eq!(size_of::<ConnectxParam>(), 8 + size_of::<*mut u8>());
-        assert_eq!(size_of::<SendInfo>(), 16);
-        assert_eq!(offset_of!(SendInfo, ppid), 4);
-        assert_eq!(size_of::<RcvInfo>(), 28);
-        assert_eq!(offset_of!(RcvInfo, assoc_id), 24);
-        assert_eq!(size_of::<NxtInfo>(), 16);
-        assert_eq!(size_of::<RtoInfo>(), 16);
+        assert_eq!(size_of::<SndInfoWire>(), 16);
+        assert_eq!(offset_of!(SndInfoWire, ppid), 4);
+        assert_eq!(size_of::<RcvInfoWire>(), 28);
+        assert_eq!(offset_of!(RcvInfoWire, ppid), 8);
+        assert_eq!(offset_of!(RcvInfoWire, assoc_id), 24);
+        assert_eq!(size_of::<NxtInfoWire>(), 16);
+        assert_eq!(size_of::<RtoInfoWire>(), 16);
+        assert_eq!(size_of::<AssocParamsWire>(), 20);
+        assert_eq!(offset_of!(AssocParamsWire, peer_rwnd), 8);
+        assert_eq!(size_of::<SackInfoWire>(), 12);
+        assert_eq!(size_of::<PrimaryAddressWire>(), 132);
         assert_eq!(size_of::<PeerAddrInternal>(), 152);
         assert_eq!(offset_of!(PeerAddrInternal, state), 132);
         assert_eq!(size_of::<ConnStatusInternal>(), 176);

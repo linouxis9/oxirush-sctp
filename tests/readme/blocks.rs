@@ -47,11 +47,7 @@ fn block_1() {
     #[tokio::main(flavor = "current_thread")]
     async fn main() -> std::io::Result<()> {
         // Stream 1, and the payload protocol identifier of NGAP
-        let options = SendOptions {
-            stream_id: 1,
-            ppid: 60,
-            ..Default::default()
-        };
+        let options = SendOptions::new().stream(1).ppid(60);
 
         let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
         socket.bind("127.0.0.1:0".parse().unwrap())?;
@@ -60,7 +56,7 @@ fn block_1() {
 
         let server = async {
             let (association, _peer) = listener.accept().await?;
-            if let NotificationOrData::Data(message) = association.recv().await? {
+            if let Some(NotificationOrData::Data(message)) = association.recv().await? {
                 let text = String::from_utf8_lossy(&message.payload);
                 let (stream, ppid) = (message.stream_id(), message.ppid());
                 println!("server: {text:?} on stream {stream:?} with PPID {ppid:?}");
@@ -72,7 +68,7 @@ fn block_1() {
             let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
             let (association, _) = socket.connect(address).await?;
             association.send(b"ping", options).await?;
-            if let NotificationOrData::Data(message) = association.recv().await? {
+            if let Some(NotificationOrData::Data(message)) = association.recv().await? {
                 println!("client: {:?}", String::from_utf8_lossy(&message.payload));
             }
             std::io::Result::Ok(())
@@ -104,22 +100,21 @@ fn block_2() {
         // A peer that sends one message and closes its socket
         let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
         let (peer, _) = peer.connect(listener.local_addr()?).await?;
-        peer.send(b"hello", SendOptions::default()).await?;
+        peer.send(b"hello", SendOptions::new()).await?;
         drop(peer);
 
         let (association, _) = listener.accept().await?;
-        loop {
-            match association.recv().await? {
+        // `None` is the end of the association
+        while let Some(received) = association.recv().await? {
+            match received {
                 NotificationOrData::Notification(Notification::AssociationChange(change)) => {
                     println!("association change: {:?}", change.state)
                 }
                 NotificationOrData::Notification(Notification::Shutdown(_)) => {
                     println!("the peer shuts the association down")
                 }
-                NotificationOrData::Notification(other) => println!("{other:?}"),
-                // An empty message is the end of the association
-                NotificationOrData::Data(message) if message.payload.is_empty() => break,
                 NotificationOrData::Data(message) => println!("{} octets", message.payload.len()),
+                other => println!("{other:?}"),
             }
         }
         Ok(())
@@ -129,7 +124,7 @@ fn block_2() {
 
 /// The Rust block 3 of README.md.
 fn block_3() {
-    use oxirush_sctp::{ConnectedSocket, Listener, NotificationOrData, Socket, SocketToAssociation};
+    use oxirush_sctp::{ConnectedSocket, Listener, Socket, SocketToAssociation};
     use std::time::Duration;
 
     /// The two ends of a new association of `listener`.
@@ -146,13 +141,11 @@ fn block_3() {
         socket.bind("127.0.0.1:0".parse().unwrap())?;
         let listener = socket.listen(5)?;
 
-        // The peer closes its socket: an empty message, at every call from then on
+        // The peer closes its socket: `None`, at every call from then on
         let (association, peer) = connected(&listener).await?;
         drop(peer);
         for _ in 0..2 {
-            if let NotificationOrData::Data(message) = association.recv().await? {
-                println!("closed: a message of {} octets", message.payload.len());
-            }
+            println!("closed: {:?}", association.recv().await?);
         }
 
         // The peer aborts, as a socket does that is dropped with a linger of
@@ -187,23 +180,23 @@ fn block_4() {
         let server = Socket::new_v4(SocketToAssociation::OneToOne)?;
         server.bindx(&addresses("127.0.0.1:0", "127.0.0.2:0"), BindxFlags::Add)?;
         let listener = server.listen(5)?;
-        let server_addresses = listener.local_addrs(0)?;
+        let server_addresses = listener.local_addrs()?;
 
         let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
         client.bindx(&addresses("127.0.0.1:0", "127.0.0.3:0"), BindxFlags::Add)?;
         let (client, id) = client.connectx(&server_addresses).await?;
         let (accepted, _) = listener.accept().await?;
 
-        println!("client: {:?}", ips(&client.local_addrs(id)?));
-        println!("server: {:?}", ips(&client.peer_addrs(id)?));
-        println!("the server sees: {:?}", ips(&accepted.peer_addrs(0)?));
+        println!("client: {:?}", ips(&client.local_addrs()?));
+        println!("server: {:?}", ips(&client.peer_addrs()?));
+        println!("the server sees: {:?}", ips(&accepted.peer_addrs()?));
         println!(
             "primary path: {}",
-            client.status(id)?.peer_primary.address.ip()
+            client.status()?.peer_primary.address.ip()
         );
 
         // Probe every path each second instead of each 30 seconds
-        for address in client.peer_addrs(id)? {
+        for address in client.peer_addrs()? {
             let mut path = client.options().peer_address_params(id, address)?;
             path.heartbeat_interval = Duration::from_secs(1);
             client.options().set_peer_address_params(path)?;
@@ -240,7 +233,7 @@ fn block_5() {
         let (_peer, _) = peer.connect(listener.local_addr()?).await?;
         let (association, _) = listener.accept().await?;
 
-        let status = association.status(0)?;
+        let status = association.status()?;
         println!(
             "{:?}, {} outgoing and {} incoming streams",
             status.state, status.outstreams, status.instreams
@@ -268,18 +261,15 @@ fn block_6() {
 
         let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
         let (peer, _) = peer.connect(endpoint.local_addr()?).await?;
-        peer.send(b"ping", SendOptions::default()).await?;
+        peer.send(b"ping", SendOptions::new()).await?;
 
         // A message comes with its association, which the answer names
         if let NotificationOrData::Data(message) = endpoint.recv().await? {
             println!("endpoint: {:?}", String::from_utf8_lossy(&message.payload));
-            let options = SendOptions {
-                assoc_id: message.assoc_id().unwrap(),
-                ..Default::default()
-            };
+            let options = SendOptions::new().association(message.assoc_id().unwrap());
             endpoint.send(b"pong", options).await?;
         }
-        if let NotificationOrData::Data(message) = peer.recv().await? {
+        if let Some(NotificationOrData::Data(message)) = peer.recv().await? {
             println!("peer: {:?}", String::from_utf8_lossy(&message.payload));
         }
         Ok(())
@@ -294,11 +284,7 @@ fn block_7() {
     #[tokio::main(flavor = "current_thread")]
     async fn main() -> std::io::Result<()> {
         // Stream 1, and the payload protocol identifier of NGAP
-        let options = SendOptions {
-            stream_id: 1,
-            ppid: 60,
-            ..Default::default()
-        };
+        let options = SendOptions::new().stream(1).ppid(60);
 
         let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
         socket.bind("127.0.0.1:0".parse().unwrap())?;
@@ -307,7 +293,7 @@ fn block_7() {
 
         let server = async {
             let (association, _peer) = listener.accept().await?;
-            if let NotificationOrData::Data(message) = association.recv().await? {
+            if let Some(NotificationOrData::Data(message)) = association.recv().await? {
                 let text = String::from_utf8_lossy(&message.payload);
                 let (stream, ppid) = (message.stream_id(), message.ppid());
                 println!("server: {text:?} on stream {stream:?} with PPID {ppid:?}");
@@ -319,7 +305,7 @@ fn block_7() {
             let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
             let (association, _) = socket.connect(address).await?;
             association.send(b"ping", options).await?;
-            if let NotificationOrData::Data(message) = association.recv().await? {
+            if let Some(NotificationOrData::Data(message)) = association.recv().await? {
                 println!("client: {:?}", String::from_utf8_lossy(&message.payload));
             }
             std::io::Result::Ok(())

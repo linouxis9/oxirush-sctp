@@ -24,51 +24,40 @@ fn event_enabled(socket: &impl AsRawFd, event: Event) -> bool {
     value[6] != 0
 }
 
+/// An event that the kernel refuses is not offered: every `Event` subscribes and
+/// unsubscribes, one by one and together.
 #[tokio::test]
-async fn subscription_failure_retains_kernel_source_and_attempts_later_events() {
+async fn every_event_that_is_offered_can_be_subscribed() {
+    let events = [
+        Event::DataIo,
+        Event::Association,
+        Event::Address,
+        Event::SendFailure,
+        Event::PeerError,
+        Event::Shutdown,
+        Event::PartialDelivery,
+        Event::AdaptationLayer,
+        Event::Authentication,
+        Event::SenderDry,
+        Event::StreamReset,
+        Event::AssociationReset,
+        Event::StreamChange,
+        Event::SendFailureEvent,
+    ];
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
-    assert!(!event_enabled(&socket, Event::Association));
-    let error = socket
+    for event in events {
+        assert!(!event_enabled(&socket, event), "{event:?}");
+        socket
+            .options()
+            .subscribe_events(&[event], SubscribeEventAssocId::All)
+            .unwrap_or_else(|error| panic!("{event:?}: {error}"));
+        assert!(event_enabled(&socket, event), "{event:?}");
+    }
+    socket
         .options()
-        .subscribe_events(
-            &[Event::Unknown, Event::Association],
-            SubscribeEventAssocId::All,
-        )
-        .unwrap_err();
-    assert!(event_enabled(&socket, Event::Association));
-    assert_eq!(error.kind(), std::io::ErrorKind::Other);
-    assert!(
-        error.get_ref().unwrap().source().is_some(),
-        "kernel error was replaced by text"
-    );
-    let failures = error
-        .get_ref()
-        .unwrap()
-        .downcast_ref::<EventSubscriptionError>()
-        .unwrap()
-        .failures();
-    assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].0, Event::Unknown);
-    assert_eq!(failures[0].1.raw_os_error(), Some(libc::EINVAL));
-    let error = socket
-        .options()
-        .unsubscribe_events(
-            &[Event::Unknown, Event::Association],
-            SubscribeEventAssocId::All,
-        )
-        .unwrap_err();
+        .unsubscribe_events(&events, SubscribeEventAssocId::All)
+        .unwrap();
     assert!(!event_enabled(&socket, Event::Association));
-    assert_eq!(
-        error
-            .get_ref()
-            .unwrap()
-            .downcast_ref::<EventSubscriptionError>()
-            .unwrap()
-            .failures()[0]
-            .1
-            .raw_os_error(),
-        Some(libc::EINVAL)
-    );
 }
 
 fn server() -> Listener {
@@ -79,7 +68,7 @@ fn server() -> Listener {
 }
 
 async fn expect_message(receiver: &ConnectedSocket, expected: &[u8], ppid: u32) {
-    let NotificationOrData::Data(data) =
+    let Some(NotificationOrData::Data(data)) =
         tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
             .await
             .unwrap()
@@ -89,7 +78,7 @@ async fn expect_message(receiver: &ConnectedSocket, expected: &[u8], ppid: u32) 
     };
     assert_eq!(data.payload, expected);
     let info = data.rcv_info.unwrap();
-    assert_eq!(u32::from_be(info.ppid), ppid);
+    assert_eq!(info.ppid, ppid);
     assert_eq!(info.sid, 2);
     assert_eq!(info.flags & 1, 1);
 }
@@ -99,7 +88,7 @@ async fn borrowed_send_converts_host_ppid_without_changing_legacy_wire_order() {
     let server = server();
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     let (client, _) = socket
-        .connect(server.local_addrs(0).unwrap()[0])
+        .connect(server.local_addrs().unwrap()[0])
         .await
         .unwrap();
     let (peer, _) = server.accept().await.unwrap();
@@ -107,27 +96,20 @@ async fn borrowed_send_converts_host_ppid_without_changing_legacy_wire_order() {
     client
         .send(
             payload,
-            SendOptions {
-                stream_id: 2,
-                ppid: 60,
-                unordered: true,
-                ..Default::default()
-            },
+            SendOptions::new().stream(2).ppid(60).unordered(true),
         )
         .await
         .unwrap();
     expect_message(&peer, payload, 60).await;
-    // Existing SendInfo continues to accept an already-converted wire-order PPID.
+    // The low-level send information has the identifier as a number too.
     client
-        .send_data(SendData {
-            payload: payload.to_vec(),
-            snd_info: Some(SendInfo {
-                sid: 2,
-                ppid: 18_u32.to_be(),
-                flags: 1,
-                ..Default::default()
-            }),
-        })
+        .send_data(SendData::new(payload.to_vec()).with_info({
+            let mut info = SendInfo::default();
+            info.sid = 2;
+            info.ppid = 18;
+            info.flags = 1;
+            info
+        }))
         .await
         .unwrap();
     expect_message(&peer, payload, 18).await;
@@ -139,9 +121,9 @@ async fn one_to_many_connected_endpoint_can_connect_another_peer() {
     let b = server();
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     let client = socket.into_endpoint(2).unwrap();
-    let assoc_a = client.connect(&[a.local_addrs(0).unwrap()[0]]).unwrap();
+    let assoc_a = client.connect(&[a.local_addrs().unwrap()[0]]).unwrap();
     let (peer_a, _) = a.accept().await.unwrap();
-    let assoc_b = client.connect(&[b.local_addrs(0).unwrap()[0]]).unwrap();
+    let assoc_b = client.connect(&[b.local_addrs().unwrap()[0]]).unwrap();
     let (peer_b, _) = tokio::time::timeout(std::time::Duration::from_secs(2), b.accept())
         .await
         .unwrap()
@@ -158,13 +140,11 @@ async fn one_to_many_connected_endpoint_can_connect_another_peer() {
         client
             .send(
                 payload,
-                SendOptions {
-                    stream_id: 2,
-                    ppid: 60,
-                    unordered: true,
-                    assoc_id,
-                    ..Default::default()
-                },
+                SendOptions::new()
+                    .stream(2)
+                    .ppid(60)
+                    .unordered(true)
+                    .association(assoc_id),
             )
             .await
             .unwrap();
@@ -174,19 +154,17 @@ async fn one_to_many_connected_endpoint_can_connect_another_peer() {
     client
         .send(
             b"still B",
-            SendOptions {
-                stream_id: 2,
-                ppid: 60,
-                unordered: true,
-                assoc_id: assoc_b,
-                ..Default::default()
-            },
+            SendOptions::new()
+                .stream(2)
+                .ppid(60)
+                .unordered(true)
+                .association(assoc_b),
         )
         .await
         .unwrap();
     expect_message(&peer_b, b"still B", 60).await;
     let c = server();
-    let assoc_c = client.connect(&[c.local_addrs(0).unwrap()[0]]).unwrap();
+    let assoc_c = client.connect(&[c.local_addrs().unwrap()[0]]).unwrap();
     let (peer_c, _) = tokio::time::timeout(std::time::Duration::from_secs(2), c.accept())
         .await
         .unwrap()
@@ -194,13 +172,11 @@ async fn one_to_many_connected_endpoint_can_connect_another_peer() {
     client
         .send(
             b"new C",
-            SendOptions {
-                stream_id: 2,
-                ppid: 60,
-                unordered: true,
-                assoc_id: assoc_c,
-                ..Default::default()
-            },
+            SendOptions::new()
+                .stream(2)
+                .ppid(60)
+                .unordered(true)
+                .association(assoc_c),
         )
         .await
         .unwrap();
@@ -214,8 +190,8 @@ async fn one_to_many_endpoint_can_initiate_multiple_outgoing_associations() {
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let client = socket.into_endpoint(2).unwrap();
-    let addr_a = a.local_addrs(0).unwrap()[0];
-    let addr_b = b.local_addrs(0).unwrap()[0];
+    let addr_a = a.local_addrs().unwrap()[0];
+    let addr_b = b.local_addrs().unwrap()[0];
     let assoc_a = client.connect(&[addr_a]).unwrap();
     let assoc_b = client.connect(&[addr_b]).unwrap();
     assert_ne!(assoc_a, assoc_b);
@@ -235,13 +211,11 @@ async fn one_to_many_endpoint_can_initiate_multiple_outgoing_associations() {
             .send_to(
                 address,
                 payload,
-                SendOptions {
-                    stream_id: 2,
-                    ppid: 18,
-                    unordered: true,
-                    assoc_id,
-                    ..Default::default()
-                },
+                SendOptions::new()
+                    .stream(2)
+                    .ppid(18)
+                    .unordered(true)
+                    .association(assoc_id),
             )
             .await
             .unwrap();
@@ -275,7 +249,7 @@ async fn heartbeat_and_path_settings_roundtrip_on_defaults_and_established_paths
         params
     );
     let server = server();
-    let address = server.local_addrs(0).unwrap()[0];
+    let address = server.local_addrs().unwrap()[0];
     let (client, _) = socket.connect(address).await.unwrap();
     let (_peer, _) = server.accept().await.unwrap();
     let mut params = client.options().peer_address_params(0, address).unwrap();
@@ -312,7 +286,7 @@ async fn confirmed_peer_address_is_a_typed_notification() {
     ];
     socket.bindx(&addresses, BindxFlags::Add).unwrap();
     let server = socket.listen(2).unwrap();
-    let addresses = server.local_addrs(0).unwrap();
+    let addresses = server.local_addrs().unwrap();
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     client
         .options()
@@ -325,7 +299,7 @@ async fn confirmed_peer_address_is_a_typed_notification() {
         .options()
         .request_heartbeat(assoc_id, addresses[1])
         .unwrap();
-    let NotificationOrData::Notification(Notification::PeerAddressChange(change)) =
+    let Some(NotificationOrData::Notification(Notification::PeerAddressChange(change))) =
         tokio::time::timeout(std::time::Duration::from_secs(2), client.recv())
             .await
             .unwrap()
@@ -369,12 +343,7 @@ async fn send_failure_notification_preserves_payload_and_metadata() {
         .send_to(
             address,
             b"undelivered",
-            SendOptions {
-                stream_id: 2,
-                ppid: 60,
-                context: 42,
-                ..Default::default()
-            },
+            SendOptions::new().stream(2).ppid(60).context(42),
         )
         .await
         .unwrap();
@@ -388,15 +357,15 @@ async fn send_failure_notification_preserves_payload_and_metadata() {
     };
     assert_eq!(failure.payload, b"undelivered");
     assert_eq!(failure.snd_info.sid, 2);
-    assert_eq!(u32::from_be(failure.snd_info.ppid), 60);
+    assert_eq!(failure.snd_info.ppid, 60);
     assert_eq!(failure.snd_info.context, 42);
-    assert_eq!(failure.flags, 0, "the message was never transmitted");
+    assert!(!failure.sent, "the message was never transmitted");
 }
 
 async fn read_fifty(socket: std::sync::Arc<ConnectedSocket>) -> Vec<u32> {
     let mut ids = Vec::new();
     for _ in 0..50 {
-        let NotificationOrData::Data(data) = socket.recv().await.unwrap() else {
+        let NotificationOrData::Data(data) = socket.recv().await.unwrap().unwrap() else {
             panic!("unexpected notification");
         };
         let id = u32::from_be_bytes(data.payload[..4].try_into().unwrap());
@@ -414,7 +383,7 @@ async fn concurrent_receivers_preserve_record_boundaries_and_streams() {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     socket.options().set_nodelay(true).unwrap();
     let (sender, _) = socket
-        .connect(server.local_addrs(0).unwrap()[0])
+        .connect(server.local_addrs().unwrap()[0])
         .await
         .unwrap();
     let (receiver, _) = server.accept().await.unwrap();
@@ -425,13 +394,7 @@ async fn concurrent_receivers_preserve_record_boundaries_and_streams() {
                 let mut bytes = vec![id as u8; if id % 2 == 0 { 9000 } else { 300 }];
                 bytes[..4].copy_from_slice(&id.to_be_bytes());
                 sender
-                    .send(
-                        &bytes,
-                        SendOptions {
-                            stream_id: (id % 4) as u16,
-                            ..Default::default()
-                        },
-                    )
+                    .send(&bytes, SendOptions::new().stream((id % 4) as u16))
                     .await
                     .unwrap();
             }
@@ -455,7 +418,7 @@ async fn ipv6_borrowed_send_and_path_controls_preserve_native_addresses() {
     server.bind("[::1]:0".parse().unwrap()).unwrap();
     server.options().request_rcvinfo(true).unwrap();
     let server = server.listen(1).unwrap();
-    let address = server.local_addrs(0).unwrap()[0];
+    let address = server.local_addrs().unwrap()[0];
     assert!(address.is_ipv6());
     let socket = Socket::new_v6(SocketToAssociation::OneToOne).unwrap();
     let (client, _) = socket.connect(address).await.unwrap();
@@ -477,12 +440,7 @@ async fn ipv6_borrowed_send_and_path_controls_preserve_native_addresses() {
     client
         .send(
             b"ipv6",
-            SendOptions {
-                stream_id: 2,
-                ppid: 60,
-                unordered: true,
-                ..Default::default()
-            },
+            SendOptions::new().stream(2).ppid(60).unordered(true),
         )
         .await
         .unwrap();
@@ -497,14 +455,14 @@ async fn connected_bindx_adds_and_removes_local_addresses() {
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     client.bind("127.0.0.2:0".parse().unwrap()).unwrap();
     let (client, _) = client
-        .connect(server.local_addrs(0).unwrap()[0])
+        .connect(server.local_addrs().unwrap()[0])
         .await
         .unwrap();
     let (_peer, _) = server.accept().await.unwrap();
-    let port = client.local_addrs(0).unwrap()[0].port();
+    let port = client.local_addrs().unwrap()[0].port();
     let added = std::net::SocketAddr::from(([127, 0, 0, 3], port));
     client.bindx(&[added], BindxFlags::Add).unwrap();
-    assert!(client.local_addrs(0).unwrap().contains(&added));
+    assert!(client.local_addrs().unwrap().contains(&added));
     client.bindx(&[added], BindxFlags::Remove).unwrap();
-    assert!(!client.local_addrs(0).unwrap().contains(&added));
+    assert!(!client.local_addrs().unwrap().contains(&added));
 }

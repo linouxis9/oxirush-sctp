@@ -2,6 +2,7 @@
 use crate::consts::MSG_NOTIFICATION;
 use crate::internal::receive::Piece;
 use crate::types::CmsgType;
+use crate::types::internal::{NxtInfoWire, RcvInfoWire, SndInfoWire};
 use crate::{NxtInfo, RcvInfo, SendInfo};
 use os_socketaddr::OsSocketAddr;
 use std::convert::TryInto;
@@ -79,16 +80,20 @@ pub(crate) fn ancillary_info(
         let data = &control[header_len..len];
         if header.cmsg_level == libc::IPPROTO_SCTP
             && header.cmsg_type == CmsgType::RcvInfo as i32
-            && data.len() >= std::mem::size_of::<RcvInfo>()
+            && data.len() >= std::mem::size_of::<RcvInfoWire>()
         {
-            // Safety: RcvInfo consists of integers, and its complete native layout is present.
-            rcv_info = Some(unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<RcvInfo>()) });
+            // Safety: the structure consists of integers, and its complete native layout is
+            // present.
+            let wire = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<RcvInfoWire>()) };
+            rcv_info = Some(RcvInfo::from(wire));
         } else if header.cmsg_level == libc::IPPROTO_SCTP
             && header.cmsg_type == CmsgType::NxtInfo as i32
-            && data.len() >= std::mem::size_of::<NxtInfo>()
+            && data.len() >= std::mem::size_of::<NxtInfoWire>()
         {
-            // Safety: NxtInfo consists of integers, and its complete native layout is present.
-            nxt_info = Some(unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<NxtInfo>()) });
+            // Safety: the structure consists of integers, and its complete native layout is
+            // present.
+            let wire = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<NxtInfoWire>()) };
+            nxt_info = Some(NxtInfo::from(wire));
         }
         // libc supplies the native alignment; CMSG_SPACE is only a size calculation. The
         // containing receive buffer is bounded, so its validated payload size fits c_uint.
@@ -133,7 +138,7 @@ pub(crate) fn sctp_sendmsg_once(
 
             (
                 msg_control_buffer.as_mut_ptr(),
-                libc::CMSG_SPACE(std::mem::size_of::<SendInfo>() as u32) as usize,
+                libc::CMSG_SPACE(std::mem::size_of::<SndInfoWire>() as u32) as usize,
             )
         } else {
             (
@@ -156,15 +161,16 @@ pub(crate) fn sctp_sendmsg_once(
             (*cmsg_hdr).cmsg_level = libc::IPPROTO_SCTP;
             (*cmsg_hdr).cmsg_type = CmsgType::SndInfo as i32;
             (*cmsg_hdr).cmsg_len =
-                libc::CMSG_LEN(std::mem::size_of::<SendInfo>().try_into().unwrap())
+                libc::CMSG_LEN(std::mem::size_of::<SndInfoWire>().try_into().unwrap())
                     .try_into()
                     .unwrap();
 
-            let snd_info = snd_info.unwrap();
+            // The payload protocol identifier goes in network byte order
+            let snd_info = SndInfoWire::from(snd_info.unwrap());
             std::ptr::copy(
-                snd_info as *const SendInfo as *const u8,
+                &snd_info as *const SndInfoWire as *const u8,
                 libc::CMSG_DATA(cmsg_hdr),
-                std::mem::size_of::<SendInfo>(),
+                std::mem::size_of::<SndInfoWire>(),
             );
         }
 
@@ -233,40 +239,42 @@ mod tests {
         bytes
     }
 
+    // The structures as the kernel lays them out, with the payload protocol identifier in
+    // network byte order.
     fn rcv_bytes(info: &RcvInfo) -> Vec<u8> {
-        let mut bytes = vec![0; std::mem::size_of::<RcvInfo>()];
+        let mut bytes = vec![0; std::mem::size_of::<RcvInfoWire>()];
         macro_rules! put {
-            ($field:ident) => {{
-                let value = info.$field.to_ne_bytes();
-                let offset = std::mem::offset_of!(RcvInfo, $field);
+            ($field:ident, $value:expr) => {{
+                let value = $value.to_ne_bytes();
+                let offset = std::mem::offset_of!(RcvInfoWire, $field);
                 bytes[offset..offset + value.len()].copy_from_slice(&value);
             }};
         }
-        put!(sid);
-        put!(ssn);
-        put!(flags);
-        put!(ppid);
-        put!(tsn);
-        put!(cumtsn);
-        put!(context);
-        put!(assoc_id);
+        put!(sid, info.sid);
+        put!(ssn, info.ssn);
+        put!(flags, info.flags);
+        put!(ppid, info.ppid.to_be());
+        put!(tsn, info.tsn);
+        put!(cumtsn, info.cumtsn);
+        put!(context, info.context);
+        put!(assoc_id, info.assoc_id);
         bytes
     }
 
     fn nxt_bytes(info: &NxtInfo) -> Vec<u8> {
-        let mut bytes = vec![0; std::mem::size_of::<NxtInfo>()];
+        let mut bytes = vec![0; std::mem::size_of::<NxtInfoWire>()];
         macro_rules! put {
-            ($field:ident) => {{
-                let value = info.$field.to_ne_bytes();
-                let offset = std::mem::offset_of!(NxtInfo, $field);
+            ($field:ident, $value:expr) => {{
+                let value = $value.to_ne_bytes();
+                let offset = std::mem::offset_of!(NxtInfoWire, $field);
                 bytes[offset..offset + value.len()].copy_from_slice(&value);
             }};
         }
-        put!(sid);
-        put!(flags);
-        put!(ppid);
-        put!(length);
-        put!(assoc_id);
+        put!(sid, info.sid);
+        put!(flags, info.flags);
+        put!(ppid, info.ppid.to_be());
+        put!(length, info.length);
+        put!(assoc_id, info.assoc_id);
         bytes
     }
 
@@ -276,7 +284,7 @@ mod tests {
             sid: 2,
             ssn: 3,
             flags: 1,
-            ppid: 60_u32.to_be(),
+            ppid: 60,
             tsn: 4,
             cumtsn: 5,
             context: 6,
@@ -285,7 +293,7 @@ mod tests {
         let nxt = NxtInfo {
             sid: 8,
             flags: 1,
-            ppid: 18_u32.to_be(),
+            ppid: 18,
             length: 10,
             assoc_id: 11,
         };
@@ -322,7 +330,7 @@ mod tests {
         for len in 0..valid.len() {
             let parsed = ancillary_info(&valid[..len], 0);
             let required =
-                unsafe { libc::CMSG_LEN(std::mem::size_of::<RcvInfo>() as u32) as usize };
+                unsafe { libc::CMSG_LEN(std::mem::size_of::<RcvInfoWire>() as u32) as usize };
             assert_eq!(
                 parsed,
                 if len >= required {
@@ -352,8 +360,8 @@ mod tests {
     fn cmsg_buffer_holds_the_sctp_control_messages() {
         // Safety: `CMSG_SPACE` only computes a size.
         let sctp_cmsgs = unsafe {
-            libc::CMSG_SPACE(std::mem::size_of::<NxtInfo>() as u32)
-                + libc::CMSG_SPACE(std::mem::size_of::<RcvInfo>() as u32)
+            libc::CMSG_SPACE(std::mem::size_of::<NxtInfoWire>() as u32)
+                + libc::CMSG_SPACE(std::mem::size_of::<RcvInfoWire>() as u32)
                 // `struct sctp_sndrcvinfo`
                 + libc::CMSG_SPACE(32)
         };

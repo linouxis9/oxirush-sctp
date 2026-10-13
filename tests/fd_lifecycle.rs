@@ -41,7 +41,7 @@ async fn sockets_close_their_descriptor_whatever_happens_to_them() {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let listener = socket.listen(10).unwrap();
-    let address = listener.local_addrs(0).unwrap()[0];
+    let address = listener.local_addrs().unwrap()[0];
     let with_listener = open_fds();
 
     // A connect dropped before it completes, as `tokio::time::timeout` does.

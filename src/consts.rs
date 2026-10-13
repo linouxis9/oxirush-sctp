@@ -48,3 +48,13 @@ pub(crate) const SCTP_STATUS: libc::c_int = 14;
 
 // Heartbeats and path retransmission limits.
 pub(crate) const SCTP_PEER_ADDR_PARAMS: libc::c_int = 9;
+
+// Association parameters, the primary path, the delay of acknowledgements
+pub(crate) const SCTP_ASSOCINFO: libc::c_int = 1;
+pub(crate) const SCTP_PRIMARY_ADDR: libc::c_int = 6;
+pub(crate) const SCTP_DELAYED_SACK: libc::c_int = 16;
+
+// Flag of a send that aborts the association, with the message as the reason
+pub(crate) const SCTP_ABORT: u16 = 1 << 2;
+// Flag of a send without a message that shuts the association down (`MSG_FIN`)
+pub(crate) const SCTP_EOF: u16 = 0x200;

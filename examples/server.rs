@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 async fn serve(association: ConnectedSocket, peer: SocketAddr) -> std::io::Result<()> {
-    let status = association.status(0)?;
+    let status = association.status()?;
     println!(
         "{peer}: {:?}, {} outgoing and {} incoming streams, nodelay {}",
         status.state,
@@ -23,25 +23,24 @@ async fn serve(association: ConnectedSocket, peer: SocketAddr) -> std::io::Resul
     );
     loop {
         match association.recv().await {
-            // An empty message is the end of an association that was shut down.
-            Ok(NotificationOrData::Data(message)) if message.payload.is_empty() => break,
-            Ok(NotificationOrData::Data(message)) => {
+            // The end of an association that was shut down.
+            Ok(None) => break,
+            Ok(Some(NotificationOrData::Data(message))) => {
                 println!("{peer}: {:?}", String::from_utf8_lossy(&message.payload));
-                association.send(b"welcome", SendOptions::default()).await?;
+                association.send(b"welcome", SendOptions::new()).await?;
             }
-            Ok(NotificationOrData::Notification(Notification::Shutdown(_))) => {
+            Ok(Some(NotificationOrData::Notification(Notification::Shutdown(_)))) => {
                 println!("{peer}: the peer shuts the association down")
             }
-            Ok(NotificationOrData::Notification(Notification::AssociationChange(change))) => {
+            Ok(Some(NotificationOrData::Notification(Notification::AssociationChange(change)))) => {
                 match change.state {
-                    AssocChangeState::CommLost => println!(
-                        "{peer}: association lost, error cause {}",
-                        u16::from_be(change.error)
-                    ),
+                    AssocChangeState::CommLost => {
+                        println!("{peer}: association lost, error cause {}", change.cause)
+                    }
                     state => println!("{peer}: {state:?}"),
                 }
             }
-            Ok(NotificationOrData::Notification(other)) => println!("{peer}: {other:?}"),
+            Ok(Some(other)) => println!("{peer}: {other:?}"),
             // An aborted association ends with an error.
             Err(error) => {
                 println!("{peer}: {error}");
@@ -68,7 +67,7 @@ async fn peers(server: SocketAddr) -> std::io::Result<()> {
     for abort in [false, true] {
         let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
         let (association, _) = socket.connect(server).await?;
-        association.send(b"hello", SendOptions::default()).await?;
+        association.send(b"hello", SendOptions::new()).await?;
         association.recv().await?;
         if abort {
             // Dropped with a zero linger, the socket aborts its association.

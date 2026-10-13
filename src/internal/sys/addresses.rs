@@ -13,6 +13,7 @@ pub(crate) fn sctp_bindx_internal(
     flags: BindxFlags,
 ) -> std::io::Result<()> {
     tracing::debug!("Binding following addresses to socket: {addrs:#?}");
+    check_addresses(fd, addrs)?;
 
     let mut addrs_u8: Vec<u8> = vec![];
 
@@ -44,7 +45,7 @@ pub(crate) fn sctp_bindx_internal(
 
         if result < 0 {
             let error = std::io::Error::last_os_error();
-            tracing::error!("Error: {error} during `sctp_bindx` using `setsockopt`.");
+            tracing::debug!("Error: {error} during `sctp_bindx` using `setsockopt`.");
             Err(error)
         } else {
             Ok(())
@@ -116,7 +117,7 @@ fn sctp_getaddrs_internal(
                 capacity *= 2;
                 continue;
             }
-            tracing::error!(
+            tracing::debug!(
                 "Error: {error} while getting {addr_type} addresses using  `getsockopt`."
             );
             return Err(error);
@@ -173,4 +174,26 @@ fn sctp_getaddrs_internal(
         }
         return Ok(peeraddrs);
     }
+}
+
+// What Linux refuses of the addresses of one call with a bare `EINVAL`, said in words: an
+// address of IPv6 on a socket of IPv4, and ports that differ.
+pub(crate) fn check_addresses(fd: BorrowedFd<'_>, addrs: &[SocketAddr]) -> std::io::Result<()> {
+    let invalid = |message: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
+    if let Some(address) = addrs.iter().find(|address| address.is_ipv6())
+        && super::socket_domain(fd)? == libc::AF_INET
+    {
+        return Err(invalid(format!(
+            "{address} is an IPv6 address and the socket is one of IPv4: `Socket::new_v6` \
+             makes a socket for both"
+        )));
+    }
+    if let Some(first) = addrs.first()
+        && let Some(other) = addrs.iter().find(|other| other.port() != first.port())
+    {
+        return Err(invalid(format!(
+            "the addresses of one call share a port, and {first} and {other} do not"
+        )));
+    }
+    Ok(())
 }

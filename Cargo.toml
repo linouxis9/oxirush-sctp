@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Async SCTP sockets for Tokio on the Linux kernel SCTP stack"
-authors = [ "Abhijit Gadgil <gabhijit@iitbombay.org>"]
 categories = ["network-programming", "asynchronous"]
 keywords = ["sctp", "tokio", "linux", "ngap", "s1ap"]
 readme = "README.md"
@@ -18,11 +17,11 @@ exclude = [".github/", ".gitignore", "benches/", "fuzz/"]
 [dependencies]
 os_socketaddr = { version = "0.2.4" }
 libc = { version = "0.2.145" }
-tokio = { version = "1.32" , features = ["net"]}
+tokio = { version = "1.32" , features = ["net", "time"]}
 tracing = { version = "0.1.40", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-tokio = { version = "1.32", features = ["macros", "rt", "time"] }
+tokio = { version = "1.32", features = ["macros", "rt", "rt-multi-thread", "time"] }
 
 # `cargo fuzz` builds the crate with `--cfg fuzzing`, which gives the fuzz
 # targets the module `fuzzing`.

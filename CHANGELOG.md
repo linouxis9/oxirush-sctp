@@ -39,17 +39,31 @@ sctp-rs.
 
 ### Types
 
-- `Notification` and `Event` are `#[non_exhaustive]`: a `match` on them
-  needs a wildcard arm. `Notification` has two more variants,
-  `PeerAddressChange` and `SendFailure`, and `Unsupported` now carries the
-  type and the octets of a notification that the crate does not parse,
-  which sctp-rs dropped.
+- Every public enum and every public structure is `#[non_exhaustive]`: a
+  `match` needs a wildcard arm, and a structure is not written as a literal.
+  `SendData::new(payload).with_info(info)`, `RtoInfo::new(initial, max,
+  min)`, `PeerAddressParams::new(assoc_id, address)` and `Default` make the
+  values that a program gives, whose fields it can then set.
+- `Notification` has five more variants, `PeerAddressChange`,
+  `SendFailure`, `RemoteError`, `PartialDelivery` and `SenderDry`, and
+  `Unsupported` now carries the number of the type and the octets of a
+  notification that the crate does not parse, which sctp-rs dropped.
+- `AssociationChange` and `Shutdown` no longer mirror the C structure:
+  `ev_type`, `flags` and `length` are gone, `ob_streams` and `ib_streams`
+  are `outbound_streams` and `inbound_streams`, and `error` is `cause`, the
+  error cause of SCTP as a number (12 after a user-initiated abort).
+  `SendFailure` has `sent` and `cause` in the place of `flags` and `error`.
+- `AssocChangeState::Unknown` and `ConnState::Unknown` keep the value of
+  the kernel. `Event::Unknown` is gone: it could not be subscribed.
 - `ReceivedData` has a `from` field, the address the message came from, and
   the methods `stream_id()`, `ppid()` and `assoc_id()`.
-- `SendOptions` is new: the stream, the payload protocol identifier as a
-  plain number, the unordered flag, the context and the association.
-  `SendInfo::ppid`, `RcvInfo::ppid` and `NxtInfo::ppid` stay as the kernel
-  carries them, in network byte order.
+- `SendOptions` is new: `SendOptions::new().stream(1).ppid(60)`, with
+  `unordered`, `context` and `association`.
+- A payload protocol identifier is a plain number everywhere: 60 for NGAP
+  in `SendOptions`, `SendInfo::ppid`, `RcvInfo::ppid` and `NxtInfo::ppid`.
+  sctp-rs took and returned it in network byte order.
+- `Debug` of a socket prints its local address, the address of its peer
+  and its descriptor.
 - A failed subscription is an `EventSubscriptionError` inside the
   `io::Error`, with every event that failed and the error of each.
 - `CmsgType` is no longer public: no function took or returned it.
@@ -65,11 +79,20 @@ sctp-rs.
 - Every socket requests the receive information (`SCTP_RCVINFO`) when it
   is created: a received message has its stream and its payload protocol
   identifier without a call to `request_rcvinfo(true)`.
-- The end of an association is remembered. Once `recv` has returned the
-  error of an association that was aborted or lost, every later call
-  returns that error again; and after `shutdown(Shutdown::Write)`, `recv`
-  returns the empty message that ends an association when the shutdown is
-  complete. In sctp-rs the later call waits forever in both cases.
+- The end of an association is in the type: `ConnectedSocket::recv`
+  returns `Ok(None)` for an association that was shut down, where sctp-rs
+  returned a message without octets, and an error for one that was aborted
+  or lost. `while let Some(received) = association.recv().await?` ends
+  there.
+- The end is recorded by the call that learns of it, `recv`, `send` or a
+  notification, and every later call returns it at once: `recv` the end or
+  the error, `send` `BrokenPipe` or the error. Linux tells one call alone:
+  in sctp-rs, a `recv` after a `send` that had taken the error of an abort
+  waited forever. The documentation has the table of every way an
+  association ends, and `tests/association_end.rs` a test for each row.
+- A notification is never discarded for its length: the limit is for the
+  messages of the peer.
+- `recv_into` receives into a buffer of the caller.
 - A received message holds the memory of its octets and no more: the
   buffer that it was read into has room for 4 KiB at least, which a message
   of 64 octets kept.
@@ -83,8 +106,18 @@ sctp-rs.
 
 - `send` waits until the socket takes the message. sctp-rs returned
   `EWOULDBLOCK` and left the socket marked as writable.
-- Sends pass `MSG_NOSIGNAL`: an association that has ended is `EPIPE` and
+- Sends pass `MSG_NOSIGNAL`: an association that has ended is an error and
   no `SIGPIPE`.
+- An empty message, a stream that the association does not have, an
+  address of IPv6 on a socket of IPv4 and addresses of one call with
+  different ports are `InvalidInput` with a text that says which, where
+  Linux answers a bare `EINVAL`.
+- `status`, `peer_addrs` and `local_addrs` of a `ConnectedSocket`, a
+  `Listener` and a `Socket` take no association identifier, which they
+  ignored, and a `ConnectedSocket` refuses `SendOptions::association`.
+- `Listener` has no `shutdown`: a listener is closed by dropping it.
+- The library logs nothing at ERROR: what a call returns is the caller's
+  to judge.
 - The futures of `connect` and `connectx` are `Send`, and a failed
   `connectx` reports the error of the socket where sctp-rs reported
   `ECONNREFUSED` for every failure.
@@ -106,7 +139,17 @@ sctp-rs.
 - Options: `set_nodelay` and `nodelay`, `set_rto_info` and `rto_info`,
   `set_linger` (off or zero), `set_reuseaddr` and `reuseaddr`,
   `peer_address_params`, `set_peer_address_params` and `request_heartbeat`,
-  `set_max_message_size` and `max_message_size`.
+  `set_max_message_size` and `max_message_size`,
+  `set_association_params` and `association_params` (the retransmission
+  limit of an association), `set_sack_info` and `sack_info`,
+  `set_primary_address`, `set_dscp` and `dscp`, `set_send_buffer_size`,
+  `set_recv_buffer_size` and their getters.
+- `ConnectedSocket::close(deadline)`, which shuts the association down,
+  reads to its end and returns what the peer had still sent: a socket that
+  is dropped with a message that it has not read aborts, and loses what it
+  had sent.
+- `ConnectedSocket::abort(reason)` and `OneToManyEndpoint::abort(assoc_id,
+  reason)`.
 - `Notification::PeerAddressChange` and `Notification::SendFailure`, typed.
 - `ConnStatus`, `ConnState`, `PeerAddress` and the other status types are
   exported and documented, as is every public item.

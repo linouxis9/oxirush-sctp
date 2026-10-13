@@ -49,7 +49,7 @@ pub fn receive(script: &[u8]) {
                 from: None,
             })
         });
-        if let Ok(NotificationOrData::Data(message)) = received {
+        if let Ok(Some(NotificationOrData::Data(message))) = received {
             assert!(message.payload.len() <= LIMIT);
         }
     }

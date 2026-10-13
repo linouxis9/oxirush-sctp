@@ -24,22 +24,21 @@ async fn main() -> std::io::Result<()> {
     // A peer that sends one message and closes its socket
     let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
     let (peer, _) = peer.connect(listener.local_addr()?).await?;
-    peer.send(b"hello", SendOptions::default()).await?;
+    peer.send(b"hello", SendOptions::new()).await?;
     drop(peer);
 
     let (association, _) = listener.accept().await?;
-    loop {
-        match association.recv().await? {
+    // `None` is the end of the association
+    while let Some(received) = association.recv().await? {
+        match received {
             NotificationOrData::Notification(Notification::AssociationChange(change)) => {
                 println!("association change: {:?}", change.state)
             }
             NotificationOrData::Notification(Notification::Shutdown(_)) => {
                 println!("the peer shuts the association down")
             }
-            NotificationOrData::Notification(other) => println!("{other:?}"),
-            // An empty message is the end of the association
-            NotificationOrData::Data(message) if message.payload.is_empty() => break,
             NotificationOrData::Data(message) => println!("{} octets", message.payload.len()),
+            other => println!("{other:?}"),
         }
     }
     Ok(())

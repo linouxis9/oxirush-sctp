@@ -34,10 +34,7 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
 
     let client_addr = laddrs.unwrap()[0];
 
-    let senddata = SendData {
-        payload: b"hello world!".to_vec(),
-        snd_info: None,
-    };
+    let senddata = SendData::new(b"hello world!".to_vec());
     let result = listener
         .send_data(Some(client_addr), senddata.clone())
         .await;
@@ -136,10 +133,7 @@ async fn socket_send_recv_nxtinfo_test() {
 
     let client_addr = laddrs.unwrap()[0];
 
-    let senddata = SendData {
-        payload: b"hello world!".to_vec(),
-        snd_info: None,
-    };
+    let senddata = SendData::new(b"hello world!".to_vec());
     let result = listener
         .send_data(Some(client_addr), senddata.clone())
         .await;
@@ -239,8 +233,8 @@ async fn socket_init_params_set_ostreams_success() {
     );
 
     if let NotificationOrData::Notification(Notification::AssociationChange(AssociationChange {
-        ib_streams,
-        ob_streams,
+        inbound_streams: ib_streams,
+        outbound_streams: ob_streams,
         ..
     })) = notification
     {
@@ -355,12 +349,7 @@ async fn connect_in_network_namespace_times_out() {
         .unwrap();
     client_socket
         .options()
-        .set_rto_info(RtoInfo {
-            assoc_id: 0,
-            initial: 100,
-            max: 100,
-            min: 100,
-        })
+        .set_rto_info(RtoInfo::new(100, 100, 100))
         .unwrap();
     // Routed to the loopback interface, which drops the INIT: it is not a local address.
     let connect_addr: SocketAddr = "10.99.0.2:8080".parse().unwrap();

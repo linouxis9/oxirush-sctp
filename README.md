@@ -13,11 +13,7 @@ use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation}
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
     // Stream 1, and the payload protocol identifier of NGAP
-    let options = SendOptions {
-        stream_id: 1,
-        ppid: 60,
-        ..Default::default()
-    };
+    let options = SendOptions::new().stream(1).ppid(60);
 
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
     socket.bind("127.0.0.1:0".parse().unwrap())?;
@@ -26,7 +22,7 @@ async fn main() -> std::io::Result<()> {
 
     let server = async {
         let (association, _peer) = listener.accept().await?;
-        if let NotificationOrData::Data(message) = association.recv().await? {
+        if let Some(NotificationOrData::Data(message)) = association.recv().await? {
             let text = String::from_utf8_lossy(&message.payload);
             let (stream, ppid) = (message.stream_id(), message.ppid());
             println!("server: {text:?} on stream {stream:?} with PPID {ppid:?}");
@@ -38,7 +34,7 @@ async fn main() -> std::io::Result<()> {
         let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
         let (association, _) = socket.connect(address).await?;
         association.send(b"ping", options).await?;
-        if let NotificationOrData::Data(message) = association.recv().await? {
+        if let Some(NotificationOrData::Data(message)) = association.recv().await? {
             println!("client: {:?}", String::from_utf8_lossy(&message.payload));
         }
         std::io::Result::Ok(())
@@ -52,8 +48,6 @@ async fn main() -> std::io::Result<()> {
 server: "ping" on stream Some(1) with PPID Some(60)
 client: "pong"
 ```
-
-The text under a block is what the block prints.
 
 > This crate is not on crates.io yet.
 
@@ -93,22 +87,21 @@ async fn main() -> std::io::Result<()> {
     // A peer that sends one message and closes its socket
     let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
     let (peer, _) = peer.connect(listener.local_addr()?).await?;
-    peer.send(b"hello", SendOptions::default()).await?;
+    peer.send(b"hello", SendOptions::new()).await?;
     drop(peer);
 
     let (association, _) = listener.accept().await?;
-    loop {
-        match association.recv().await? {
+    // `None` is the end of the association
+    while let Some(received) = association.recv().await? {
+        match received {
             NotificationOrData::Notification(Notification::AssociationChange(change)) => {
                 println!("association change: {:?}", change.state)
             }
             NotificationOrData::Notification(Notification::Shutdown(_)) => {
                 println!("the peer shuts the association down")
             }
-            NotificationOrData::Notification(other) => println!("{other:?}"),
-            // An empty message is the end of the association
-            NotificationOrData::Data(message) if message.payload.is_empty() => break,
             NotificationOrData::Data(message) => println!("{} octets", message.payload.len()),
+            other => println!("{other:?}"),
         }
     }
     Ok(())
@@ -128,7 +121,7 @@ change of state of a path.
 ## The end of an association
 
 ```rust
-use oxirush_sctp::{ConnectedSocket, Listener, NotificationOrData, Socket, SocketToAssociation};
+use oxirush_sctp::{ConnectedSocket, Listener, Socket, SocketToAssociation};
 use std::time::Duration;
 
 /// The two ends of a new association of `listener`.
@@ -145,13 +138,11 @@ async fn main() -> std::io::Result<()> {
     socket.bind("127.0.0.1:0".parse().unwrap())?;
     let listener = socket.listen(5)?;
 
-    // The peer closes its socket: an empty message, at every call from then on
+    // The peer closes its socket: `None`, at every call from then on
     let (association, peer) = connected(&listener).await?;
     drop(peer);
     for _ in 0..2 {
-        if let NotificationOrData::Data(message) = association.recv().await? {
-            println!("closed: a message of {} octets", message.payload.len());
-        }
+        println!("closed: {:?}", association.recv().await?);
     }
 
     // The peer aborts, as a socket does that is dropped with a linger of
@@ -166,19 +157,32 @@ async fn main() -> std::io::Result<()> {
 ```
 
 ```text
-closed: a message of 0 octets
-closed: a message of 0 octets
+closed: None
+closed: None
 aborted: Err(ConnectionReset)
 ```
 
-A dropped socket shuts its association down, and aborts it with a linger of
-zero. A `OneToManyEndpoint` learns of the end of an association from the
+`recv` returns `None` once an association was shut down, and the error of
+one that was aborted or lost, at every call and whichever call learned of
+the end first: `while let Some(received) = association.recv().await?` ends
+with the association. The documentation has the table of every way an
+association ends.
+
+To close without loss, `association.close(deadline).await?` shuts the
+association down, reads until the peer has answered and returns what the
+peer had still sent. A socket that is dropped is closed by Linux: with a
+message or a notification that was not read, the association is aborted,
+and what this side had sent and the peer had not acknowledged is lost. A
+`OneToManyEndpoint` learns of the end of an association from the
 notifications only.
 
 ## Multihoming
 
 `bindx` binds several local addresses and `connectx` gives several
-addresses of the peer. The addresses of one call share a port.
+addresses of the peer. The addresses of one call share a port. A socket
+that connects without being bound offers the peer every address of the
+host, loopback and the others: bind the client first, as here, to offer
+the addresses that were chosen.
 
 ```rust
 use oxirush_sctp::{BindxFlags, Socket, SocketToAssociation};
@@ -199,23 +203,23 @@ async fn main() -> std::io::Result<()> {
     let server = Socket::new_v4(SocketToAssociation::OneToOne)?;
     server.bindx(&addresses("127.0.0.1:0", "127.0.0.2:0"), BindxFlags::Add)?;
     let listener = server.listen(5)?;
-    let server_addresses = listener.local_addrs(0)?;
+    let server_addresses = listener.local_addrs()?;
 
     let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
     client.bindx(&addresses("127.0.0.1:0", "127.0.0.3:0"), BindxFlags::Add)?;
     let (client, id) = client.connectx(&server_addresses).await?;
     let (accepted, _) = listener.accept().await?;
 
-    println!("client: {:?}", ips(&client.local_addrs(id)?));
-    println!("server: {:?}", ips(&client.peer_addrs(id)?));
-    println!("the server sees: {:?}", ips(&accepted.peer_addrs(0)?));
+    println!("client: {:?}", ips(&client.local_addrs()?));
+    println!("server: {:?}", ips(&client.peer_addrs()?));
+    println!("the server sees: {:?}", ips(&accepted.peer_addrs()?));
     println!(
         "primary path: {}",
-        client.status(id)?.peer_primary.address.ip()
+        client.status()?.peer_primary.address.ip()
     );
 
     // Probe every path each second instead of each 30 seconds
-    for address in client.peer_addrs(id)? {
+    for address in client.peer_addrs()? {
         let mut path = client.options().peer_address_params(id, address)?;
         path.heartbeat_interval = Duration::from_secs(1);
         client.options().set_peer_address_params(path)?;
@@ -264,7 +268,7 @@ async fn main() -> std::io::Result<()> {
     let (_peer, _) = peer.connect(listener.local_addr()?).await?;
     let (association, _) = listener.accept().await?;
 
-    let status = association.status(0)?;
+    let status = association.status()?;
     println!(
         "{:?}, {} outgoing and {} incoming streams",
         status.state, status.outstreams, status.instreams
@@ -297,18 +301,15 @@ async fn main() -> std::io::Result<()> {
 
     let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
     let (peer, _) = peer.connect(endpoint.local_addr()?).await?;
-    peer.send(b"ping", SendOptions::default()).await?;
+    peer.send(b"ping", SendOptions::new()).await?;
 
     // A message comes with its association, which the answer names
     if let NotificationOrData::Data(message) = endpoint.recv().await? {
         println!("endpoint: {:?}", String::from_utf8_lossy(&message.payload));
-        let options = SendOptions {
-            assoc_id: message.assoc_id().unwrap(),
-            ..Default::default()
-        };
+        let options = SendOptions::new().association(message.assoc_id().unwrap());
         endpoint.send(b"pong", options).await?;
     }
-    if let NotificationOrData::Data(message) = peer.recv().await? {
+    if let Some(NotificationOrData::Data(message)) = peer.recv().await? {
         println!("peer: {:?}", String::from_utf8_lossy(&message.payload));
     }
     Ok(())
@@ -338,7 +339,13 @@ The crate has no Cargo feature. Its diagnostics go through
 - Other systems than Linux.
 - SCTP over DTLS, the data channels of WebRTC.
 - The rest of RFC 6458: among others authentication, partial reliability
-  and the choice of the primary path.
+  and stream reconfiguration.
+- A `OneToManyEndpoint` for peers that are not trusted: a message that
+  arrives in several parts holds back the messages of the other
+  associations until it is whole, 3.9 s for a message of 1 MB with a
+  receive buffer of 16 KiB on loopback, and for as long as a peer takes
+  that stops in the middle. A `Listener` gives each association a socket
+  of its own.
 
 ## Performance
 
@@ -346,7 +353,10 @@ On one core of an AMD Ryzen 7 5700G, a message sent on one end of an
 association and received on the other, over the loopback interface, takes
 9 µs for 64 or 1400 octets and 40 µs for 64 KiB. Without
 `options().set_nodelay(true)` a small message can wait 200 ms for the
-acknowledgement of the one before it.
+acknowledgement of the one before it. `recv_into` reads into a buffer of
+the caller: in one run of both while the machine did other work, a message
+of 16 KiB took 13 µs with it and 16 µs with `recv`, and one of 64 KiB
+36 µs and 44 µs.
 [`benches/`](https://github.com/linouxis9/oxirush-sctp/blob/main/benches/README.md)
 has the benchmarks and how to profile.
 

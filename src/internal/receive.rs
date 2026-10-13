@@ -25,6 +25,17 @@ pub(crate) struct PartialMessage {
 }
 
 impl PartialMessage {
+    // A message of which a first part was read elsewhere.
+    pub(super) fn begun(part: &[u8], piece: &Piece) -> Self {
+        Self {
+            notification: piece.notification,
+            payload: part.to_vec(),
+            rcv_info: piece.rcv_info.clone(),
+            from: piece.from,
+            received: piece.len,
+        }
+    }
+
     pub(crate) fn belongs_to(&self, assoc_id: crate::AssociationId) -> bool {
         self.rcv_info
             .as_ref()
@@ -55,7 +66,11 @@ pub(crate) struct Piece {
 }
 
 // Reads the next message up to its end (`MSG_EOR`), or fails with `EWOULDBLOCK` after keeping the
-// part received so far in `partial`.
+// part received so far in `partial`. `None` is the end of the stream: a read of no octets, which
+// SCTP has no message for.
+//
+// The limit is for the messages of the peer. A notification is the kernel's, and is never
+// discarded: the longest one carries a message that this side sent.
 //
 // With the default `SCTP_FRAGMENT_INTERLEAVE` level 0, the parts of a message are not interleaved
 // with other messages. The kernel only delivers something else after a part when it aborts the
@@ -65,10 +80,15 @@ pub(super) fn receive_message(
     max_message_size: usize,
     one_association: bool,
     mut read: impl FnMut(&mut [u8]) -> std::io::Result<Piece>,
-) -> std::io::Result<NotificationOrData> {
+) -> std::io::Result<Option<NotificationOrData>> {
     loop {
         let mut message = partial.take().unwrap_or_default();
-        let discarding = message.received > max_message_size;
+        let limit = if message.notification {
+            usize::MAX
+        } else {
+            max_message_size
+        };
+        let discarding = message.received > limit;
         if discarding {
             message.payload.clear();
         }
@@ -78,7 +98,7 @@ pub(super) fn receive_message(
         } else {
             start
                 .max(RECV_BUFFER_SIZE)
-                .min(max_message_size.saturating_sub(start).saturating_add(1))
+                .min(limit.saturating_sub(start).saturating_add(1))
         };
         // `Vec::resize` would grow geometrically beyond the configured limit. One extra octet
         // lets us detect an oversized message; subsequent reads use the fixed discard buffer.
@@ -110,12 +130,7 @@ pub(super) fn receive_message(
                 );
             }
             tracing::debug!("Received end of stream.");
-            return Ok(NotificationOrData::Data(ReceivedData {
-                payload: vec![],
-                from: None,
-                rcv_info: None,
-                nxt_info: None,
-            }));
+            return Ok(None);
         }
 
         let continued = message.received > 0;
@@ -151,7 +166,7 @@ pub(super) fn receive_message(
             *partial = Some(message);
             continue;
         }
-        if message.received > max_message_size {
+        if !message.notification && message.received > max_message_size {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
@@ -162,20 +177,20 @@ pub(super) fn receive_message(
         }
         if message.notification {
             tracing::debug!("Received Notification.");
-            return Ok(NotificationOrData::Notification(notification_from_message(
-                &message.payload,
+            return Ok(Some(NotificationOrData::Notification(
+                notification_from_message(&message.payload),
             )));
         }
         tracing::debug!("Received Data.");
         // The buffer had room for the largest read, 4 KiB at least, which a
         // program that keeps many short messages would pay for each
         message.payload.shrink_to_fit();
-        return Ok(NotificationOrData::Data(ReceivedData {
+        return Ok(Some(NotificationOrData::Data(ReceivedData {
             payload: message.payload,
             from: message.from,
             rcv_info: message.rcv_info,
             nxt_info: piece.nxt_info,
-        }));
+        })));
     }
 }
 
@@ -216,9 +231,9 @@ mod tests {
         }
     }
 
-    fn payload(record: NotificationOrData) -> Vec<u8> {
+    fn payload(record: Option<NotificationOrData>) -> Vec<u8> {
         match record {
-            NotificationOrData::Data(data) => data.payload,
+            Some(NotificationOrData::Data(data)) => data.payload,
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -283,7 +298,7 @@ mod tests {
             std::io::ErrorKind::WouldBlock
         );
         assert_eq!(partial.as_ref().unwrap().payload, b"first");
-        let NotificationOrData::Data(record) =
+        let Some(NotificationOrData::Data(record)) =
             receive_message(&mut partial, 100, false, read).unwrap()
         else {
             panic!("not data");
@@ -417,10 +432,12 @@ mod tests {
         ]);
         assert_eq!(
             receive_message(&mut partial, 100, false, read).unwrap(),
-            NotificationOrData::Notification(crate::Notification::Unsupported {
-                ev_type: crate::Event::PartialDelivery,
-                data: raw,
-            })
+            Some(NotificationOrData::Notification(
+                crate::Notification::Unsupported {
+                    kind: crate::Event::PartialDelivery as u16,
+                    data: raw,
+                }
+            ))
         );
     }
 
@@ -451,8 +468,61 @@ mod tests {
     fn eof_discards_the_incomplete_record() {
         let mut partial = None;
         let read = reader(vec![data(b"partial", false, None), data(b"", false, None)]);
-        assert!(payload(receive_message(&mut partial, 100, false, read).unwrap()).is_empty());
+        assert_eq!(
+            receive_message(&mut partial, 100, false, read).unwrap(),
+            None
+        );
         assert!(partial.is_none());
+    }
+
+    /// The limit is for what the peer sends. A notification is the kernel's, and the
+    /// longest carries a message that this side sent: none is discarded, in one read or in
+    /// several.
+    #[test]
+    fn the_limit_never_discards_a_notification() {
+        let mut shutdown = (crate::Event::Shutdown as u16).to_ne_bytes().to_vec();
+        shutdown.extend_from_slice(&0_u16.to_ne_bytes());
+        shutdown.extend_from_slice(&12_u32.to_ne_bytes());
+        shutdown.extend_from_slice(&7_i32.to_ne_bytes());
+        let part = |octets: &[u8], end_of_record| {
+            Step::Piece(
+                octets.to_vec(),
+                Piece {
+                    len: octets.len(),
+                    notification: true,
+                    end_of_record,
+                    rcv_info: None,
+                    nxt_info: None,
+                    from: None,
+                },
+            )
+        };
+        let expected = Some(NotificationOrData::Notification(
+            crate::Notification::Shutdown(crate::Shutdown { assoc_id: 7 }),
+        ));
+        // A limit of 10 octets gives reads of 11: the notification of 12 comes in two parts
+        let mut partial = None;
+        let mut read = reader(vec![
+            part(&shutdown[..11], false),
+            part(&shutdown[11..], true),
+            data(b"01234567890", true, None),
+            data(b"ok", true, None),
+        ]);
+        assert_eq!(
+            receive_message(&mut partial, 10, true, &mut read).unwrap(),
+            expected
+        );
+        // A message of the peer over the limit is still discarded
+        assert_eq!(
+            receive_message(&mut partial, 10, true, &mut read)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            payload(receive_message(&mut partial, 10, true, read).unwrap()),
+            b"ok"
+        );
     }
     #[test]
     fn receive_growth_stays_within_the_message_limit() {

@@ -1,8 +1,8 @@
 //! One-to-many SCTP association endpoint.
 use crate::internal::{SocketCore, sys};
 use crate::{
-    AssociationId, BindxFlags, ConnStatus, ConnectedSocket, NotificationOrData, SendData,
-    SendOptions, SocketOptions,
+    AssociationId, BindxFlags, ConnStatus, ConnectedSocket, NotificationOrData, ReceivedInto,
+    SendData, SendOptions, SocketOptions,
 };
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
@@ -28,10 +28,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 ///
 /// // Answer a message on the association it came from.
 /// if let NotificationOrData::Data(message) = endpoint.recv().await? {
-///     let options = SendOptions {
-///         assoc_id: message.assoc_id().unwrap(),
-///         ..Default::default()
-///     };
+///     let options = SendOptions::new().association(message.assoc_id().unwrap());
 ///     endpoint.send(b"answer", options).await?;
 /// }
 /// # Ok(())
@@ -43,9 +40,18 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 ///     let _ = endpoint.accept();
 /// }
 /// ```
-#[derive(Debug)]
 pub struct OneToManyEndpoint {
     core: SocketCore,
+}
+
+/// The local address and the descriptor.
+impl std::fmt::Debug for OneToManyEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OneToManyEndpoint")
+            .field("local", &self.local_addr().ok())
+            .field("fd", &self.as_raw_fd())
+            .finish()
+    }
 }
 
 impl OneToManyEndpoint {
@@ -66,19 +72,25 @@ impl OneToManyEndpoint {
     /// Assembly uses `MSG_EOR` and assumes `SCTP_FRAGMENT_INTERLEAVE` level zero. Records over
     /// `options().max_message_size()` are drained before reporting `InvalidData`.
     pub async fn recv(&self) -> std::io::Result<NotificationOrData> {
-        self.core.recv().await
+        // A one-to-many socket has no end of stream: its associations end in notifications
+        self.core.recv().await?.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "the socket was shut down for reading",
+            )
+        })
     }
 
     /// Send a complete borrowed record to `options.assoc_id`. A zero association ID without a
     /// destination is rejected. PPID is in host byte order; waits for send-buffer capacity.
     pub async fn send(&self, payload: &[u8], options: SendOptions) -> std::io::Result<()> {
-        if options.assoc_id == 0 {
+        if options.assoc_id() == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "a destination association is required",
             ));
         }
-        let info = options.wire_info();
+        let info = options.info();
         self.core.send(None, payload, Some(&info)).await
     }
 
@@ -90,7 +102,7 @@ impl OneToManyEndpoint {
         payload: &[u8],
         options: SendOptions,
     ) -> std::io::Result<()> {
-        let info = options.wire_info();
+        let info = options.info();
         self.core.send(Some(address), payload, Some(&info)).await
     }
 
@@ -100,6 +112,29 @@ impl OneToManyEndpoint {
         self.core
             .send(to, &data.payload, data.snd_info.as_ref())
             .await
+    }
+
+    /// Receive the next message or notification into `buffer`, without an allocation when
+    /// one read gives a message whole. A message longer than the buffer is discarded and
+    /// reported as `InvalidData`.
+    pub async fn recv_into(&self, buffer: &mut [u8]) -> std::io::Result<ReceivedInto> {
+        self.core.recv_into(buffer).await?.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "the socket was shut down for reading",
+            )
+        })
+    }
+
+    /// Abort one association: its peer learns of it at once, with `reason` as the reason of
+    /// a user-initiated abort, and what was not delivered is lost on both sides.
+    pub fn abort(&self, assoc_id: AssociationId, reason: &[u8]) -> std::io::Result<()> {
+        let info = crate::SendInfo {
+            flags: crate::consts::SCTP_ABORT,
+            assoc_id,
+            ..Default::default()
+        };
+        sys::sctp_sendmsg_once(self.as_fd(), None, reason, Some(&info))
     }
 
     /// Move an association and its queued messages into a separate one-to-one socket.

@@ -25,9 +25,18 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug)]
 pub struct Socket {
     core: SocketCore,
+}
+
+/// The local address and the descriptor.
+impl std::fmt::Debug for Socket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Socket")
+            .field("local", &self.local_addr().ok())
+            .field("fd", &self.as_raw_fd())
+            .finish()
+    }
 }
 
 impl Socket {
@@ -76,9 +85,9 @@ impl Socket {
         sys::sctp_bindx_internal(self.as_fd(), addrs, flags)
     }
 
-    /// Query the local addresses. Before establishment, use association ID zero.
-    pub fn local_addrs(&self, assoc_id: AssociationId) -> std::io::Result<Vec<SocketAddr>> {
-        sys::sctp_getladdrs_internal(self.as_fd(), assoc_id)
+    /// The addresses that the socket is bound to.
+    pub fn local_addrs(&self) -> std::io::Result<Vec<SocketAddr>> {
+        sys::sctp_getladdrs_internal(self.as_fd(), 0)
     }
 
     /// Become a one-to-one accepting listener. A one-to-many socket returns `InvalidInput`

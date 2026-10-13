@@ -10,11 +10,7 @@
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> std::io::Result<()> {
 //!     // Stream 1, and the payload protocol identifier of NGAP
-//!     let options = SendOptions {
-//!         stream_id: 1,
-//!         ppid: 60,
-//!         ..Default::default()
-//!     };
+//!     let options = SendOptions::new().stream(1).ppid(60);
 //!
 //!     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
 //!     socket.bind("127.0.0.1:0".parse().unwrap())?;
@@ -23,7 +19,7 @@
 //!
 //!     let server = async {
 //!         let (association, _peer) = listener.accept().await?;
-//!         if let NotificationOrData::Data(message) = association.recv().await? {
+//!         if let Some(NotificationOrData::Data(message)) = association.recv().await? {
 //!             let text = String::from_utf8_lossy(&message.payload);
 //!             let (stream, ppid) = (message.stream_id(), message.ppid());
 //!             println!("server: {text:?} on stream {stream:?} with PPID {ppid:?}");
@@ -35,7 +31,7 @@
 //!         let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
 //!         let (association, _) = socket.connect(address).await?;
 //!         association.send(b"ping", options).await?;
-//!         if let NotificationOrData::Data(message) = association.recv().await? {
+//!         if let Some(NotificationOrData::Data(message)) = association.recv().await? {
 //!             println!("client: {:?}", String::from_utf8_lossy(&message.payload));
 //!         }
 //!         std::io::Result::Ok(())
@@ -101,7 +97,9 @@
 //!   `recv` future loses nothing: the next call continues the message.
 //! - A received message longer than `options().max_message_size()`, 4 MiB by
 //!   default, is discarded and reported as an `InvalidData` error. The next
-//!   `recv` returns the message after it.
+//!   `recv` returns the message after it. A notification is never discarded.
+//! - `recv_into` receives into a buffer of the caller, without an allocation
+//!   when one read gives the message whole.
 //! - `send` waits for room in the send buffer. A dropped `send` future has
 //!   sent nothing.
 //! - A message shorter than a packet, sent while the one before it is not
@@ -111,40 +109,88 @@
 //!   200 ms a message without it, and 9 µs with it.
 //! - A received message holds the memory of its octets and no more.
 //! - A sent message must fit in the send buffer (`SO_SNDBUF`): a longer one
-//!   fails with `EMSGSIZE`. An empty one fails with `EINVAL`, as does a stream
-//!   that the association does not have. After the end of the association a
-//!   send fails with `EPIPE`.
+//!   fails with `EMSGSIZE`. An empty one is `InvalidInput`, as is a stream
+//!   that the association does not have: the error says which.
 //! - `ReceivedData::stream_id`, `ppid` and `assoc_id` read the receive
 //!   information (`SCTP_RCVINFO`) that every socket requests. They return
-//!   `None` after `options().request_rcvinfo(false)`, and for the empty
-//!   message that ends an association.
+//!   `None` after `options().request_rcvinfo(false)`.
 //!
 //! # The end of an association
 //!
-//! On a [`ConnectedSocket`], the end of the association reaches `recv` as
-//! follows, and stays: every later call returns it again, and none waits. The
-//! notifications come first, when subscribed.
+//! On a [`ConnectedSocket`], `recv` returns `None` for an association that was
+//! shut down and an error for one that was aborted or lost:
 //!
-//! | What happened | `recv` returns | Notifications |
-//! | --- | --- | --- |
-//! | The peer closed its socket or shut the association down | a message with an empty payload | `Shutdown`, then `AssociationChange` with `ShutdownComplete` |
-//! | This side called `shutdown(Shutdown::Write)`, and the peer has answered | a message with an empty payload, after what the peer had still sent | `AssociationChange` with `ShutdownComplete` |
-//! | The peer aborted the association | an error, `ConnectionReset` | `AssociationChange` with `CommLost` |
+//! ```no_run
+//! # async fn serve(association: oxirush_sctp::ConnectedSocket) -> std::io::Result<()> {
+//! while let Some(received) = association.recv().await? {
+//!     println!("{received:?}");
+//! }
+//! // The peer has closed, or this side has shut the association down
+//! # Ok(())
+//! # }
+//! ```
 //!
-//! An association that is lost in another way ends with the error that Linux
-//! gives its socket. A [`OneToManyEndpoint`] learns of the end of an
-//! association from the notifications only.
+//! Linux reports the end once, to the call that happens to be there. The crate
+//! records it wherever it learns of it, in `recv`, in `send` or in a
+//! notification, and every later call returns it at once: none waits.
 //!
-//! A dropped socket shuts its association down. With
-//! `options().set_linger(Some(Duration::ZERO))` it aborts it instead. Other
-//! durations are refused, because closing would then block the runtime.
+//! | What happened | `recv` returns, at each call | `send` returns, at each call | Notifications, when subscribed |
+//! | --- | --- | --- | --- |
+//! | The peer closed its socket or shut the association down | what the peer had sent, then `None` | `BrokenPipe` | `Shutdown`, then `AssociationChange` with `ShutdownComplete` |
+//! | The peer aborted, or was dropped with a message that it had not read | `ConnectionReset` | `ConnectionReset` | `AssociationChange` with `CommLost`, before the error |
+//! | The peer was lost: nothing was acknowledged up to the retransmission limit | `TimedOut` | `TimedOut` | `AssociationChange` with `CommLost`, before the error |
+//! | This side called `shutdown(Shutdown::Write)` | what the peer had still sent, then `None` once the peer has answered | `BrokenPipe`, from the call on | `AssociationChange` with `ShutdownComplete` |
+//! | This side called `shutdown(Shutdown::Read)` | `None`, from the call on | sends: the association lives | none |
+//! | This side called `shutdown(Shutdown::Both)` | `None`, from the call on | `BrokenPipe`, from the call on | `AssociationChange` with `ShutdownComplete` |
+//! | `connect` failed | nothing: `connect` returns the error, such as `ConnectionRefused` or `TimedOut`, and has consumed the socket | | |
+//!
+//! Each row is the same whichever call learns of the end first: a `send` that
+//! takes the error of an abort leaves it for `recv`, which first returns what
+//! the kernel still holds of the association. A [`OneToManyEndpoint`] learns of
+//! the end of an association from the notifications only.
+//!
+//! `close(deadline)` on a [`ConnectedSocket`] loses nothing that was sent: it
+//! shuts the association down for writing, reads until the peer has answered
+//! and returns the messages that the peer had still sent. A dropped socket is
+//! closed by Linux, which shuts the association down in the background when
+//! everything that it received was read, and aborts it when a message or a
+//! notification was not: what this side had sent and the peer had not
+//! acknowledged is then lost. With `options().set_linger(Some(Duration::ZERO))`
+//! a drop always aborts, as `abort` does at once. Other durations are refused,
+//! because closing would then block the runtime.
 //!
 //! # Payload protocol identifiers
 //!
-//! `SendOptions::ppid` and `ReceivedData::ppid` are plain numbers: 60 is NGAP.
-//! The lower-level `SendInfo::ppid`, `RcvInfo::ppid` and `NxtInfo::ppid` hold
-//! the identifier as the kernel carries it, in network byte order:
-//! `60_u32.to_be()`.
+//! A payload protocol identifier is a plain number in every call and in every
+//! value: 60 is NGAP, in `SendOptions::ppid`, `SendInfo::ppid`,
+//! `ReceivedData::ppid`, `RcvInfo::ppid` and `NxtInfo::ppid`. The crate converts
+//! it to the network byte order that the kernel carries.
+//!
+//! # Addresses
+//!
+//! A socket that connects without being bound offers the peer every address
+//! of the host, loopback and the others: the peer may then send to any of
+//! them. `bind` or `bindx` before `connect` to offer what was chosen:
+//!
+//! ```
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() -> std::io::Result<()> {
+//! use oxirush_sctp::{Socket, SocketToAssociation};
+//! # let listener = Socket::new_v4(SocketToAssociation::OneToOne)?;
+//! # listener.bind("127.0.0.1:0".parse().unwrap())?;
+//! # let listener = listener.listen(1)?;
+//! # let server = listener.local_addr()?;
+//!
+//! let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+//! client.bind("127.0.0.1:0".parse().unwrap())?;
+//! let (association, _) = client.connect(server).await?;
+//! # let (accepted, _) = listener.accept().await?;
+//! // The peer sees the one address that was bound
+//! assert_eq!(accepted.peer_addrs()?.len(), 1);
+//! # let _ = association;
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! # What it covers
 //!
@@ -160,11 +206,18 @@
 //! | 6.1.2 `SCTP_PEER_ADDR_CHANGE` | `Notification::PeerAddressChange` |
 //! | 6.1.5 `SCTP_SHUTDOWN_EVENT` | `Notification::Shutdown` |
 //! | 6.1.11 `SCTP_SEND_FAILED_EVENT` | `Notification::SendFailure` |
-//! | 6.1: the other notifications | `Notification::Unsupported`, with their type and octets |
+//! | 6.1: the other notifications | `Notification::Unsupported`, with the number of their type and their octets |
+//! | 6.1.3 `SCTP_REMOTE_ERROR` | `Notification::RemoteError` |
+//! | 6.1.7 `SCTP_PARTIAL_DELIVERY_EVENT` | `Notification::PartialDelivery` |
+//! | 6.1.9 `SCTP_SENDER_DRY_EVENT` | `Notification::SenderDry` |
 //! | 8.1.1 `SCTP_RTOINFO` | `set_rto_info`, `rto_info` |
+//! | 8.1.2 `SCTP_ASSOCINFO` | `set_association_params`, `association_params`: the retransmission limit of an association |
 //! | 8.1.3 `SCTP_INITMSG` | `set_init_params` |
 //! | 8.1.4 `SO_LINGER` | `set_linger`, off or zero |
 //! | 8.1.5 `SCTP_NODELAY` | `set_nodelay`, `nodelay` |
+//! | 8.1.9 `SCTP_PRIMARY_ADDR` | `set_primary_address` |
+//! | 8.1.19 `SCTP_DELAYED_SACK` | `set_sack_info`, `sack_info` |
+//! | `SO_SNDBUF`, `SO_RCVBUF`, `IP_TOS`, `IPV6_TCLASS` | `set_send_buffer_size`, `set_recv_buffer_size`, `set_dscp` and their getters |
 //! | 8.1.12 `SCTP_PEER_ADDR_PARAMS` | `peer_address_params`, `set_peer_address_params`, `request_heartbeat`: heartbeat and retransmission limit |
 //! | 8.1.28 `SCTP_EVENT` | `subscribe_events`, `unsubscribe_events` |
 //! | 8.1.29 `SCTP_RECVRCVINFO`, 8.1.30 `SCTP_RECVNXTINFO` | `request_rcvinfo`, `request_nxtinfo` |
@@ -181,7 +234,8 @@
 //! | SCTP itself | The protocol runs in the Linux kernel: the crate is not an SCTP implementation. |
 //! | Other systems | Linux only. |
 //! | SCTP over DTLS | The data channels of WebRTC are another stack: not served. |
-//! | The rest of RFC 6458 | Not wrapped: among others authentication, partial reliability, the association parameters, the choice of the primary path and the buffer sizes. The sockets implement `AsFd` and `AsRawFd` for them. The interfaces that the RFC deprecates are left out on purpose. |
+//! | Many associations on one socket | On a [`OneToManyEndpoint`], a message that arrives in several parts holds back the messages of every other association until it is whole: Linux delivers one message at a time to a socket (`SCTP_FRAGMENT_INTERLEAVE` 0), and the crate has one assembler for a socket. With a receive buffer of 16 KiB, a message of 1 MB from one association held the messages of two others for 3.9 s on loopback, and a peer that stops in the middle of a message holds them for as long. For peers that are not trusted, a [`Listener`] gives each association a socket of its own. |
+//! | The rest of RFC 6458 | Not wrapped: among others authentication, partial reliability and stream reconfiguration. The sockets implement `AsFd` and `AsRawFd` for them. The interfaces that the RFC deprecates are left out on purpose. |
 //!
 //! # Terms
 //!
@@ -199,15 +253,21 @@
 //! # Tests
 //!
 //! The tests open SCTP associations over loopback, so the kernel's `sctp`
-//! module must be available. The connect-timeout test needs `unshare` and
-//! `ip`, and the 4 MiB message tests need `net.core.wmem_max` and
-//! `net.core.rmem_max` large enough; each skips otherwise.
+//! module must be available. The tests of a connection that times out and
+//! of a peer that is lost need `unshare` and `ip`, and the tests of long
+//! messages need `net.core.wmem_max` and `net.core.rmem_max` large enough;
+//! each skips otherwise.
 //!
 //! `fuzz/` has three `cargo fuzz` targets for what the kernel hands over, which
 //! CI runs for a minute each: a notification of any octets, the control
 //! messages of a `recvmsg`, and the assembly of messages from any sequence of
 //! parts.
 #![warn(missing_docs)]
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+compile_error!(
+    "oxirush-sctp is for Linux: it calls the SCTP of the Linux kernel through its sockets API"
+);
 
 mod connected_socket;
 mod endpoint;
@@ -246,9 +306,9 @@ mod types;
 
 #[doc(inline)]
 pub use types::{
-    AssocChangeState, AssociationChange, AssociationId, BindxFlags, ConnState, ConnStatus, Event,
-    EventSubscriptionError, Notification, NotificationOrData, NxtInfo, PeerAddress,
-    PeerAddressChange, PeerAddressParams, PeerAddressState, RcvInfo, ReceivedData, RtoInfo,
-    SendData, SendFailure, SendInfo, SendOptions, Shutdown, SocketToAssociation,
-    SubscribeEventAssocId,
+    AssocChangeState, AssociationChange, AssociationId, AssociationParams, BindxFlags, ConnState,
+    ConnStatus, Event, EventSubscriptionError, Notification, NotificationOrData, NxtInfo,
+    PartialDelivery, PeerAddress, PeerAddressChange, PeerAddressParams, PeerAddressState, RcvInfo,
+    ReceivedData, ReceivedInto, RemoteError, RtoInfo, SackInfo, SendData, SendFailure, SendInfo,
+    SendOptions, Shutdown, SocketToAssociation, SubscribeEventAssocId,
 };

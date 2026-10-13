@@ -1,6 +1,9 @@
 //! Borrowed configuration shared by every SCTP socket role.
 use crate::internal::{SocketCore, sys};
-use crate::{AssociationId, Event, PeerAddressParams, RtoInfo, SendInfo, SubscribeEventAssocId};
+use crate::{
+    AssociationId, AssociationParams, Event, PeerAddressParams, RtoInfo, SackInfo, SendInfo,
+    SubscribeEventAssocId,
+};
 use std::net::SocketAddr;
 use std::os::fd::AsFd;
 
@@ -85,7 +88,7 @@ impl SocketOptions<'_> {
         sys::request_nxtinfo_internal(self.core.as_fd(), on)
     }
 
-    /// Set wire-order ancillary defaults used when a send supplies no `SendInfo`.
+    /// Set what a message is sent with when a send supplies no `SendInfo`.
     pub fn set_default_sendinfo(&self, info: SendInfo) -> std::io::Result<()> {
         sys::sctp_set_default_sendinfo_internal(self.core.as_fd(), info)
     }
@@ -150,8 +153,84 @@ impl SocketOptions<'_> {
         sys::request_heartbeat_internal(self.core.as_fd(), assoc_id, address)
     }
 
+    /// The parameters of an association, or the defaults of the socket when the ID is zero
+    /// (`SCTP_ASSOCINFO`): the retransmissions after which an association is lost, and the
+    /// life of a cookie.
+    pub fn association_params(
+        &self,
+        assoc_id: AssociationId,
+    ) -> std::io::Result<AssociationParams> {
+        sys::association_params_internal(self.core.as_fd(), assoc_id)
+    }
+
+    /// Change the retransmission limit of an association and the life of its cookie. A zero
+    /// leaves a value as it is. Linux refuses a limit above the sum of the limits of the
+    /// paths ([`PeerAddressParams::path_max_retrans`]).
+    pub fn set_association_params(&self, params: AssociationParams) -> std::io::Result<()> {
+        sys::set_association_params_internal(self.core.as_fd(), &params)
+    }
+
+    /// How long an acknowledgement may wait (`SCTP_DELAYED_SACK`).
+    pub fn sack_info(&self, assoc_id: AssociationId) -> std::io::Result<SackInfo> {
+        sys::sack_info_internal(self.core.as_fd(), assoc_id)
+    }
+
+    /// Change how long an acknowledgement may wait, in milliseconds, and after how many
+    /// packets one is sent at once. A zero leaves a value as it is, and a frequency of 1
+    /// turns the delay off.
+    pub fn set_sack_info(&self, info: SackInfo) -> std::io::Result<()> {
+        sys::set_sack_info_internal(self.core.as_fd(), &info)
+    }
+
+    /// Send to this address of the peer from now on (`SCTP_PRIMARY_ADDR`). It is one of
+    /// [`peer_addrs`][crate::ConnectedSocket::peer_addrs]; a one-to-one socket ignores the
+    /// association ID.
+    pub fn set_primary_address(
+        &self,
+        assoc_id: AssociationId,
+        address: SocketAddr,
+    ) -> std::io::Result<()> {
+        sys::set_primary_address_internal(self.core.as_fd(), assoc_id, address)
+    }
+
+    /// Mark what the socket sends with a DSCP, 0 to 63, for IPv4 and for IPv6: 46 is
+    /// expedited forwarding. Set it before `connect` or `listen` for the first packets to
+    /// have it.
+    pub fn set_dscp(&self, dscp: u8) -> std::io::Result<()> {
+        sys::set_dscp_internal(self.core.as_fd(), dscp)
+    }
+
+    /// The DSCP that the socket sends with.
+    pub fn dscp(&self) -> std::io::Result<u8> {
+        sys::dscp_internal(self.core.as_fd())
+    }
+
+    /// Ask for a send buffer of this many octets (`SO_SNDBUF`). Linux gives twice the
+    /// number, up to `net.core.wmem_max`, and [`send_buffer_size`][Self::send_buffer_size]
+    /// reports what it gave. A message must fit in it.
+    pub fn set_send_buffer_size(&self, octets: usize) -> std::io::Result<()> {
+        sys::set_buffer_size_internal(self.core.as_fd(), libc::SO_SNDBUF, octets)
+    }
+
+    /// The size of the send buffer, in octets.
+    pub fn send_buffer_size(&self) -> std::io::Result<usize> {
+        sys::buffer_size_internal(self.core.as_fd(), libc::SO_SNDBUF)
+    }
+
+    /// Ask for a receive buffer of this many octets (`SO_RCVBUF`). Linux gives twice the
+    /// number, up to `net.core.rmem_max`.
+    pub fn set_recv_buffer_size(&self, octets: usize) -> std::io::Result<()> {
+        sys::set_buffer_size_internal(self.core.as_fd(), libc::SO_RCVBUF, octets)
+    }
+
+    /// The size of the receive buffer, in octets.
+    pub fn recv_buffer_size(&self) -> std::io::Result<usize> {
+        sys::buffer_size_internal(self.core.as_fd(), libc::SO_RCVBUF)
+    }
+
     /// Set the largest complete message returned by `recv` (4 MiB by default). Longer records
-    /// are drained and reported as `InvalidData`; the next call starts at the next record.
+    /// are drained and reported as `InvalidData`; the next call starts at the next record. A
+    /// notification is never discarded.
     pub fn set_max_message_size(&self, octets: usize) {
         self.core.set_max_message_size(octets);
     }

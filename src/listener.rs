@@ -1,6 +1,6 @@
 //! One-to-one association listener.
 use crate::internal::{SocketCore, sys};
-use crate::{AssociationId, BindxFlags, ConnectedSocket, SocketOptions};
+use crate::{BindxFlags, ConnectedSocket, SocketOptions};
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 
@@ -14,9 +14,11 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 /// loop {
 ///     let (association, peer) = listener.accept().await?;
 ///     tokio::spawn(async move {
-///         while let Ok(received) = association.recv().await {
+///         // `None` when the peer has closed, an error when it has aborted
+///         while let Some(received) = association.recv().await? {
 ///             println!("{peer}: {received:?}");
 ///         }
+///         std::io::Result::Ok(())
 ///     });
 /// }
 /// # }
@@ -27,9 +29,18 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 ///     let _ = listener.recv();
 /// }
 /// ```
-#[derive(Debug)]
 pub struct Listener {
     core: SocketCore,
+}
+
+/// The local address and the descriptor.
+impl std::fmt::Debug for Listener {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Listener")
+            .field("local", &self.local_addr().ok())
+            .field("fd", &self.as_raw_fd())
+            .finish()
+    }
 }
 
 impl Listener {
@@ -57,9 +68,9 @@ impl Listener {
         sys::sctp_bindx_internal(self.as_fd(), addrs, flags)
     }
 
-    /// Query listening addresses; use association ID zero.
-    pub fn local_addrs(&self, assoc_id: AssociationId) -> std::io::Result<Vec<SocketAddr>> {
-        sys::sctp_getladdrs_internal(self.as_fd(), assoc_id)
+    /// The addresses that the listener is bound to.
+    pub fn local_addrs(&self) -> std::io::Result<Vec<SocketAddr>> {
+        sys::sctp_getladdrs_internal(self.as_fd(), 0)
     }
 
     pub(crate) fn from_core(core: SocketCore) -> Self {

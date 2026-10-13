@@ -43,7 +43,7 @@ pub(crate) fn sctp_peeloff_internal(
         );
         if result < 0 {
             let error = std::io::Error::last_os_error();
-            tracing::error!("Error: {error} during `sctp_peeloff` using `getsockopt`.");
+            tracing::debug!("Error: {error} during `sctp_peeloff` using `getsockopt`.");
             Err(error)
         } else {
             // Safety: the kernel returned a new descriptor, which nothing else owns.
@@ -96,7 +96,7 @@ pub(crate) fn sctp_listen_internal(fd: BorrowedFd<'_>, backlog: i32) -> std::io:
     let result = unsafe { libc::listen(fd.as_raw_fd(), backlog) };
     if result < 0 {
         let error = std::io::Error::last_os_error();
-        tracing::error!("Error: {error} during `sctp_listen`.");
+        tracing::debug!("Error: {error} during `sctp_listen`.");
         Err(error)
     } else {
         Ok(())
@@ -113,6 +113,7 @@ pub(crate) fn initiate_connect(
             "no peer addresses",
         ));
     }
+    super::check_addresses(fd, addrs)?;
     let mut addrs_u8: Vec<u8> = vec![];
 
     tracing::debug!("Connecting to {addrs:?} using `getsockopt`");
@@ -150,7 +151,7 @@ pub(crate) fn initiate_connect(
         if result < 0 {
             let last_error = std::io::Error::last_os_error();
             if last_error.raw_os_error() != Some(libc::EINPROGRESS) {
-                tracing::error!("Error: '{last_error}' while connecting using `getsockopt`.");
+                tracing::debug!("Error: '{last_error}' while connecting using `getsockopt`.");
                 return Err(last_error);
             }
         }

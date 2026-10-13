@@ -107,7 +107,7 @@ async fn accepted_and_peeled_off_sockets_inherit_nodelay() {
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     socket.options().set_nodelay(true).unwrap();
     let listener = socket.listen(10).unwrap();
-    let bindaddr = listener.local_addrs(0).unwrap()[0];
+    let bindaddr = listener.local_addrs().unwrap()[0];
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
     let _connected = client.connectx(&[bindaddr]).await.unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
@@ -145,7 +145,7 @@ async fn accepted_and_peeled_off_sockets_inherit_nodelay() {
 }
 
 async fn recv_data(socket: &ConnectedSocket) -> Vec<u8> {
-    match socket.recv().await.unwrap() {
+    match socket.recv().await.unwrap().unwrap() {
         NotificationOrData::Data(data) => data.payload,
         other => panic!("not data: {other:?}"),
     }
@@ -159,12 +159,7 @@ async fn third_message_lag(nodelay: bool) -> std::time::Duration {
     client.options().set_nodelay(nodelay).unwrap();
     let (connected, _) = client.connectx(&[bindaddr]).await.unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
-    let send = |payload: &[u8]| {
-        connected.send_data(SendData {
-            payload: payload.to_vec(),
-            snd_info: None,
-        })
-    };
+    let send = |payload: &[u8]| connected.send_data(SendData::new(payload.to_vec()));
 
     // Linux acknowledges the first DATA chunk of an association at once, then every second
     // packet or when its delayed SACK timer (200 ms by default) expires.
@@ -211,7 +206,7 @@ async fn descriptors_are_close_on_exec() {
         SocketToAssociation::OneToMany,
     ] {
         for v4 in [true, false] {
-            assert_close_on_exec_and_non_blocking(&create_client_socket(association.clone(), v4));
+            assert_close_on_exec_and_non_blocking(&create_client_socket(association, v4));
         }
     }
 
@@ -241,35 +236,21 @@ async fn descriptors_are_close_on_exec() {
 
 #[tokio::test]
 async fn rto_info_round_trips() {
-    let rto_info = RtoInfo {
-        assoc_id: 0,
-        initial: 500,
-        max: 4000,
-        min: 100,
-    };
+    let rto_info = RtoInfo::new(500, 4000, 100);
     let socket = create_client_socket(SocketToAssociation::OneToOne, true);
     socket.options().set_rto_info(rto_info.clone()).unwrap();
     assert_eq!(socket.options().rto_info(0).unwrap(), rto_info);
     // Zero leaves a value unchanged.
     socket
         .options()
-        .set_rto_info(RtoInfo {
-            max: 6000,
-            ..Default::default()
-        })
+        .set_rto_info(RtoInfo::new(0, 6000, 0))
         .unwrap();
     assert_eq!(
         socket.options().rto_info(0).unwrap(),
-        RtoInfo {
-            max: 6000,
-            ..rto_info.clone()
-        }
+        RtoInfo::new(500, 6000, 100)
     );
     // The kernel checks the values.
-    let invalid = RtoInfo {
-        min: 7000,
-        ..rto_info.clone()
-    };
+    let invalid = RtoInfo::new(0, 0, 7000);
     assert!(socket.options().set_rto_info(invalid).is_err());
 
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
@@ -282,10 +263,10 @@ async fn rto_info_round_trips() {
     assert_eq!((association.max, association.min), (6000, 100));
     connected
         .options()
-        .set_rto_info(RtoInfo {
-            assoc_id,
-            max: 2000,
-            ..Default::default()
+        .set_rto_info({
+            let mut rto = RtoInfo::new(0, 2000, 0);
+            rto.assoc_id = assoc_id;
+            rto
         })
         .unwrap();
     assert_eq!(connected.options().rto_info(assoc_id).unwrap().max, 2000);

@@ -31,21 +31,12 @@ async fn connected_default_sendinfo_success() {
 
     let sid = 5;
     let ppid = 0x1234;
-    let sendinfo = SendInfo {
-        sid,
-        ppid,
-        flags: 0,
-        assoc_id: 0,
-        context: 0,
-    };
+    let sendinfo = SendInfo::from(SendOptions::new().stream(sid).ppid(ppid));
 
     let result = accepted.options().set_default_sendinfo(sendinfo);
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
-    let senddata = SendData {
-        payload: b"hello world!".to_vec(),
-        snd_info: None,
-    };
+    let senddata = SendData::new(b"hello world!".to_vec());
     let result = accepted.send_data(senddata.clone()).await;
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
@@ -53,16 +44,16 @@ async fn connected_default_sendinfo_success() {
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
     let data = result.unwrap();
     assert!(
-        matches!(data, NotificationOrData::Data(ReceivedData { .. })),
+        matches!(data, Some(NotificationOrData::Data(ReceivedData { .. }))),
         "{data:#?}"
     );
 
-    if let NotificationOrData::Data(ReceivedData {
+    if let Some(NotificationOrData::Data(ReceivedData {
         payload,
         rcv_info,
         nxt_info,
         ..
-    }) = data
+    })) = data
     {
         assert!(
             payload == b"hello world!".to_vec(),
@@ -111,18 +102,9 @@ async fn connected_send_some_sendinfo_success() {
 
     let sid = 5;
     let ppid = 0x1234;
-    let snd_info = SendInfo {
-        sid,
-        ppid,
-        flags: 1,
-        assoc_id: 0,
-        context: 0,
-    };
+    let snd_info = SendInfo::from(SendOptions::new().stream(sid).ppid(ppid).unordered(true));
 
-    let senddata = SendData {
-        payload: b"hello world!".to_vec(),
-        snd_info: Some(snd_info),
-    };
+    let senddata = SendData::new(b"hello world!".to_vec()).with_info(snd_info);
     let result = accepted.send_data(senddata).await;
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
@@ -130,16 +112,16 @@ async fn connected_send_some_sendinfo_success() {
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
     let data = result.unwrap();
     assert!(
-        matches!(data, NotificationOrData::Data(ReceivedData { .. })),
+        matches!(data, Some(NotificationOrData::Data(ReceivedData { .. }))),
         "{data:#?}"
     );
 
-    if let NotificationOrData::Data(ReceivedData {
+    if let Some(NotificationOrData::Data(ReceivedData {
         payload,
         rcv_info,
         nxt_info,
         ..
-    }) = data
+    })) = data
     {
         assert!(
             payload == b"hello world!".to_vec(),
@@ -196,13 +178,17 @@ async fn test_shutdown_event() {
     assert!(
         matches!(
             data,
-            NotificationOrData::Notification(Notification::Shutdown(Shutdown { .. }))
+            Some(NotificationOrData::Notification(Notification::Shutdown(
+                Shutdown { .. }
+            )))
         ),
         "{data:#?}"
     );
 
-    if let NotificationOrData::Notification(Notification::Shutdown(Shutdown { assoc_id, .. })) =
-        data
+    if let Some(NotificationOrData::Notification(Notification::Shutdown(Shutdown {
+        assoc_id,
+        ..
+    }))) = data
     {
         assert_eq!(
             client_assoc_id, assoc_id,
@@ -234,7 +220,7 @@ async fn a_zero_linger_aborts_the_association_on_close() {
     drop(accepted);
 
     // An ABORT, not a SHUTDOWN: the association is lost at once.
-    let data = connected.recv().await.unwrap();
+    let data = connected.recv().await.unwrap().unwrap();
     assert!(
         matches!(
             data,
@@ -263,7 +249,7 @@ async fn test_get_status() {
     assert!(accept.is_ok(), "{:#?}", accept.err().unwrap());
     let (accepted, client_addr) = accept.unwrap();
 
-    let result = connected.status(0);
+    let result = connected.status();
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
     let status = result.unwrap();
     assert_eq!(status.state, ConnState::Established);
@@ -273,7 +259,7 @@ async fn test_get_status() {
         client_assoc_id, status.assoc_id
     );
 
-    let result = accepted.status(0);
+    let result = accepted.status();
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
     let status = result.unwrap();
     assert!(matches!(status.state, ConnState::Established));
@@ -295,23 +281,14 @@ async fn futures_are_send() {
         .into_endpoint(2)
         .unwrap();
     assert_send(&endpoint.recv());
-    assert_send(&endpoint.send_data(
-        Some(bindaddr),
-        SendData {
-            payload: vec![],
-            snd_info: None,
-        },
-    ));
+    assert_send(&endpoint.send_data(Some(bindaddr), SendData::new(vec![])));
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
     let addrs = [bindaddr];
     let connect = client.connectx(&addrs);
     assert_send(&connect);
     let (connected, _) = connect.await.unwrap();
     assert_send(&connected.recv());
-    assert_send(&connected.send_data(SendData {
-        payload: vec![],
-        snd_info: None,
-    }));
+    assert_send(&connected.send_data(SendData::new(vec![])));
 }
 
 #[tokio::test]
@@ -340,10 +317,7 @@ async fn send_waits_for_room_instead_of_failing_with_would_block() {
     let (connected, _) = client.connectx(&[bindaddr]).await.unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
 
-    let data = SendData {
-        payload: vec![0x5a; 1024],
-        snd_info: None,
-    };
+    let data = SendData::new(vec![0x5a; 1024]);
     // The peer does not read: its window and then the send buffer fill up.
     let mut sent = 0;
     loop {
@@ -360,7 +334,7 @@ async fn send_waits_for_room_instead_of_failing_with_would_block() {
     let send = tokio::time::timeout(Duration::from_secs(5), connected.send_data(data.clone()));
     let read = async {
         for _ in 0..=sent {
-            let received = accepted.recv().await.unwrap();
+            let received = accepted.recv().await.unwrap().unwrap();
             assert!(matches!(received, NotificationOrData::Data(_)));
         }
     };
@@ -393,15 +367,9 @@ async fn send_after_peer_closed_fails_without_sigpipe() {
     let (accepted, _) = listener.accept().await.unwrap();
     drop(accepted);
     // The association has ended once the client reads the end of the stream.
-    match connected.recv().await.unwrap() {
-        NotificationOrData::Data(data) => assert!(data.payload.is_empty()),
-        other => panic!("not the end of the stream: {other:?}"),
-    }
+    assert_eq!(connected.recv().await.unwrap(), None);
     let result = connected
-        .send_data(SendData {
-            payload: b"too late".to_vec(),
-            snd_info: None,
-        })
+        .send_data(SendData::new(b"too late".to_vec()))
         .await;
 
     let raised = unsafe {
@@ -438,16 +406,9 @@ async fn pair_receiving_rcvinfo_and_nxtinfo() -> (ConnectedSocket, ConnectedSock
 
 async fn send_two_messages(sending: &ConnectedSocket) {
     for (sid, payload) in [(1, &b"first"[..]), (2, &b"second message"[..])] {
-        let snd_info = SendInfo {
-            sid,
-            ppid: 60_u32.to_be(),
-            ..Default::default()
-        };
+        let snd_info = SendInfo::from(SendOptions::new().stream(sid).ppid(60));
         sending
-            .send_data(SendData {
-                payload: payload.to_vec(),
-                snd_info: Some(snd_info),
-            })
+            .send_data(SendData::new(payload.to_vec()).with_info(snd_info))
             .await
             .unwrap();
     }
@@ -458,7 +419,7 @@ fn assert_first_with_infos(received: NotificationOrData) {
         NotificationOrData::Data(data) => {
             assert_eq!(data.payload, b"first");
             let rcv_info = data.rcv_info.expect("no RcvInfo");
-            assert_eq!((rcv_info.sid, rcv_info.ppid), (1, 60_u32.to_be()));
+            assert_eq!((rcv_info.sid, rcv_info.ppid), (1, 60));
             let nxt_info = data.nxt_info.expect("no NxtInfo");
             assert_eq!((nxt_info.sid, nxt_info.length), (2, 14));
         }
@@ -475,7 +436,7 @@ async fn recv_returns_rcvinfo_and_nxtinfo_together() {
         .subscribe_events(&[Event::DataIo], SubscribeEventAssocId::All)
         .unwrap();
     send_two_messages(&sending).await;
-    assert_first_with_infos(receiving.recv().await.unwrap());
+    assert_first_with_infos(receiving.recv().await.unwrap().unwrap());
 }
 
 #[cfg(target_os = "linux")]
@@ -513,7 +474,7 @@ fn recv_skips_control_messages_of_other_levels() {
     let received = received_rx
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("`sctp_recv` did not return");
-    assert_first_with_infos(received.unwrap());
+    assert_first_with_infos(received.unwrap().unwrap());
 }
 
 fn set_int_option(socket: &impl std::os::unix::io::AsRawFd, level: i32, name: i32, value: i32) {
@@ -575,12 +536,7 @@ async fn pair_for_long_messages(
     // Retransmit quickly when the receive window reopens.
     client
         .options()
-        .set_rto_info(RtoInfo {
-            assoc_id: 0,
-            initial: 10,
-            max: 10,
-            min: 10,
-        })
+        .set_rto_info(RtoInfo::new(10, 10, 10))
         .unwrap();
     let (sending, _) = client.connectx(&[bindaddr]).await.unwrap();
     let (receiving, _) = listener.accept().await.unwrap();
@@ -607,13 +563,10 @@ async fn recv_returns_long_messages_whole() {
         long_payload(60_000),
     ] {
         sending
-            .send_data(SendData {
-                payload: payload.clone(),
-                snd_info: None,
-            })
+            .send_data(SendData::new(payload.clone()))
             .await
             .unwrap();
-        let received = data_payload(receiving.recv().await.unwrap());
+        let received = data_payload(receiving.recv().await.unwrap().unwrap());
         assert_eq!(received.len(), payload.len());
         assert!(received == payload);
     }
@@ -626,13 +579,10 @@ async fn recv_returns_partially_delivered_messages_whole() {
         return;
     };
     let payload = long_payload(len);
-    let send = sending.send_data(SendData {
-        payload: payload.clone(),
-        snd_info: None,
-    });
+    let send = sending.send_data(SendData::new(payload.clone()));
     let (sent, received) = tokio::join!(send, receiving.recv());
     sent.unwrap();
-    let received = data_payload(received.unwrap());
+    let received = data_payload(received.unwrap().unwrap());
     assert_eq!(received.len(), payload.len());
     assert!(received == payload);
 }
@@ -644,24 +594,29 @@ async fn recv_cancelled_in_the_middle_of_a_message_loses_nothing() {
         return;
     };
     let payload = long_payload(len);
-    let send = sending.send_data(SendData {
-        payload: payload.clone(),
-        snd_info: None,
-    });
+    let send = sending.send_data(SendData::new(payload.clone()));
+    // Each receive is polled once and dropped where it had got to, whatever the speed of
+    // the machine: a time-out cancelled none on a slow build, and the test said nothing.
     let receive = async {
+        use std::future::Future;
         let mut cancelled = 0;
         loop {
-            let recv = receiving.recv();
-            match tokio::time::timeout(std::time::Duration::from_millis(1), recv).await {
-                Ok(received) => return (received, cancelled),
-                Err(_) => cancelled += 1,
+            let polled = {
+                let mut recv = std::pin::pin!(receiving.recv());
+                std::future::poll_fn(|context| std::task::Poll::Ready(recv.as_mut().poll(context)))
+                    .await
+            };
+            match polled {
+                std::task::Poll::Ready(received) => return (received, cancelled),
+                std::task::Poll::Pending => cancelled += 1,
             }
+            tokio::task::yield_now().await;
         }
     };
     let (sent, (received, cancelled)) = tokio::join!(send, receive);
     sent.unwrap();
     assert!(cancelled > 0);
-    let received = data_payload(received.unwrap());
+    let received = data_payload(received.unwrap().unwrap());
     assert_eq!(received.len(), payload.len());
     assert!(received == payload);
 }
@@ -674,10 +629,7 @@ async fn recv_rejects_messages_longer_than_4_mib() {
     };
     for len in [max + 1, max] {
         let payload = long_payload(len);
-        let send = sending.send_data(SendData {
-            payload: payload.clone(),
-            snd_info: None,
-        });
+        let send = sending.send_data(SendData::new(payload.clone()));
         let ((), received) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             // A failed send must stop the transfer: there will be no message to receive.
             // Keep receive errors as values, since an oversized message should be rejected.
@@ -690,8 +642,8 @@ async fn recv_rejects_messages_longer_than_4_mib() {
             panic!(
                 "send/receive of {} octets did not complete within 10 seconds; sender: {:?}; receiver: {:?}",
                 len,
-                sending.status(0),
-                receiving.status(0),
+                sending.status(),
+                receiving.status(),
             )
         })
         .unwrap();
@@ -699,8 +651,8 @@ async fn recv_rejects_messages_longer_than_4_mib() {
             Err(error) if len > max => {
                 assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}")
             }
-            Ok(received) if len <= max => assert!(data_payload(received) == payload),
-            Ok(NotificationOrData::Data(data)) => {
+            Ok(received) if len <= max => assert!(data_payload(received.unwrap()) == payload),
+            Ok(Some(NotificationOrData::Data(data))) => {
                 panic!("{} octets received, of {}", data.payload.len(), len)
             }
             other => panic!("{:?}", other.map(|_| ())),
@@ -719,17 +671,16 @@ async fn recv_limit_is_set_per_socket_and_inherited_on_accept() {
     assert_eq!(receiving.options().max_message_size(), 1000);
     for len in [1001, 1000] {
         sending
-            .send_data(SendData {
-                payload: long_payload(len),
-                snd_info: None,
-            })
+            .send_data(SendData::new(long_payload(len)))
             .await
             .unwrap();
         match receiving.recv().await {
             Err(error) if len > 1000 => {
                 assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}")
             }
-            Ok(received) if len == 1000 => assert!(data_payload(received) == long_payload(len)),
+            Ok(received) if len == 1000 => {
+                assert!(data_payload(received.unwrap()) == long_payload(len))
+            }
             other => panic!("{} octets: {:?}", len, other.map(|_| ())),
         }
     }

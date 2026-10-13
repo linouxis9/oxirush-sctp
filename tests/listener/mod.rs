@@ -20,7 +20,7 @@ async fn listening_one_2_one_listen_accept_success() {
 
     // Get Peer Address
     let (accepted, _address) = accept.unwrap();
-    let result = accepted.peer_addrs(0);
+    let result = accepted.peer_addrs();
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 }
 
@@ -102,13 +102,13 @@ async fn listening_getladdrs_and_getpaddrs_of_many_addresses() {
         socket.bind(first).unwrap();
         let port = {
             let listener = socket.listen(10).unwrap();
-            let port = listener.local_addrs(0).unwrap()[0].port();
+            let port = listener.local_addrs().unwrap()[0].port();
             let more: Vec<SocketAddr> = (2..=20)
                 .map(|i| SocketAddr::from(([127, 0, 0, i], port)))
                 .collect();
             listener.bindx(&more, BindxFlags::Add).unwrap();
 
-            let mut laddrs = listener.local_addrs(0).unwrap();
+            let mut laddrs = listener.local_addrs().unwrap();
             assert_eq!(laddrs.len(), 20, "{laddrs:?}");
             laddrs.sort();
             // IPv6 sockets report IPv4 addresses as IPv4-mapped IPv6 addresses.
@@ -130,9 +130,9 @@ async fn listening_getladdrs_and_getpaddrs_of_many_addresses() {
                 .await
                 .unwrap();
             let (accepted, _) = listener.accept().await.unwrap();
-            let paddrs = connected.peer_addrs(0).unwrap();
+            let paddrs = connected.peer_addrs().unwrap();
             assert_eq!(paddrs.len(), 20, "{paddrs:?}");
-            assert_eq!(accepted.local_addrs(0).unwrap().len(), 20);
+            assert_eq!(accepted.local_addrs().unwrap().len(), 20);
             port
         };
         assert_ne!(port, 0);
@@ -145,13 +145,10 @@ async fn listening_getladdrs_and_getpaddrs_of_many_addresses() {
 async fn one_to_many_recv_reports_the_sender_address() {
     let (listener, bindaddr) = create_endpoint_bind_and_listen(true);
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let (client, assoc_id) = client_socket.connectx(&[bindaddr]).await.unwrap();
-    let client_addresses = client.local_addrs(assoc_id).unwrap();
+    let (client, _assoc_id) = client_socket.connectx(&[bindaddr]).await.unwrap();
+    let client_addresses = client.local_addrs().unwrap();
     client
-        .send_data(SendData {
-            payload: b"from the client".to_vec(),
-            snd_info: None,
-        })
+        .send_data(SendData::new(b"from the client".to_vec()))
         .await
         .unwrap();
 

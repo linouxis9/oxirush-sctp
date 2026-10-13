@@ -1,7 +1,7 @@
 //! One registered descriptor and its record state, shared by the public socket roles.
 use crate::{
     AssocChangeState, AssociationId, ConnState, Event, Notification, NotificationOrData,
-    ReceivedData, SendInfo, SocketToAssociation, SubscribeEventAssocId,
+    ReceivedInto, SendInfo, SocketToAssociation, SubscribeEventAssocId,
 };
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
@@ -22,13 +22,17 @@ pub(crate) struct SocketCore {
     style: SocketToAssociation,
     partial: Mutex<Option<PartialMessage>>,
     max_message_size: AtomicUsize,
-    // How the association of a one-to-one socket ended, once `recv` has seen it: `RUNNING`,
-    // `SHUT_DOWN`, or the error number of an association that was aborted or lost. Linux
-    // reports either end once, or not at all, and `recv` repeats it.
+    // How the association of a one-to-one socket ended, once a call has learned of it:
+    // `RUNNING`, `SHUT_DOWN`, or the error number of an association that was aborted or lost.
+    // Linux reports either end once, to the call that happens to be there, or not at all:
+    // `recv` and `send` both record it here, and both repeat it.
     end: AtomicI32,
     // This side has shut the association down for writing. Linux says that such a shutdown
     // is complete in an association change notification, and in nothing else.
     write_shutdown: AtomicBool,
+    // This side has shut the socket down for reading: `recv` then returns the end of the
+    // stream while the association lives, and `send` still sends.
+    read_shutdown: AtomicBool,
     // Association changes are subscribed for `recv` alone, to learn of that, and not passed
     // on to the caller, who has not asked for them.
     quiet_association_events: AtomicBool,
@@ -39,7 +43,7 @@ const SHUT_DOWN: i32 = -1;
 
 impl SocketCore {
     pub(crate) fn new(domain: libc::c_int, style: SocketToAssociation) -> std::io::Result<Self> {
-        let fd = sys::sctp_socket_internal(domain, style.clone())?;
+        let fd = sys::sctp_socket_internal(domain, style)?;
         // The stream, payload protocol and association of each message. Accepted and
         // peeled-off sockets inherit the setting.
         sys::request_rcvinfo_internal(fd.as_fd(), true)?;
@@ -54,6 +58,7 @@ impl SocketCore {
             max_message_size: AtomicUsize::new(DEFAULT_MAX_MESSAGE_SIZE),
             end: AtomicI32::new(RUNNING),
             write_shutdown: AtomicBool::new(false),
+            read_shutdown: AtomicBool::new(false),
             quiet_association_events: AtomicBool::new(false),
         })
     }
@@ -145,77 +150,212 @@ impl SocketCore {
         Ok(peeled)
     }
 
-    pub(crate) async fn recv(&self) -> std::io::Result<NotificationOrData> {
+    // The next message or notification. `None` is the end of an association that was shut
+    // down, which a one-to-one socket alone has.
+    pub(crate) async fn recv(&self) -> std::io::Result<Option<NotificationOrData>> {
         loop {
             if let Some(end) = self.end() {
-                return end;
+                return self.after_the_end(end);
             }
             let mut guard = self.fd.ready(Interest::READABLE | Interest::ERROR).await?;
             // Another task may have seen the end while this one waited.
             if let Some(end) = self.end() {
-                return end;
+                return self.after_the_end(end);
             }
-            let received = guard.try_io(|inner| {
-                let mut partial = self.partial.lock().unwrap_or_else(PoisonError::into_inner);
-                receive::receive_message(
-                    &mut partial,
-                    self.max_message_size(),
-                    self.style == SocketToAssociation::OneToOne,
-                    |buffer| sys::sctp_recvmsg_once(inner.as_fd(), buffer),
-                )
-            });
+            let received = guard.try_io(|inner| self.receive_once(inner.as_fd()));
             if let Ok(result) = received
-                && let Some(result) = self.note_end(result)
+                && let Some(result) = self.note_received(result)
             {
                 return result;
             }
         }
     }
 
-    // What `recv` returns once the association of a one-to-one socket has ended.
-    fn end(&self) -> Option<std::io::Result<NotificationOrData>> {
+    fn receive_once(&self, fd: BorrowedFd<'_>) -> std::io::Result<Option<NotificationOrData>> {
+        let mut partial = self.partial.lock().unwrap_or_else(PoisonError::into_inner);
+        receive::receive_message(
+            &mut partial,
+            self.max_message_size(),
+            self.style == SocketToAssociation::OneToOne,
+            |buffer| sys::sctp_recvmsg_once(fd, buffer),
+        )
+    }
+
+    // The next message, into the buffer of the caller when one read gives it whole: no
+    // allocation and no copy then. Anything else goes the way of `recv`, and a message is
+    // copied to the buffer once it is whole.
+    pub(crate) async fn recv_into(
+        &self,
+        buffer: &mut [u8],
+    ) -> std::io::Result<Option<ReceivedInto>> {
+        loop {
+            if self.end().is_none() {
+                let mut guard = self.fd.ready(Interest::READABLE | Interest::ERROR).await?;
+                if self.end().is_none() {
+                    // An error of `try_io` is a read that would block: it has cleared
+                    // the readiness, and the loop waits again
+                    match guard.try_io(|inner| self.receive_direct(inner.as_fd(), buffer)) {
+                        Ok(Ok(Direct::Data(received))) => return Ok(Some(received)),
+                        Ok(Ok(Direct::Assembling)) => {}
+                        Ok(Ok(Direct::Other(result))) => match self.note_received(result) {
+                            Some(result) => return into_buffer(result?, buffer),
+                            None => continue,
+                        },
+                        Ok(Err(_)) | Err(_) => continue,
+                    }
+                }
+            }
+            return into_buffer(self.recv().await?, buffer);
+        }
+    }
+
+    // One read into the buffer of the caller, when no message is being assembled. The
+    // only error is that of a read that would block.
+    fn receive_direct(&self, fd: BorrowedFd<'_>, buffer: &mut [u8]) -> std::io::Result<Direct> {
+        let mut partial = self.partial.lock().unwrap_or_else(PoisonError::into_inner);
+        if partial.is_some() || buffer.is_empty() {
+            return Ok(Direct::Assembling);
+        }
+        let piece = match sys::sctp_recvmsg_once(fd, buffer) {
+            Ok(piece) => piece,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                return Ok(Direct::Assembling);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Err(error),
+            Err(error) => return Ok(Direct::Other(Err(error))),
+        };
+        if piece.len == 0 && !piece.notification {
+            return Ok(Direct::Other(Ok(None)));
+        }
+        if piece.end_of_record && piece.notification {
+            let notification = notifications::notification_from_message(&buffer[..piece.len]);
+            return Ok(Direct::Other(Ok(Some(NotificationOrData::Notification(
+                notification,
+            )))));
+        }
+        if piece.end_of_record {
+            let limit = self.max_message_size();
+            if piece.len > limit {
+                return Ok(Direct::Other(Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "discarded a message of {} octets, longer than {limit}",
+                        piece.len
+                    ),
+                ))));
+            }
+            return Ok(Direct::Data(ReceivedInto::Data {
+                len: piece.len,
+                from: piece.from,
+                rcv_info: piece.rcv_info,
+            }));
+        }
+        // The first part of a longer message: the assembler goes on from it
+        *partial = Some(PartialMessage::begun(&buffer[..piece.len], &piece));
+        Ok(Direct::Assembling)
+    }
+
+    // How the association of a one-to-one socket has ended, once a call has learned of it:
+    // `Ok` for one that was shut down, and the error of one that was aborted or lost.
+    fn end(&self) -> Option<std::io::Result<()>> {
         match self.end.load(Ordering::Acquire) {
             RUNNING => None,
-            SHUT_DOWN => Some(Ok(NotificationOrData::Data(ReceivedData {
-                payload: vec![],
-                from: None,
-                rcv_info: None,
-                nxt_info: None,
-            }))),
+            SHUT_DOWN => Some(Ok(())),
             error => Some(Err(std::io::Error::from_raw_os_error(error))),
         }
     }
 
-    // Remembers the end of the association of a one-to-one socket when `received` is its
-    // last sign. `None` for a notification that the caller has not subscribed to.
-    fn note_end(
+    // What `recv` returns once the end is known: what the kernel still holds of the
+    // association, which a `send` may have learned the end of before it was read, and then
+    // the end itself, at each call. Nothing more arrives, so this does not wait.
+    fn after_the_end(
         &self,
-        received: std::io::Result<NotificationOrData>,
-    ) -> Option<std::io::Result<NotificationOrData>> {
+        end: std::io::Result<()>,
+    ) -> std::io::Result<Option<NotificationOrData>> {
+        loop {
+            match self.receive_once(self.as_fd()) {
+                Ok(Some(NotificationOrData::Notification(Notification::AssociationChange(_))))
+                    if self.quiet_association_events.load(Ordering::Acquire) => {}
+                Ok(Some(received)) => return Ok(Some(received)),
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                    // A message longer than the limit was discarded: the caller is told
+                    return Err(error);
+                }
+                Ok(None) | Err(_) => return end.map(|()| None),
+            }
+        }
+    }
+
+    // Remembers the end of the association of a one-to-one socket when `received` is a sign
+    // of it. `None` for a notification that the caller has not subscribed to.
+    fn note_received(
+        &self,
+        received: std::io::Result<Option<NotificationOrData>>,
+    ) -> Option<std::io::Result<Option<NotificationOrData>>> {
         if self.style != SocketToAssociation::OneToOne {
             return Some(received);
         }
         match &received {
-            Ok(NotificationOrData::Notification(Notification::AssociationChange(change))) => {
-                if change.state == AssocChangeState::ShutdownComplete {
-                    self.set_end(SHUT_DOWN);
+            Ok(Some(NotificationOrData::Notification(Notification::AssociationChange(change)))) => {
+                match change.state {
+                    AssocChangeState::ShutdownComplete => self.set_end(SHUT_DOWN),
+                    // The error of the socket says whether the peer aborted or was lost. A
+                    // `send` that has taken it has recorded the end already.
+                    AssocChangeState::CommLost => self.set_end(
+                        sys::socket_error(self.as_fd())
+                            .ok()
+                            .filter(|error| *error != 0)
+                            .unwrap_or(libc::ECONNRESET),
+                    ),
+                    _ => {}
                 }
                 if self.quiet_association_events.load(Ordering::Acquire) {
                     return None;
                 }
             }
-            Err(error) => {
-                // The error of a socket whose association is gone is the last thing Linux
-                // says of it. Another error leaves the association as it was.
-                let gone = sys::sctp_get_status_internal(self.as_fd(), 0)
-                    .is_err_and(|status| status.raw_os_error() == Some(libc::EINVAL));
-                if let (Some(number), true) = (error.raw_os_error(), gone) {
-                    self.set_end(number);
+            // The end of the stream: the peer shut the association down, unless this side
+            // has only stopped reading
+            Ok(None) => {
+                if !self.read_shutdown.load(Ordering::Acquire) {
+                    self.set_end(SHUT_DOWN);
+                }
+                // Another call may have recorded the end first, and shut the socket down
+                // for reading to wake this one: the end that was recorded is the answer
+                if let Some(end) = self.end() {
+                    return Some(end.map(|()| None));
                 }
             }
-            Ok(_) => {}
+            Err(error) => {
+                self.note_error(error);
+                if error.raw_os_error().is_some()
+                    && let Some(end) = self.end()
+                {
+                    return Some(end.map(|()| None));
+                }
+            }
+            Ok(Some(_)) => {}
         }
         Some(received)
+    }
+
+    // Remembers the end of the association of a one-to-one socket when a call failed with
+    // `error` and the association is gone: that error is the last thing Linux says of it, to
+    // this call alone. Another error leaves the association as it was.
+    fn note_error(&self, error: &std::io::Error) {
+        if self.style != SocketToAssociation::OneToOne {
+            return;
+        }
+        let gone = sys::sctp_get_status_internal(self.as_fd(), 0)
+            .is_err_and(|status| status.raw_os_error() == Some(libc::EINVAL));
+        if let (Some(number), true) = (error.raw_os_error(), gone) {
+            // A broken pipe is what a send gets of an association that was shut down:
+            // one that was aborted or lost gives its own error first
+            self.set_end(if number == libc::EPIPE {
+                SHUT_DOWN
+            } else {
+                number
+            });
+        }
     }
 
     fn set_end(&self, end: i32) {
@@ -233,7 +373,10 @@ impl SocketCore {
     }
 
     pub(crate) fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
-        if how == std::net::Shutdown::Write && self.style == SocketToAssociation::OneToOne {
+        if how != std::net::Shutdown::Write {
+            self.read_shutdown.store(true, Ordering::Release);
+        }
+        if how != std::net::Shutdown::Read && self.style == SocketToAssociation::OneToOne {
             self.write_shutdown.store(true, Ordering::Release);
             if !sys::sctp_event_subscribed_internal(self.as_fd(), Event::Association)? {
                 self.subscribe_association_events(true)?;
@@ -283,14 +426,106 @@ impl SocketCore {
         payload: &[u8],
         info: Option<&SendInfo>,
     ) -> std::io::Result<()> {
+        // SCTP has no empty message, and Linux answers a bare `EINVAL`. A send that only
+        // aborts an association or shuts it down has none on purpose.
+        let controls = info.is_some_and(|info| {
+            info.flags & (crate::consts::SCTP_ABORT | crate::consts::SCTP_EOF) != 0
+        });
+        if payload.is_empty() && !controls {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a message has one octet at least: SCTP has no empty message",
+            ));
+        }
         loop {
+            // After the end, the same answer at each call: the error of an association that
+            // was aborted or lost, and a broken pipe for one that was shut down.
+            if let Some(end) = self.end() {
+                return Err(end
+                    .err()
+                    .unwrap_or_else(|| std::io::Error::from_raw_os_error(libc::EPIPE)));
+            }
             let mut guard = self.fd.writable().await?;
             if let Ok(result) =
                 guard.try_io(|inner| sys::sctp_sendmsg_once(inner.as_fd(), to, payload, info))
             {
+                if let Err(error) = &result {
+                    // This call may be the one that Linux tells of the end
+                    self.note_error(error);
+                    if let Some(end) = self.end() {
+                        return Err(end
+                            .err()
+                            .unwrap_or_else(|| std::io::Error::from_raw_os_error(libc::EPIPE)));
+                    }
+                    if let Some(stream) = self.stream_out_of_range(error, info) {
+                        return Err(stream);
+                    }
+                }
                 return result;
             }
         }
+    }
+}
+
+// What one read into the buffer of a caller gave.
+enum Direct {
+    // A whole message, in the buffer.
+    Data(ReceivedInto),
+    // The end of the stream, an error or a notification, for `note_received`.
+    Other(std::io::Result<Option<NotificationOrData>>),
+    // Nothing for the caller yet: a message is being assembled.
+    Assembling,
+}
+
+// What `recv` returned, with a message copied to the buffer of a caller.
+fn into_buffer(
+    received: Option<NotificationOrData>,
+    buffer: &mut [u8],
+) -> std::io::Result<Option<ReceivedInto>> {
+    Ok(match received {
+        None => None,
+        Some(NotificationOrData::Notification(notification)) => {
+            Some(ReceivedInto::Notification(notification))
+        }
+        Some(NotificationOrData::Data(message)) => {
+            let len = message.payload.len();
+            let Some(room) = buffer.get_mut(..len) else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "discarded a message of {len} octets, longer than the buffer of {}",
+                        buffer.len()
+                    ),
+                ));
+            };
+            room.copy_from_slice(&message.payload);
+            Some(ReceivedInto::Data {
+                len,
+                from: message.from,
+                rcv_info: message.rcv_info,
+            })
+        }
+    })
+}
+
+impl SocketCore {
+    // The `EINVAL` of a send on a stream that the association does not have, said in words.
+    fn stream_out_of_range(
+        &self,
+        error: &std::io::Error,
+        info: Option<&SendInfo>,
+    ) -> Option<std::io::Error> {
+        let info = info.filter(|_| error.raw_os_error() == Some(libc::EINVAL))?;
+        let status = sys::sctp_get_status_internal(self.as_fd(), info.assoc_id).ok()?;
+        (info.sid >= status.outstreams).then(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "stream {} is not one of the {} outbound streams of the association",
+                    info.sid, status.outstreams
+                ),
+            )
+        })
     }
 }
 

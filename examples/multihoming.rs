@@ -22,23 +22,23 @@ async fn main() -> std::io::Result<()> {
     let server = Socket::new_v4(SocketToAssociation::OneToOne)?;
     server.bindx(&addresses("127.0.0.1:0", "127.0.0.2:0"), BindxFlags::Add)?;
     let listener = server.listen(5)?;
-    let server_addresses = listener.local_addrs(0)?;
+    let server_addresses = listener.local_addrs()?;
 
     let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
     client.bindx(&addresses("127.0.0.1:0", "127.0.0.3:0"), BindxFlags::Add)?;
     let (client, id) = client.connectx(&server_addresses).await?;
     let (accepted, _) = listener.accept().await?;
 
-    println!("client: {:?}", ips(&client.local_addrs(id)?));
-    println!("server: {:?}", ips(&client.peer_addrs(id)?));
-    println!("the server sees: {:?}", ips(&accepted.peer_addrs(0)?));
+    println!("client: {:?}", ips(&client.local_addrs()?));
+    println!("server: {:?}", ips(&client.peer_addrs()?));
+    println!("the server sees: {:?}", ips(&accepted.peer_addrs()?));
     println!(
         "primary path: {}",
-        client.status(id)?.peer_primary.address.ip()
+        client.status()?.peer_primary.address.ip()
     );
 
     // Probe every path each second instead of each 30 seconds
-    for address in client.peer_addrs(id)? {
+    for address in client.peer_addrs()? {
         let mut path = client.options().peer_address_params(id, address)?;
         path.heartbeat_interval = Duration::from_secs(1);
         client.options().set_peer_address_params(path)?;

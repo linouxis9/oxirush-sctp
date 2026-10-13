@@ -111,6 +111,16 @@ jobs:
       - run: cargo install cargo-fuzz --locked
       - run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60 -max_len=512
 
+  advisories:
+    name: Advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --locked
+      - run: cargo generate-lockfile
+      - run: cargo audit --deny warnings
+
   package:
     name: Package
     runs-on: ubuntu-latest

@@ -18,7 +18,7 @@ async fn one_to_many_socket_cannot_become_a_single_association() {
     let server = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     server.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let server = server.listen(4).unwrap();
-    let address = server.local_addrs(0).unwrap()[0];
+    let address = server.local_addrs().unwrap()[0];
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     match socket.connect(address).await {
         Ok(_) => panic!("a one-to-many socket became a single association"),
@@ -44,7 +44,7 @@ async fn configuration_and_registration_survive_listen_connect_and_accept() {
     assert_eq!(listener.as_raw_fd(), original);
     assert_eq!(listener.options().max_message_size(), 2048);
     assert!(listener.options().nodelay().unwrap());
-    let address = listener.local_addrs(0).unwrap()[0];
+    let address = listener.local_addrs().unwrap()[0];
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     client.options().set_max_message_size(1024);
     client.options().set_nodelay(true).unwrap();
@@ -96,22 +96,18 @@ async fn connected_and_accepted_sockets_report_stream_and_ppid_by_default() {
     let listener = server.listen(4).unwrap();
     let (client, assoc_id) = Socket::new_v4(SocketToAssociation::OneToOne)
         .unwrap()
-        .connect(listener.local_addrs(0).unwrap()[0])
+        .connect(listener.local_addrs().unwrap()[0])
         .await
         .unwrap();
     let (peer, _) = listener.accept().await.unwrap();
-    let options = SendOptions {
-        stream_id: 3,
-        ppid: 60,
-        ..Default::default()
-    };
+    let options = SendOptions::new().stream(3).ppid(60);
     client.send(b"request", options).await.unwrap();
     peer.send(b"answer", options).await.unwrap();
-    let NotificationOrData::Data(data) = peer.recv().await.unwrap() else {
+    let NotificationOrData::Data(data) = peer.recv().await.unwrap().unwrap() else {
         panic!("not data")
     };
     assert_eq!((data.stream_id(), data.ppid()), (Some(3), Some(60)));
-    let NotificationOrData::Data(data) = client.recv().await.unwrap() else {
+    let NotificationOrData::Data(data) = client.recv().await.unwrap().unwrap() else {
         panic!("not data")
     };
     assert_eq!((data.stream_id(), data.ppid()), (Some(3), Some(60)));
@@ -134,10 +130,7 @@ async fn endpoint_defaults_identify_associations_and_peeloff_preserves_configura
         .connect(address)
         .await
         .unwrap();
-    client
-        .send(b"identify", SendOptions::default())
-        .await
-        .unwrap();
+    client.send(b"identify", SendOptions::new()).await.unwrap();
     let NotificationOrData::Data(data) = endpoint.recv().await.unwrap() else {
         panic!("not data")
     };
@@ -146,16 +139,13 @@ async fn endpoint_defaults_identify_associations_and_peeloff_preserves_configura
     let peer = endpoint.peeloff(assoc_id).unwrap();
     assert_eq!(peer.options().max_message_size(), 100);
     assert!(peer.options().nodelay().unwrap());
-    client
-        .send(&[0xaa; 101], SendOptions::default())
-        .await
-        .unwrap();
-    client.send(b"next", SendOptions::default()).await.unwrap();
+    client.send(&[0xaa; 101], SendOptions::new()).await.unwrap();
+    client.send(b"next", SendOptions::new()).await.unwrap();
     assert_eq!(
         peer.recv().await.unwrap_err().kind(),
         std::io::ErrorKind::InvalidData
     );
-    let NotificationOrData::Data(data) = peer.recv().await.unwrap() else {
+    let NotificationOrData::Data(data) = peer.recv().await.unwrap().unwrap() else {
         panic!("not data")
     };
     assert_eq!(data.payload, b"next");
@@ -168,7 +158,7 @@ async fn raw_stream_import_transfers_ownership_of_an_established_association() {
     let listener = socket.listen(2).unwrap();
     let (client, _) = Socket::new_v4(SocketToAssociation::OneToOne)
         .unwrap()
-        .connect(listener.local_addrs(0).unwrap()[0])
+        .connect(listener.local_addrs().unwrap()[0])
         .await
         .unwrap();
     let (peer, _) = listener.accept().await.unwrap();
@@ -179,24 +169,73 @@ async fn raw_stream_import_transfers_ownership_of_an_established_association() {
     // Safety: this is the sole owned established SCTP descriptor, and remains nonblocking.
     let imported = unsafe { ConnectedSocket::from_rawfd(owned) }.unwrap();
     imported
-        .send(b"imported", SendOptions::default())
+        .send(b"imported", SendOptions::new())
         .await
         .unwrap();
-    let NotificationOrData::Data(data) = peer.recv().await.unwrap() else {
+    let NotificationOrData::Data(data) = peer.recv().await.unwrap().unwrap() else {
         panic!("not data")
     };
     assert_eq!(data.payload, b"imported");
     drop(imported);
-    let NotificationOrData::Data(closed) =
-        tokio::time::timeout(std::time::Duration::from_secs(2), peer.recv())
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(2), peer.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(closed, None, "imported descriptor remains open");
+}
+
+/// On a one-to-many endpoint, a message that arrives in several parts holds back the
+/// messages of the other associations until it is whole: Linux delivers one message at a
+/// time to a socket, and the crate has one assembler for it. This pins what the
+/// documentation says of it; a `Listener` gives each association a socket of its own.
+#[tokio::test]
+async fn a_long_message_of_one_association_holds_back_the_others_on_an_endpoint() {
+    const LONG: usize = 1 << 20;
+    let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    socket.options().set_recv_buffer_size(8 * 1024).unwrap();
+    let endpoint = socket.into_endpoint(4).unwrap();
+    let address = endpoint.local_addr().unwrap();
+
+    let slow = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
+    slow.options().set_send_buffer_size(2 * LONG).unwrap();
+    if slow.options().send_buffer_size().unwrap() < 2 * LONG {
+        eprintln!("`net.core.wmem_max` is below 2 MiB; skipping");
+        return;
+    }
+    let (slow, _) = slow.connect(address).await.unwrap();
+    let quick = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
+    let (quick, _) = quick.connect(address).await.unwrap();
+
+    // The long message first: the endpoint does not read, so that its delivery in parts
+    // has begun when the short one arrives.
+    let long = tokio::spawn(async move {
+        slow.send(&vec![0x5a; LONG], SendOptions::new())
             .await
-            .unwrap()
-            .unwrap()
-    else {
-        panic!("not end of association")
-    };
-    assert!(
-        closed.payload.is_empty(),
-        "imported descriptor remains open"
+            .unwrap();
+        slow
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    quick
+        .send(b"a short message", SendOptions::new())
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let mut lengths = Vec::new();
+    while lengths.len() < 2 {
+        let received = tokio::time::timeout(std::time::Duration::from_secs(20), endpoint.recv())
+            .await
+            .expect("both messages arrive")
+            .unwrap();
+        if let NotificationOrData::Data(message) = received {
+            lengths.push(message.payload.len());
+        }
+    }
+    assert_eq!(
+        lengths,
+        [LONG, 15],
+        "the short message waited for the long one"
     );
+    drop(long.await.unwrap());
 }

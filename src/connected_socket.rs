@@ -1,7 +1,8 @@
 //! A socket owning one SCTP association.
 use crate::internal::{SocketCore, sys};
 use crate::{
-    AssociationId, BindxFlags, ConnStatus, NotificationOrData, SendData, SendOptions, SocketOptions,
+    BindxFlags, ConnStatus, NotificationOrData, ReceivedData, ReceivedInto, SendData, SendOptions,
+    SocketOptions,
 };
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
@@ -21,25 +22,37 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 /// # let (association, _) = client.connect(listener.local_addr()?).await?;
 /// # let (peer, _) = listener.accept().await?;
 ///
-/// let options = SendOptions {
-///     stream_id: 1,
-///     ppid: 60,
-///     ..Default::default()
-/// };
+/// let options = SendOptions::new().stream(1).ppid(60);
 /// association.send(b"request", options).await?;
 /// match peer.recv().await? {
-///     NotificationOrData::Data(message) if message.payload.is_empty() => println!("closed"),
-///     NotificationOrData::Data(message) => {
+///     None => println!("closed"),
+///     Some(NotificationOrData::Data(message)) => {
 ///         assert_eq!((message.stream_id(), message.ppid()), (Some(1), Some(60)));
 ///     }
-///     NotificationOrData::Notification(notification) => println!("{notification:?}"),
+///     Some(other) => println!("{other:?}"),
 /// }
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug)]
 pub struct ConnectedSocket {
     core: SocketCore,
+}
+
+/// The local address, the first address of the peer and the descriptor.
+impl std::fmt::Debug for ConnectedSocket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectedSocket")
+            .field("local", &self.local_addr().ok())
+            .field(
+                "peer",
+                &self
+                    .peer_addrs()
+                    .ok()
+                    .and_then(|peer| peer.into_iter().next()),
+            )
+            .field("fd", &self.as_raw_fd())
+            .finish()
+    }
 }
 
 impl ConnectedSocket {
@@ -96,51 +109,130 @@ impl ConnectedSocket {
         sys::sctp_bindx_internal(self.as_fd(), addrs, flags)
     }
 
-    /// Query peer addresses. Linux ignores `assoc_id` for this one-to-one socket.
-    pub fn peer_addrs(&self, assoc_id: AssociationId) -> std::io::Result<Vec<SocketAddr>> {
-        sys::sctp_getpaddrs_internal(self.as_fd(), assoc_id)
+    /// The addresses of the peer.
+    pub fn peer_addrs(&self) -> std::io::Result<Vec<SocketAddr>> {
+        sys::sctp_getpaddrs_internal(self.as_fd(), 0)
     }
 
-    /// Query local addresses. Linux ignores `assoc_id` for this one-to-one socket.
-    pub fn local_addrs(&self, assoc_id: AssociationId) -> std::io::Result<Vec<SocketAddr>> {
-        sys::sctp_getladdrs_internal(self.as_fd(), assoc_id)
+    /// The local addresses of the association.
+    pub fn local_addrs(&self) -> std::io::Result<Vec<SocketAddr>> {
+        sys::sctp_getladdrs_internal(self.as_fd(), 0)
     }
 
-    /// Query this association's status. Linux ignores `assoc_id` for a one-to-one socket.
-    pub fn status(&self, assoc_id: AssociationId) -> std::io::Result<ConnStatus> {
-        sys::sctp_get_status_internal(self.as_fd(), assoc_id)
+    /// The status of the association.
+    pub fn status(&self) -> std::io::Result<ConnStatus> {
+        sys::sctp_get_status_internal(self.as_fd(), 0)
     }
 
-    /// Receive a complete record or notification. Empty data says that the association was
-    /// shut down, by the peer or by [`shutdown`][Self::shutdown] on this side. An aborted or
-    /// lost association is an error such as `ConnectionReset`. Either end stays: every later
-    /// call returns it again, and none waits.
+    /// Receive the next message or notification. `None` is the end of an association that
+    /// was shut down, by the peer or by [`shutdown`][Self::shutdown] on this side: a loop
+    /// `while let Some(received) = association.recv().await?` ends there. An association
+    /// that was aborted or lost is an error such as `ConnectionReset`. Either end stays:
+    /// every later call returns it again, and none waits. A [`send`][Self::send] that learns
+    /// of the end first records it for this call, which then returns what the kernel still
+    /// holds of the association, and the end after it.
     ///
     /// Records split across reads are assembled until `MSG_EOR`. Cancellation retains the
     /// partial record for the next call; concurrent readers share one assembler. Records over
     /// `options().max_message_size()` are drained and reported as `InvalidData`, leaving the
-    /// next record intact. Assumes `SCTP_FRAGMENT_INTERLEAVE` level zero.
-    pub async fn recv(&self) -> std::io::Result<NotificationOrData> {
+    /// next record intact; a notification is never discarded. Assumes
+    /// `SCTP_FRAGMENT_INTERLEAVE` level zero.
+    pub async fn recv(&self) -> std::io::Result<Option<NotificationOrData>> {
         self.core.recv().await
     }
 
-    /// Send a borrowed complete record, waiting for capacity. PPID is in host byte order.
-    /// Dropping the future before completion sends no part of this record.
+    /// Send a message, waiting for room in the send buffer. Dropping the future before
+    /// completion sends no part of it.
     ///
-    /// An empty payload and a stream the association does not have
-    /// ([`ConnStatus::outstreams`]) are `EINVAL`, a record longer than the send buffer
-    /// (`SO_SNDBUF`) is `EMSGSIZE`, and an association that has ended is `EPIPE`.
+    /// An empty payload, a stream the association does not have ([`ConnStatus::outstreams`])
+    /// and [`SendOptions::association`] with another value than 0 are `InvalidInput`, and a
+    /// message longer than the send buffer (`SO_SNDBUF`) is `EMSGSIZE`. After the end of the
+    /// association, every call returns at once: `BrokenPipe` for an association that was
+    /// shut down, and the error of one that was aborted or lost, such as `ConnectionReset`.
     pub async fn send(&self, payload: &[u8], options: SendOptions) -> std::io::Result<()> {
-        let info = options.wire_info();
+        if options.assoc_id() != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a connected socket has one association: `SendOptions::association` is for a \
+                 one-to-many endpoint",
+            ));
+        }
+        let info = options.info();
         self.core.send(None, payload, Some(&info)).await
     }
 
-    /// Send an owned record with optional low-level `SendInfo`. Its PPID remains in wire byte
-    /// order, and flags support kernel controls unavailable through `SendOptions`.
+    /// Send an owned message with optional low-level `SendInfo`, whose flags give the
+    /// controls of the kernel that `SendOptions` does not have.
     pub async fn send_data(&self, data: SendData) -> std::io::Result<()> {
         self.core
             .send(None, &data.payload, data.snd_info.as_ref())
             .await
+    }
+
+    /// Receive the next message into `buffer`, without an allocation when one read gives it
+    /// whole, which is the usual case. It ends and fails as [`recv`][Self::recv] does. A
+    /// message longer than the buffer is discarded and reported as `InvalidData`: give a
+    /// buffer as long as the longest message that the peer may send.
+    pub async fn recv_into(&self, buffer: &mut [u8]) -> std::io::Result<Option<ReceivedInto>> {
+        self.core.recv_into(buffer).await
+    }
+
+    /// Close the association without losing what was sent: shut it down for writing, then
+    /// read until the peer has answered, for `deadline` at most. The messages that the peer
+    /// had still sent are returned.
+    ///
+    /// An association that the peer aborts meanwhile is that error, and a peer that has not
+    /// answered in time is `TimedOut`: the socket is then dropped as it is. A dropped
+    /// socket is closed by Linux, which shuts its association down in the background when
+    /// everything that it received was read, and aborts it when a message or a notification
+    /// was not: what this side had sent and the peer had not acknowledged is then lost.
+    ///
+    /// The deadline needs the time driver of the runtime (`enable_time`, or
+    /// `#[tokio::main]`).
+    pub async fn close(self, deadline: std::time::Duration) -> std::io::Result<Vec<ReceivedData>> {
+        match self.core.shutdown(std::net::Shutdown::Write) {
+            // An association that has ended already: `recv` says how
+            Err(error) if error.raw_os_error() == Some(libc::ENOTCONN) => {}
+            other => other?,
+        }
+        let mut unread = Vec::new();
+        let ended = tokio::time::timeout(deadline, async {
+            loop {
+                match self.core.recv().await? {
+                    None => return std::io::Result::Ok(()),
+                    Some(NotificationOrData::Data(message)) => unread.push(message),
+                    Some(_) => {}
+                }
+            }
+        })
+        .await;
+        match ended {
+            Ok(result) => result.map(|()| unread),
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("the peer has not answered the shutdown in {deadline:?}"),
+            )),
+        }
+    }
+
+    /// Abort the association: the peer learns of it at once, and what was not delivered is
+    /// lost on both sides.
+    ///
+    /// `reason` goes to the peer in the ABORT, as the reason of a user-initiated abort, on a
+    /// socket that was peeled off an endpoint. Linux refuses to carry one on a socket that
+    /// was connected or accepted: the association is then aborted without it.
+    pub fn abort(self, reason: &[u8]) -> std::io::Result<()> {
+        let info = crate::SendInfo {
+            flags: crate::consts::SCTP_ABORT,
+            ..Default::default()
+        };
+        match sys::sctp_sendmsg_once(self.as_fd(), None, reason, Some(&info)) {
+            Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {
+                // Closing a socket with a linger of zero aborts its association
+                sys::set_linger_internal(self.as_fd(), Some(std::time::Duration::ZERO))
+            }
+            result => result,
+        }
     }
 
     pub(crate) fn from_core(core: SocketCore) -> Self {

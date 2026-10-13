@@ -5,7 +5,7 @@
 //! cargo run --example association_end
 //! ```
 
-use oxirush_sctp::{ConnectedSocket, Listener, NotificationOrData, Socket, SocketToAssociation};
+use oxirush_sctp::{ConnectedSocket, Listener, Socket, SocketToAssociation};
 use std::time::Duration;
 
 /// The two ends of a new association of `listener`.
@@ -22,13 +22,11 @@ async fn main() -> std::io::Result<()> {
     socket.bind("127.0.0.1:0".parse().unwrap())?;
     let listener = socket.listen(5)?;
 
-    // The peer closes its socket: an empty message, at every call from then on
+    // The peer closes its socket: `None`, at every call from then on
     let (association, peer) = connected(&listener).await?;
     drop(peer);
     for _ in 0..2 {
-        if let NotificationOrData::Data(message) = association.recv().await? {
-            println!("closed: a message of {} octets", message.payload.len());
-        }
+        println!("closed: {:?}", association.recv().await?);
     }
 
     // The peer aborts, as a socket does that is dropped with a linger of

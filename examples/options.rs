@@ -22,7 +22,7 @@ async fn main() -> std::io::Result<()> {
     let (_peer, _) = peer.connect(listener.local_addr()?).await?;
     let (association, _) = listener.accept().await?;
 
-    let status = association.status(0)?;
+    let status = association.status()?;
     println!(
         "{:?}, {} outgoing and {} incoming streams",
         status.state, status.outstreams, status.instreams

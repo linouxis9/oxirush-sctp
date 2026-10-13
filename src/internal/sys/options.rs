@@ -2,11 +2,12 @@
 use super::SOL_SCTP;
 use crate::consts::*;
 use crate::types::internal::{
-    ConnStatusInternal, InitMsg, PeerAddressParamsInternal, SubscribeEvent,
+    AssocParamsWire, ConnStatusInternal, InitMsg, PeerAddressParamsInternal, PrimaryAddressWire,
+    RtoInfoWire, SackInfoWire, SndInfoWire, SubscribeEvent,
 };
 use crate::{
-    AssociationId, ConnStatus, Event, EventSubscriptionError, PeerAddressParams, RtoInfo, SendInfo,
-    SubscribeEventAssocId,
+    AssociationId, AssociationParams, ConnStatus, Event, EventSubscriptionError, PeerAddressParams,
+    RtoInfo, SackInfo, SendInfo, SubscribeEventAssocId,
 };
 use os_socketaddr::OsSocketAddr;
 use std::convert::TryInto;
@@ -22,20 +23,12 @@ pub(crate) fn sctp_set_default_sendinfo_internal(
     fd: BorrowedFd<'_>,
     sendinfo: SendInfo,
 ) -> std::io::Result<()> {
-    unsafe {
-        let result = libc::setsockopt(
-            fd.as_raw_fd(),
-            SOL_SCTP,
-            SCTP_DEFAULT_SNDINFO,
-            &sendinfo as *const _ as *const libc::c_void,
-            std::mem::size_of::<SendInfo>().try_into().unwrap(),
-        );
-        if result < 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
+    setsockopt_internal(
+        fd,
+        SOL_SCTP,
+        SCTP_DEFAULT_SNDINFO,
+        &SndInfoWire::from(&sendinfo),
+    )
 }
 
 pub(crate) fn sctp_subscribe_event_internal(
@@ -97,8 +90,8 @@ pub(crate) fn sctp_subscribe_events_internal(
 ) -> std::io::Result<()> {
     let mut failures = Vec::new();
     for event in events {
-        if let Err(error) = sctp_subscribe_event_internal(fd, event.clone(), assoc_id, on) {
-            failures.push((event.clone(), error));
+        if let Err(error) = sctp_subscribe_event_internal(fd, *event, assoc_id, on) {
+            failures.push((*event, error));
         }
     }
     if failures.is_empty() {
@@ -289,19 +282,171 @@ pub(crate) fn sctp_set_rto_info_internal(
     rto_info: RtoInfo,
 ) -> std::io::Result<()> {
     tracing::debug!("Setting `SCTP_RTOINFO` to {rto_info:?}.");
-    setsockopt_internal(fd, SOL_SCTP, SCTP_RTOINFO, &rto_info)
+    let wire = RtoInfoWire {
+        assoc_id: rto_info.assoc_id,
+        initial: rto_info.initial,
+        max: rto_info.max,
+        min: rto_info.min,
+    };
+    setsockopt_internal(fd, SOL_SCTP, SCTP_RTOINFO, &wire)
 }
 
 pub(crate) fn sctp_get_rto_info_internal(
     fd: BorrowedFd<'_>,
     assoc_id: AssociationId,
 ) -> std::io::Result<RtoInfo> {
-    let rto_info = RtoInfo {
+    let wire = RtoInfoWire {
         assoc_id,
         ..Default::default()
     };
-    // Safety: `RtoInfo` holds integers only, so any bytes are a valid value.
-    unsafe { getsockopt_internal(fd, SOL_SCTP, SCTP_RTOINFO, rto_info) }
+    // Safety: the structure holds integers only, so any bytes are a valid value.
+    let wire = unsafe { getsockopt_internal(fd, SOL_SCTP, SCTP_RTOINFO, wire)? };
+    Ok(RtoInfo {
+        assoc_id: wire.assoc_id,
+        initial: wire.initial,
+        max: wire.max,
+        min: wire.min,
+    })
+}
+
+pub(crate) fn set_association_params_internal(
+    fd: BorrowedFd<'_>,
+    params: &AssociationParams,
+) -> std::io::Result<()> {
+    // The numbers that Linux only reports are zero: it leaves them as they are
+    let wire = AssocParamsWire {
+        assoc_id: params.assoc_id,
+        max_retransmissions: params.max_retransmissions,
+        cookie_life: params.cookie_life,
+        ..Default::default()
+    };
+    setsockopt_internal(fd, SOL_SCTP, SCTP_ASSOCINFO, &wire)
+}
+
+pub(crate) fn association_params_internal(
+    fd: BorrowedFd<'_>,
+    assoc_id: AssociationId,
+) -> std::io::Result<AssociationParams> {
+    let wire = AssocParamsWire {
+        assoc_id,
+        ..Default::default()
+    };
+    // Safety: the structure holds integers only, so any bytes are a valid value.
+    let wire = unsafe { getsockopt_internal(fd, SOL_SCTP, SCTP_ASSOCINFO, wire)? };
+    Ok(AssociationParams {
+        assoc_id: wire.assoc_id,
+        max_retransmissions: wire.max_retransmissions,
+        peer_addresses: wire.peer_addresses,
+        peer_rwnd: wire.peer_rwnd,
+        local_rwnd: wire.local_rwnd,
+        cookie_life: wire.cookie_life,
+    })
+}
+
+pub(crate) fn set_sack_info_internal(fd: BorrowedFd<'_>, info: &SackInfo) -> std::io::Result<()> {
+    let wire = SackInfoWire {
+        assoc_id: info.assoc_id,
+        delay: info.delay,
+        frequency: info.frequency,
+    };
+    setsockopt_internal(fd, SOL_SCTP, SCTP_DELAYED_SACK, &wire)
+}
+
+pub(crate) fn sack_info_internal(
+    fd: BorrowedFd<'_>,
+    assoc_id: AssociationId,
+) -> std::io::Result<SackInfo> {
+    let wire = SackInfoWire {
+        assoc_id,
+        ..Default::default()
+    };
+    // Safety: the structure holds integers only, so any bytes are a valid value.
+    let wire = unsafe { getsockopt_internal(fd, SOL_SCTP, SCTP_DELAYED_SACK, wire)? };
+    Ok(SackInfo {
+        assoc_id: wire.assoc_id,
+        delay: wire.delay,
+        frequency: wire.frequency,
+    })
+}
+
+// `struct sctp_prim` for an association and one of the addresses of its peer.
+fn primary_address(assoc_id: AssociationId, address: SocketAddr) -> PrimaryAddressWire {
+    let mut wire = PrimaryAddressWire { bytes: [0; 132] };
+    wire.bytes[..4].copy_from_slice(&assoc_id.to_ne_bytes());
+    let address = OsSocketAddr::from(address);
+    let address = address.as_ref();
+    wire.bytes[4..4 + address.len()].copy_from_slice(address);
+    wire
+}
+
+pub(crate) fn set_primary_address_internal(
+    fd: BorrowedFd<'_>,
+    assoc_id: AssociationId,
+    address: SocketAddr,
+) -> std::io::Result<()> {
+    setsockopt_internal(
+        fd,
+        SOL_SCTP,
+        SCTP_PRIMARY_ADDR,
+        &primary_address(assoc_id, address),
+    )
+}
+
+// The DSCP of what the socket sends, in the six high bits of the traffic class of IPv4 and
+// of IPv6. A socket of IPv6 can carry IPv4 as well, and is given both.
+pub(crate) fn set_dscp_internal(fd: BorrowedFd<'_>, dscp: u8) -> std::io::Result<()> {
+    if dscp > 63 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("a DSCP is 0 to 63, and this one is {dscp}"),
+        ));
+    }
+    let class = libc::c_int::from(dscp) << 2;
+    if socket_domain(fd)? == libc::AF_INET6 {
+        setsockopt_internal(fd, libc::IPPROTO_IPV6, libc::IPV6_TCLASS, &class)?;
+    }
+    setsockopt_internal(fd, libc::IPPROTO_IP, libc::IP_TOS, &class)
+}
+
+pub(crate) fn dscp_internal(fd: BorrowedFd<'_>) -> std::io::Result<u8> {
+    let (level, name) = if socket_domain(fd)? == libc::AF_INET6 {
+        (libc::IPPROTO_IPV6, libc::IPV6_TCLASS)
+    } else {
+        (libc::IPPROTO_IP, libc::IP_TOS)
+    };
+    // Safety: every value is a valid `c_int`.
+    let class: libc::c_int = unsafe { getsockopt_internal(fd, level, name, 0)? };
+    Ok((class >> 2) as u8 & 0x3f)
+}
+
+pub(crate) fn socket_domain(fd: BorrowedFd<'_>) -> std::io::Result<libc::c_int> {
+    // Safety: every value is a valid `c_int`.
+    unsafe { getsockopt_internal(fd, libc::SOL_SOCKET, libc::SO_DOMAIN, 0) }
+}
+
+// The size of a buffer of the socket, in octets. Linux doubles the number that it is given,
+// for its own bookkeeping, and reports the double.
+pub(crate) fn set_buffer_size_internal(
+    fd: BorrowedFd<'_>,
+    name: libc::c_int,
+    octets: usize,
+) -> std::io::Result<()> {
+    let octets = libc::c_int::try_from(octets).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("a buffer of {octets} octets is more than the system takes"),
+        )
+    })?;
+    setsockopt_internal(fd, libc::SOL_SOCKET, name, &octets)
+}
+
+pub(crate) fn buffer_size_internal(
+    fd: BorrowedFd<'_>,
+    name: libc::c_int,
+) -> std::io::Result<usize> {
+    // Safety: every value is a valid `c_int`.
+    let octets: libc::c_int = unsafe { getsockopt_internal(fd, libc::SOL_SOCKET, name, 0)? };
+    Ok(octets.max(0) as usize)
 }
 
 pub(crate) fn set_reuseaddr_internal(fd: BorrowedFd<'_>, reuseaddr: bool) -> std::io::Result<()> {
