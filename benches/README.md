@@ -22,8 +22,7 @@ the environment it is `flamegraph.svg`, in the same directory.
 On one core of an AMD Ryzen 7 5700G with Linux 7.0 and Rust 1.98.1, a
 message sent on one end of an association and received on the other takes
 8.9 µs for 64 octets, 9.0 µs for 1400, 14.6 µs for 16 KiB and 40 µs for
-64 KiB, which `recv` assembles from several reads. More than nine tenths of
-that time is in the system calls.
+64 KiB. More than nine tenths of that time is in the system calls.
 
 The sender has `set_nodelay(true)`. Without it a message shorter than a
 packet waits for the acknowledgement of the one before, which the peer may
