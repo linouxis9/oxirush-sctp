@@ -191,7 +191,10 @@ sctp-rs.
 ### Requirements
 
 - Linux 5.0 or later, and Rust 1.88 or later.
-- tokio's `net` feature alone, where sctp-rs enabled `macros` and `rt` for
-  its dependents. The declared minimum versions of the dependencies are
-  ones the crate builds with.
+- tokio's `net` and `time` features, `time` for the deadline of `close`,
+  where sctp-rs enabled `macros` and `rt` for its dependents. The declared
+  minimum versions of the dependencies are ones the crate builds and
+  passes its tests with: tokio 1.32.0, libc 0.2.146, os_socketaddr 0.2.4
+  and tracing 0.1.40 (`cargo update -Z direct-minimal-versions`, Rust
+  1.88).
 - Diagnostics go through `tracing`, where sctp-rs used `log`.
