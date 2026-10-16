@@ -7,8 +7,19 @@ use std::net::SocketAddr;
 // cannot make us buffer without bound.
 pub(crate) const DEFAULT_MAX_MESSAGE_SIZE: usize = 4 << 20;
 
-// Initial size of the buffer of a message. It doubles for longer messages.
+// Initial size of the buffer of a message that one read did not give whole. It doubles for
+// longer messages.
 const RECV_BUFFER_SIZE: usize = 4096;
+
+// The first read of a message goes into a buffer of the thread, as long as the longest that a
+// read gives at once: a message that it holds whole is then copied out of it to a payload of
+// its length, with one read and one allocation where reads into a payload that doubles took
+// three for 16 KiB.
+const FIRST_READ_SIZE: usize = 65536;
+
+std::thread_local! {
+    static FIRST_READ: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 
 // Size of the reads that discard a message longer than the limit.
 const DISCARD_BUFFER_SIZE: usize = 65536;
@@ -82,7 +93,17 @@ pub(super) fn receive_message(
     mut read: impl FnMut(&mut [u8]) -> std::io::Result<Piece>,
 ) -> std::io::Result<Option<NotificationOrData>> {
     loop {
-        let mut message = partial.take().unwrap_or_default();
+        let mut message = match partial.take() {
+            Some(message) => message,
+            None => match first_read(max_message_size, &mut read)? {
+                First::Whole(received) => return Ok(received),
+                First::Part(message) => {
+                    *partial = Some(message);
+                    continue;
+                }
+                First::Interrupted => continue,
+            },
+        };
         let limit = if message.notification {
             usize::MAX
         } else {
@@ -194,6 +215,75 @@ pub(super) fn receive_message(
     }
 }
 
+// What the first read of a message gave.
+enum First {
+    // A whole message or notification, or the end of the stream.
+    Whole(Option<NotificationOrData>),
+    // The first part of a longer one.
+    Part(PartialMessage),
+    // Nothing: the read was interrupted.
+    Interrupted,
+}
+
+// The first read of a message, into the buffer of the thread.
+fn first_read(
+    max_message_size: usize,
+    read: &mut impl FnMut(&mut [u8]) -> std::io::Result<Piece>,
+) -> std::io::Result<First> {
+    FIRST_READ.with_borrow_mut(|buffer| {
+        if buffer.is_empty() {
+            buffer.resize(FIRST_READ_SIZE, 0);
+        }
+        let piece = match read(buffer) {
+            Ok(piece) => piece,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                return Ok(First::Interrupted);
+            }
+            Err(error) => return Err(error),
+        };
+        let octets = &buffer[..piece.len];
+        if piece.len == 0 && !piece.notification {
+            tracing::debug!("Received end of stream.");
+            return Ok(First::Whole(None));
+        }
+        let limit = if piece.notification {
+            usize::MAX
+        } else {
+            max_message_size
+        };
+        if !piece.end_of_record {
+            let mut message = PartialMessage::begun(octets, &piece);
+            if piece.len > limit {
+                // Its octets are not kept: it is discarded at its end
+                message.payload = Vec::new();
+            }
+            return Ok(First::Part(message));
+        }
+        if piece.len > limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "discarded a message of {} octets, longer than {max_message_size}",
+                    piece.len
+                ),
+            ));
+        }
+        if piece.notification {
+            tracing::debug!("Received Notification.");
+            return Ok(First::Whole(Some(NotificationOrData::Notification(
+                notification_from_message(octets),
+            ))));
+        }
+        tracing::debug!("Received Data.");
+        Ok(First::Whole(Some(NotificationOrData::Data(ReceivedData {
+            payload: octets.to_vec(),
+            from: piece.from,
+            rcv_info: piece.rcv_info,
+            nxt_info: piece.nxt_info,
+        }))))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +326,54 @@ mod tests {
             Some(NotificationOrData::Data(data)) => data.payload,
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// A message as the kernel hands it over: as much of it as the buffer
+    /// of each read holds, with `MSG_EOR` on the read of its end.
+    fn kernel(
+        message: Vec<u8>,
+        reads: &std::cell::Cell<usize>,
+    ) -> impl FnMut(&mut [u8]) -> std::io::Result<Piece> {
+        let mut rest = message;
+        move |buffer| {
+            reads.set(reads.get() + 1);
+            let len = rest.len().min(buffer.len());
+            buffer[..len].copy_from_slice(&rest[..len]);
+            rest.drain(..len);
+            Ok(Piece {
+                len,
+                notification: false,
+                end_of_record: rest.is_empty(),
+                rcv_info: None,
+                nxt_info: None,
+                from: None,
+            })
+        }
+    }
+
+    /// A message of 16 KiB, which a read of the buffer of a doubling
+    /// payload took three of, takes one, into a payload of its length.
+    #[test]
+    fn a_message_that_one_read_holds_takes_one_read() {
+        for octets in [64, 1400, 16384, 65536] {
+            let reads = std::cell::Cell::new(0);
+            let mut partial = None;
+            let message: Vec<u8> = (0..octets).map(|i| i as u8).collect();
+            let read = kernel(message.clone(), &reads);
+            let received = payload(receive_message(&mut partial, 1 << 20, true, read).unwrap());
+            assert_eq!(received, message);
+            assert_eq!(received.capacity(), octets);
+            assert_eq!(reads.get(), 1, "{octets} octets");
+        }
+        // A longer one takes the reads that it needs.
+        let reads = std::cell::Cell::new(0);
+        let mut partial = None;
+        let message = vec![7; 200_000];
+        let received = payload(
+            receive_message(&mut partial, 1 << 20, true, kernel(message.clone(), &reads)).unwrap(),
+        );
+        assert_eq!((received == message, received.capacity()), (true, 200_000));
+        assert!(reads.get() <= 3, "{} reads", reads.get());
     }
 
     /// The buffer of a read has room for a whole packet of the kernel, and a

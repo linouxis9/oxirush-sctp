@@ -96,6 +96,10 @@ sctp-rs.
 - A received message holds the memory of its octets and no more: the
   buffer that it was read into has room for 4 KiB at least, which a message
   of 64 octets kept.
+- A message of up to 64 KiB takes one read and one allocation: the first
+  read of a message goes into a buffer of the thread, from which a message
+  that it holds whole is copied to a payload of its length. A message of
+  16 KiB took three reads into a payload that doubled.
 - The parts of a message of a multihomed peer may come from several of its
   addresses: a socket with one association keeps them together.
 - A notification too short for its type is `Unsupported`, where sctp-rs
