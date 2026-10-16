@@ -79,7 +79,9 @@ impl SocketOptions<'_> {
     /// Enabled by default. On a [`OneToManyEndpoint`][crate::OneToManyEndpoint], disabling it
     /// loses the association's identity, and the parts of the messages of several
     /// associations, which the endpoint can then not tell apart, come one message after the
-    /// other (`SCTP_FRAGMENT_INTERLEAVE` 0): a long message holds back the others.
+    /// other (`SCTP_FRAGMENT_INTERLEAVE` 0): a long message holds back the others. It is
+    /// `InvalidInput` to disable it while the endpoint assembles messages, whose parts it
+    /// could then not tell apart: do it before the endpoint has associations.
     pub fn request_rcvinfo(&self, on: bool) -> std::io::Result<()> {
         self.core.request_rcvinfo(on)
     }

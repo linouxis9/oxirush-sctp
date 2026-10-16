@@ -97,6 +97,18 @@ impl SocketCore {
     // tell the parts of messages of several associations apart, which then come one message
     // after the other.
     pub(crate) fn request_rcvinfo(&self, on: bool) -> std::io::Result<()> {
+        let assembling = !self
+            .partials
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty();
+        if self.style == SocketToAssociation::OneToMany && !on && assembling {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the endpoint assembles messages, whose parts it could no longer tell apart \
+                 without the receive information",
+            ));
+        }
         sys::request_rcvinfo_internal(self.as_fd(), on)?;
         if self.style == SocketToAssociation::OneToMany {
             self.interleave(on)?;
@@ -732,6 +744,27 @@ impl AsRawFd for SocketCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Without the receive information, an endpoint could not tell apart the parts of the
+    /// messages that it assembles: it keeps it while it has some.
+    #[tokio::test]
+    async fn an_endpoint_that_assembles_keeps_the_receive_information() {
+        let core = SocketCore::new(libc::AF_INET, SocketToAssociation::OneToMany).unwrap();
+        core.partials
+            .lock()
+            .unwrap()
+            .begin(PartialMessage::default());
+        let error = core.request_rcvinfo(false).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(core.partials.lock().unwrap().interleaved());
+        let mut partials = Partials::default();
+        partials.set_interleaved(true);
+        *core.partials.lock().unwrap() = partials;
+        core.request_rcvinfo(false).unwrap();
+        assert!(!core.partials.lock().unwrap().interleaved());
+        core.request_rcvinfo(true).unwrap();
+        assert!(core.partials.lock().unwrap().interleaved());
+    }
 
     #[tokio::test]
     async fn peeloff_rejects_partial_record_ownership_before_touching_the_kernel() {
