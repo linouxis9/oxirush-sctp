@@ -100,6 +100,12 @@
 //!   `recv` returns the message after it. A notification is never discarded.
 //! - `recv_into` receives into a buffer of the caller, without an allocation
 //!   when one read gives the message whole.
+//! - `poll_recv`, `poll_recv_into`, `poll_send`, `poll_send_to` and
+//!   `poll_accept` are the calls as polls, for a `Stream` or a future of a
+//!   program's own: they wait for the socket to be readable or writable, and end
+//!   and fail as the async calls do. A one-to-one socket subscribes to its
+//!   association changes for itself, so that the end of its association makes
+//!   it readable, and passes them on only to a caller that subscribes to them.
 //! - `send` waits for room in the send buffer. A dropped `send` future has
 //!   sent nothing.
 //! - A message shorter than a packet, sent while the one before it is not

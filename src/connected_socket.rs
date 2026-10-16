@@ -6,6 +6,7 @@ use crate::{
 };
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
+use std::task::{Context, Poll};
 
 /// One association established by [`Socket::connect`][crate::Socket::connect],
 /// accepted by a [`Listener`][crate::Listener], or peeled off a
@@ -75,7 +76,7 @@ impl ConnectedSocket {
                 "raw import requires a SOCK_STREAM SCTP association",
             ));
         }
-        let core = SocketCore::from_association(fd)?;
+        let core = SocketCore::import(fd)?;
         Ok(Self { core })
     }
 
@@ -140,6 +141,51 @@ impl ConnectedSocket {
         self.core.recv().await
     }
 
+    /// [`recv`][Self::recv] as a poll, for a `Stream` or a future of one's own: `Pending`
+    /// until the socket is readable, and the waker of `cx` is woken then. It ends and fails
+    /// as `recv` does: the crate subscribes to the association changes of a one-to-one socket
+    /// for itself, so that the end of the association makes it readable, and passes them on
+    /// only if [`Event::Association`][crate::Event::Association] is subscribed through
+    /// [`options`][Self::options].
+    pub fn poll_recv(
+        &self,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<Option<NotificationOrData>>> {
+        self.core.poll_recv(cx)
+    }
+
+    /// [`recv_into`][Self::recv_into] as a poll, as [`poll_recv`][Self::poll_recv] is.
+    pub fn poll_recv_into(
+        &self,
+        cx: &mut Context<'_>,
+        buffer: &mut [u8],
+    ) -> Poll<std::io::Result<Option<ReceivedInto>>> {
+        self.core.poll_recv_into(cx, buffer)
+    }
+
+    /// [`send`][Self::send] as a poll: `Pending` until the send buffer has room, and the
+    /// waker of `cx` is woken then. A message is sent whole or not at all.
+    pub fn poll_send(
+        &self,
+        cx: &mut Context<'_>,
+        payload: &[u8],
+        options: SendOptions,
+    ) -> Poll<std::io::Result<()>> {
+        if options.assoc_id() != 0 {
+            return Poll::Ready(Err(Self::not_one_to_many()));
+        }
+        let info = options.info();
+        self.core.poll_send(cx, None, payload, Some(&info))
+    }
+
+    fn not_one_to_many() -> std::io::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "a connected socket has one association: `SendOptions::association` is for a \
+             one-to-many endpoint",
+        )
+    }
+
     /// Send a message, waiting for room in the send buffer. Dropping the future before
     /// completion sends no part of it.
     ///
@@ -150,11 +196,7 @@ impl ConnectedSocket {
     /// shut down, and the error of one that was aborted or lost, such as `ConnectionReset`.
     pub async fn send(&self, payload: &[u8], options: SendOptions) -> std::io::Result<()> {
         if options.assoc_id() != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "a connected socket has one association: `SendOptions::association` is for a \
-                 one-to-many endpoint",
-            ));
+            return Err(Self::not_one_to_many());
         }
         let info = options.info();
         self.core.send(None, payload, Some(&info)).await

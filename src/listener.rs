@@ -3,6 +3,7 @@ use crate::internal::{SocketCore, sys};
 use crate::{BindxFlags, ConnectedSocket, SocketOptions};
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
+use std::task::{Context, Poll};
 
 /// A one-to-one listener created by [`Socket::listen`][crate::Socket::listen].
 ///
@@ -49,6 +50,17 @@ impl Listener {
     pub async fn accept(&self) -> std::io::Result<(ConnectedSocket, SocketAddr)> {
         let (core, address) = self.core.accept().await?;
         Ok((ConnectedSocket::from_core(core), address))
+    }
+
+    /// [`accept`][Self::accept] as a poll: `Pending` until an association is there to
+    /// accept, and the waker of `cx` is woken then.
+    pub fn poll_accept(
+        &self,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<(ConnectedSocket, SocketAddr)>> {
+        self.core
+            .poll_accept(cx)
+            .map_ok(|(core, address)| (ConnectedSocket::from_core(core), address))
     }
 
     /// Borrow shared socket configuration.

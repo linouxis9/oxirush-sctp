@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
+use std::task::{Context, Poll, ready};
 use tokio::io::{Interest, unix::AsyncFd};
 
 #[cfg(fuzzing)]
@@ -38,6 +39,9 @@ pub(crate) struct SocketCore {
     // the end of an association after a shutdown, partial deliveries given up for an
     // endpoint to drop the parts that it has of a message.
     quiet_events: AtomicU32,
+    // The association came up while its changes were the crate's alone: the notification of
+    // that, which comes first, is not passed on to a caller who subscribes to them later.
+    quiet_comm_up: AtomicBool,
 }
 
 // The bit of `event` among the quiet events.
@@ -55,10 +59,22 @@ impl SocketCore {
         // peeled-off sockets inherit the setting.
         sys::request_rcvinfo_internal(fd.as_fd(), true)?;
         let core = Self::register(fd, style)?;
-        if style == SocketToAssociation::OneToMany {
-            core.interleave(true)?;
+        match style {
+            SocketToAssociation::OneToMany => core.interleave(true)?,
+            // Listeners, the associations that they accept and those that connect.
+            SocketToAssociation::OneToOne => core.hear_of_the_end()?,
         }
         Ok(core)
+    }
+
+    // On a one-to-one socket, the association changes, which make the socket readable when
+    // the association ends: Linux reports an abort as an error alone otherwise, which wakes
+    // `recv` and not a caller of `poll_recv`, who waits for the socket to be readable.
+    fn hear_of_the_end(&self) -> std::io::Result<()> {
+        if !sys::sctp_event_subscribed_internal(self.as_fd(), Event::Association)? {
+            self.subscribe_quietly(Event::Association)?;
+        }
+        Ok(())
     }
 
     // On an endpoint, whether the parts of the messages of several associations come in
@@ -94,8 +110,16 @@ impl SocketCore {
         Ok(())
     }
 
-    // Whether `notification` is of an event that the caller has not subscribed to.
+    // Whether `notification` is not for the caller: of an event that the caller has not
+    // subscribed to, or the notification that the association came up, which came while it
+    // had not.
     fn quiet(&self, notification: &Notification) -> bool {
+        if let Notification::AssociationChange(change) = notification
+            && change.state == AssocChangeState::CommUp
+            && self.quiet_comm_up.swap(false, Ordering::AcqRel)
+        {
+            return true;
+        }
         let event = match notification {
             Notification::AssociationChange(_) => Event::Association,
             Notification::PartialDelivery(_) => Event::PartialDelivery,
@@ -120,6 +144,7 @@ impl SocketCore {
             write_shutdown: AtomicBool::new(false),
             read_shutdown: AtomicBool::new(false),
             quiet_events: AtomicU32::new(0),
+            quiet_comm_up: AtomicBool::new(false),
         })
     }
 
@@ -127,6 +152,13 @@ impl SocketCore {
         // accept and peeloff return a single-association descriptor. Linux keeps SO_TYPE as
         // SOCK_SEQPACKET on peeled-off associations, so their role cannot be inferred from it.
         Self::register(fd, SocketToAssociation::OneToOne)
+    }
+
+    // A descriptor of one association that the crate did not make.
+    pub(crate) fn import(fd: OwnedFd) -> std::io::Result<Self> {
+        let core = Self::from_association(fd)?;
+        core.hear_of_the_end()?;
+        Ok(core)
     }
 
     pub(crate) fn require_style(&self, style: SocketToAssociation) -> std::io::Result<()> {
@@ -174,6 +206,7 @@ impl SocketCore {
                     }
                 })?;
             if status.state == ConnState::Established {
+                self.came_up();
                 return Ok((self, assoc_id));
             }
             guard.clear_ready();
@@ -181,20 +214,38 @@ impl SocketCore {
     }
 
     pub(crate) async fn accept(&self) -> std::io::Result<(Self, SocketAddr)> {
+        std::future::poll_fn(|cx| self.poll_accept(cx)).await
+    }
+
+    pub(crate) fn poll_accept(
+        &self,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<(Self, SocketAddr)>> {
         self.require_style(SocketToAssociation::OneToOne)?;
         let (fd, address) = loop {
-            let mut guard = self.fd.readable().await?;
+            let mut guard = ready!(self.fd.poll_read_ready(cx))?;
             if let Ok(result) = guard.try_io(|inner| sys::accept_once(inner.as_fd())) {
                 break result?;
             }
         };
+        Poll::Ready(self.accepted(fd).map(|accepted| (accepted, address)))
+    }
+
+    fn accepted(&self, fd: OwnedFd) -> std::io::Result<Self> {
         let accepted = Self::from_association(fd)?;
         accepted.set_max_message_size(self.max_message_size());
         // It has the subscriptions of this socket.
         accepted
             .quiet_events
             .store(self.quiet_events.load(Ordering::Acquire), Ordering::Release);
-        Ok((accepted, address))
+        accepted.came_up();
+        Ok(accepted)
+    }
+
+    // The association of a one-to-one socket is up.
+    fn came_up(&self) {
+        let quiet = self.quiet_events.load(Ordering::Acquire) & bit(Event::Association) != 0;
+        self.quiet_comm_up.store(quiet, Ordering::Release);
     }
 
     pub(crate) fn peeloff(&self, assoc_id: AssociationId) -> std::io::Result<Self> {
@@ -208,10 +259,11 @@ impl SocketCore {
         }
         let peeled = Self::from_association(sys::sctp_peeloff_internal(self.as_fd(), assoc_id)?)?;
         peeled.set_max_message_size(self.max_message_size());
-        // It has the subscriptions of the endpoint.
+        // It has the subscriptions of the endpoint, and those of a one-to-one socket.
         peeled
             .quiet_events
             .store(self.quiet_events.load(Ordering::Acquire), Ordering::Release);
+        peeled.hear_of_the_end()?;
         Ok(peeled)
     }
 
@@ -233,6 +285,58 @@ impl SocketCore {
             {
                 return result;
             }
+        }
+    }
+
+    // `recv` as a poll: it waits for the socket to be readable, which the end of an
+    // association of a one-to-one socket makes it, through its association changes.
+    pub(crate) fn poll_recv(
+        &self,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<Option<NotificationOrData>>> {
+        loop {
+            if let Some(end) = self.end() {
+                return Poll::Ready(self.after_the_end(end));
+            }
+            let mut guard = ready!(self.fd.poll_read_ready(cx))?;
+            if let Some(end) = self.end() {
+                return Poll::Ready(self.after_the_end(end));
+            }
+            let received = guard.try_io(|inner| self.receive_once(inner.as_fd()));
+            if let Ok(result) = received
+                && let Some(result) = self.note_received(result)
+            {
+                return Poll::Ready(result);
+            }
+        }
+    }
+
+    // `recv_into` as a poll.
+    pub(crate) fn poll_recv_into(
+        &self,
+        cx: &mut Context<'_>,
+        buffer: &mut [u8],
+    ) -> Poll<std::io::Result<Option<ReceivedInto>>> {
+        loop {
+            if self.end().is_none() {
+                let mut guard = ready!(self.fd.poll_read_ready(cx))?;
+                if self.end().is_none() {
+                    match guard.try_io(|inner| self.receive_direct(inner.as_fd(), buffer)) {
+                        Ok(Ok(Direct::Data(received))) => return Poll::Ready(Ok(Some(received))),
+                        Ok(Ok(Direct::Assembling)) => {}
+                        Ok(Ok(Direct::Other(result))) => match self.note_received(result) {
+                            Some(result) => {
+                                return Poll::Ready(result.and_then(|r| into_buffer(r, buffer)));
+                            }
+                            None => continue,
+                        },
+                        Ok(Err(_)) | Err(_) => continue,
+                    }
+                }
+            }
+            return self
+                .poll_recv(cx)
+                .map(|result| result.and_then(|received| into_buffer(received, buffer)));
         }
     }
 
@@ -366,7 +470,10 @@ impl SocketCore {
             return Some(received);
         }
         match &received {
-            Ok(Some(NotificationOrData::Notification(Notification::AssociationChange(change)))) => {
+            Ok(Some(NotificationOrData::Notification(
+                notification @ Notification::AssociationChange(change),
+            ))) => {
+                let quiet = self.quiet(notification);
                 match change.state {
                     AssocChangeState::ShutdownComplete => self.set_end(SHUT_DOWN),
                     // The error of the socket says whether the peer aborted or was lost. A
@@ -379,7 +486,7 @@ impl SocketCore {
                     ),
                     _ => {}
                 }
-                if self.quiet_events.load(Ordering::Acquire) & bit(Event::Association) != 0 {
+                if quiet {
                     return None;
                 }
             }
@@ -475,7 +582,7 @@ impl SocketCore {
         }
         // What the crate still needs stays subscribed, and is no longer passed on.
         let needed = |event: &Event| match event {
-            Event::Association => self.write_shutdown.load(Ordering::Acquire),
+            Event::Association => self.style == SocketToAssociation::OneToOne,
             Event::PartialDelivery => self
                 .partials
                 .lock()
@@ -497,26 +604,36 @@ impl SocketCore {
         payload: &[u8],
         info: Option<&SendInfo>,
     ) -> std::io::Result<()> {
+        std::future::poll_fn(|cx| self.poll_send(cx, to, payload, info)).await
+    }
+
+    pub(crate) fn poll_send(
+        &self,
+        cx: &mut Context<'_>,
+        to: Option<SocketAddr>,
+        payload: &[u8],
+        info: Option<&SendInfo>,
+    ) -> Poll<std::io::Result<()>> {
         // SCTP has no empty message, and Linux answers a bare `EINVAL`. A send that only
         // aborts an association or shuts it down has none on purpose.
         let controls = info.is_some_and(|info| {
             info.flags & (crate::consts::SCTP_ABORT | crate::consts::SCTP_EOF) != 0
         });
         if payload.is_empty() && !controls {
-            return Err(std::io::Error::new(
+            return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "a message has one octet at least: SCTP has no empty message",
-            ));
+            )));
         }
         loop {
             // After the end, the same answer at each call: the error of an association that
             // was aborted or lost, and a broken pipe for one that was shut down.
             if let Some(end) = self.end() {
-                return Err(end
+                return Poll::Ready(Err(end
                     .err()
-                    .unwrap_or_else(|| std::io::Error::from_raw_os_error(libc::EPIPE)));
+                    .unwrap_or_else(|| std::io::Error::from_raw_os_error(libc::EPIPE))));
             }
-            let mut guard = self.fd.writable().await?;
+            let mut guard = ready!(self.fd.poll_write_ready(cx))?;
             if let Ok(result) =
                 guard.try_io(|inner| sys::sctp_sendmsg_once(inner.as_fd(), to, payload, info))
             {
@@ -524,15 +641,15 @@ impl SocketCore {
                     // This call may be the one that Linux tells of the end
                     self.note_error(error);
                     if let Some(end) = self.end() {
-                        return Err(end
+                        return Poll::Ready(Err(end
                             .err()
-                            .unwrap_or_else(|| std::io::Error::from_raw_os_error(libc::EPIPE)));
+                            .unwrap_or_else(|| std::io::Error::from_raw_os_error(libc::EPIPE))));
                     }
                     if let Some(stream) = self.stream_out_of_range(error, info) {
-                        return Err(stream);
+                        return Poll::Ready(Err(stream));
                     }
                 }
-                return result;
+                return Poll::Ready(result);
             }
         }
     }

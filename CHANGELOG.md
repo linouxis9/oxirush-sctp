@@ -93,6 +93,14 @@ sctp-rs.
 - A notification is never discarded for its length: the limit is for the
   messages of the peer.
 - `recv_into` receives into a buffer of the caller.
+- `poll_recv`, `poll_recv_into` and `poll_send` of `ConnectedSocket` and of
+  `OneToManyEndpoint`, `OneToManyEndpoint::poll_send_to` and
+  `Listener::poll_accept`: the calls as polls, for a `Stream` or a future
+  of one's own. A one-to-one socket subscribes to its association changes
+  for itself, so that the end of its association makes it readable: Linux
+  reports an abort as an error alone otherwise, which wakes no caller that
+  waits for the socket to be readable. It passes them on only to a caller
+  that subscribes to them, as before.
 - A received message holds the memory of its octets and no more: the
   buffer that it was read into has room for 4 KiB at least, which a message
   of 64 octets kept.

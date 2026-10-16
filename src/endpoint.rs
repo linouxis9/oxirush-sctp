@@ -6,6 +6,7 @@ use crate::{
 };
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
+use std::task::{Context, Poll};
 
 /// A socket sharing I/O across multiple incoming and outgoing associations.
 ///
@@ -79,22 +80,60 @@ impl OneToManyEndpoint {
     /// before reporting `InvalidData`.
     pub async fn recv(&self) -> std::io::Result<NotificationOrData> {
         // A one-to-many socket has no end of stream: its associations end in notifications
-        self.core.recv().await?.ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "the socket was shut down for reading",
-            )
-        })
+        self.core.recv().await?.ok_or_else(shut_down)
+    }
+
+    /// [`recv`][Self::recv] as a poll, for a `Stream` or a future of one's own: `Pending`
+    /// until the socket is readable, and the waker of `cx` is woken then.
+    pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<std::io::Result<NotificationOrData>> {
+        self.core
+            .poll_recv(cx)
+            .map(|received| received?.ok_or_else(shut_down))
+    }
+
+    /// [`recv_into`][Self::recv_into] as a poll, as [`poll_recv`][Self::poll_recv] is.
+    pub fn poll_recv_into(
+        &self,
+        cx: &mut Context<'_>,
+        buffer: &mut [u8],
+    ) -> Poll<std::io::Result<ReceivedInto>> {
+        self.core
+            .poll_recv_into(cx, buffer)
+            .map(|received| received?.ok_or_else(shut_down))
+    }
+
+    /// [`send`][Self::send] as a poll: `Pending` until the send buffer has room, and the
+    /// waker of `cx` is woken then.
+    pub fn poll_send(
+        &self,
+        cx: &mut Context<'_>,
+        payload: &[u8],
+        options: SendOptions,
+    ) -> Poll<std::io::Result<()>> {
+        if options.assoc_id() == 0 {
+            return Poll::Ready(Err(no_association()));
+        }
+        let info = options.info();
+        self.core.poll_send(cx, None, payload, Some(&info))
+    }
+
+    /// [`send_to`][Self::send_to] as a poll, as [`poll_send`][Self::poll_send] is.
+    pub fn poll_send_to(
+        &self,
+        cx: &mut Context<'_>,
+        address: SocketAddr,
+        payload: &[u8],
+        options: SendOptions,
+    ) -> Poll<std::io::Result<()>> {
+        let info = options.info();
+        self.core.poll_send(cx, Some(address), payload, Some(&info))
     }
 
     /// Send a complete borrowed record to `options.assoc_id`. A zero association ID without a
     /// destination is rejected. PPID is in host byte order; waits for send-buffer capacity.
     pub async fn send(&self, payload: &[u8], options: SendOptions) -> std::io::Result<()> {
         if options.assoc_id() == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "a destination association is required",
-            ));
+            return Err(no_association());
         }
         let info = options.info();
         self.core.send(None, payload, Some(&info)).await
@@ -124,12 +163,7 @@ impl OneToManyEndpoint {
     /// one read gives a message whole. A message longer than the buffer is discarded and
     /// reported as `InvalidData`.
     pub async fn recv_into(&self, buffer: &mut [u8]) -> std::io::Result<ReceivedInto> {
-        self.core.recv_into(buffer).await?.ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "the socket was shut down for reading",
-            )
-        })
+        self.core.recv_into(buffer).await?.ok_or_else(shut_down)
     }
 
     /// Abort one association: its peer learns of it at once, with `reason` as the reason of
@@ -182,6 +216,22 @@ impl OneToManyEndpoint {
     pub(crate) fn from_core(core: SocketCore) -> Self {
         Self { core }
     }
+}
+
+// What a receive of a one-to-many socket that was shut down for reading returns.
+fn shut_down() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::UnexpectedEof,
+        "the socket was shut down for reading",
+    )
+}
+
+// What a send without an association returns.
+fn no_association() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "a destination association is required",
+    )
 }
 
 /// The owned descriptor must remain nonblocking; additional options can be set through it.
