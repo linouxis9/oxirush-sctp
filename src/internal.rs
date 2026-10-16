@@ -51,8 +51,14 @@ impl SocketCore {
     }
 
     fn register(fd: OwnedFd, style: SocketToAssociation) -> std::io::Result<Self> {
+        // Tokio 1.53.3 deprecates `AsyncFd::new` for a value that may close its descriptor
+        // while it is registered. An `OwnedFd` keeps it open until the `AsyncFd` drops it,
+        // after the registration. `AsyncFd::register`, which says so, is not in the
+        // versions of Tokio before it, which the crate takes.
+        #[allow(deprecated)]
+        let fd = AsyncFd::new(fd)?;
         Ok(Self {
-            fd: AsyncFd::new(fd)?,
+            fd,
             style,
             partial: Mutex::new(None),
             max_message_size: AtomicUsize::new(DEFAULT_MAX_MESSAGE_SIZE),
