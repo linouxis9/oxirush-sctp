@@ -202,6 +202,20 @@ pub(crate) fn sctp_setup_init_params_internal(
     }
 }
 
+/// `SCTP_FRAGMENT_INTERLEAVE`: level 1 lets the parts of the messages of several
+/// associations come in turns, level 0 not.
+pub(crate) fn set_fragment_interleave_internal(
+    fd: BorrowedFd<'_>,
+    interleave: bool,
+) -> std::io::Result<()> {
+    setsockopt_internal(
+        fd,
+        SOL_SCTP,
+        crate::consts::SCTP_FRAGMENT_INTERLEAVE,
+        &libc::c_int::from(interleave),
+    )
+}
+
 pub(crate) fn request_rcvinfo_internal(fd: BorrowedFd<'_>, on: bool) -> std::io::Result<()> {
     tracing::debug!("Requesting `rcv_info` along with received data on the socket.");
 

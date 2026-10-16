@@ -135,8 +135,7 @@ impl ConnectedSocket {
     /// Records split across reads are assembled until `MSG_EOR`. Cancellation retains the
     /// partial record for the next call; concurrent readers share one assembler. Records over
     /// `options().max_message_size()` are drained and reported as `InvalidData`, leaving the
-    /// next record intact; a notification is never discarded. Assumes
-    /// `SCTP_FRAGMENT_INTERLEAVE` level zero.
+    /// next record intact; a notification is never discarded.
     pub async fn recv(&self) -> std::io::Result<Option<NotificationOrData>> {
         self.core.recv().await
     }

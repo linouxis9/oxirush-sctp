@@ -102,6 +102,15 @@ sctp-rs.
   16 KiB took three reads into a payload that doubled.
 - The parts of a message of a multihomed peer may come from several of its
   addresses: a socket with one association keeps them together.
+- On a `OneToManyEndpoint` the parts of the messages of several
+  associations come in turns (`SCTP_FRAGMENT_INTERLEAVE` 1), and each is
+  assembled apart: a long message of one association holds back none of
+  the others. With Linux's default and one assembler for the socket, a
+  short message waited for a long one, 1.2 s for 512 KiB with a receive
+  buffer of 64 KiB on loopback, where it now takes 75 µs. The endpoint
+  subscribes to `Event::PartialDelivery` for itself, to drop the parts of
+  a message whose delivery the kernel gives up, and passes those
+  notifications on only to a caller that subscribes to them.
 - A notification too short for its type is `Unsupported`, where sctp-rs
   panicked. Control messages are read within the buffer that `recvmsg`
   filled.

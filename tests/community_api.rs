@@ -46,7 +46,9 @@ async fn every_event_that_is_offered_can_be_subscribed() {
     ];
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     for event in events {
-        assert!(!event_enabled(&socket, event), "{event:?}");
+        // An endpoint has the partial deliveries that are given up, for itself.
+        let own = event == Event::PartialDelivery;
+        assert_eq!(event_enabled(&socket, event), own, "{event:?}");
         socket
             .options()
             .subscribe_events(&[event], SubscribeEventAssocId::All)
@@ -58,6 +60,7 @@ async fn every_event_that_is_offered_can_be_subscribed() {
         .unsubscribe_events(&events, SubscribeEventAssocId::All)
         .unwrap();
     assert!(!event_enabled(&socket, Event::Association));
+    assert!(event_enabled(&socket, Event::PartialDelivery));
 }
 
 fn server() -> Listener {

@@ -5,7 +5,7 @@ use crate::{
 };
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 use tokio::io::{Interest, unix::AsyncFd};
 
@@ -14,13 +14,13 @@ pub(crate) mod fuzzing;
 mod notifications;
 mod receive;
 pub(crate) mod sys;
-use receive::{DEFAULT_MAX_MESSAGE_SIZE, PartialMessage};
+use receive::{DEFAULT_MAX_MESSAGE_SIZE, PartialMessage, Partials};
 
 #[derive(Debug)]
 pub(crate) struct SocketCore {
     fd: AsyncFd<OwnedFd>,
     style: SocketToAssociation,
-    partial: Mutex<Option<PartialMessage>>,
+    partials: Mutex<Partials>,
     max_message_size: AtomicUsize,
     // How the association of a one-to-one socket ended, once a call has learned of it:
     // `RUNNING`, `SHUT_DOWN`, or the error number of an association that was aborted or lost.
@@ -33,9 +33,16 @@ pub(crate) struct SocketCore {
     // This side has shut the socket down for reading: `recv` then returns the end of the
     // stream while the association lives, and `send` still sends.
     read_shutdown: AtomicBool,
-    // Association changes are subscribed for `recv` alone, to learn of that, and not passed
-    // on to the caller, who has not asked for them.
-    quiet_association_events: AtomicBool,
+    // The events that are subscribed for the crate alone and not passed on to the caller, who
+    // has not asked for them, one bit an event: association changes for `recv` to learn of
+    // the end of an association after a shutdown, partial deliveries given up for an
+    // endpoint to drop the parts that it has of a message.
+    quiet_events: AtomicU32,
+}
+
+// The bit of `event` among the quiet events.
+fn bit(event: Event) -> u32 {
+    1 << (event as u16 - Event::DataIo as u16)
 }
 
 const RUNNING: i32 = 0;
@@ -47,7 +54,54 @@ impl SocketCore {
         // The stream, payload protocol and association of each message. Accepted and
         // peeled-off sockets inherit the setting.
         sys::request_rcvinfo_internal(fd.as_fd(), true)?;
-        Self::register(fd, style)
+        let core = Self::register(fd, style)?;
+        if style == SocketToAssociation::OneToMany {
+            core.interleave(true)?;
+        }
+        Ok(core)
+    }
+
+    // On an endpoint, whether the parts of the messages of several associations come in
+    // turns, which their receive information tells apart: a long message of one association
+    // then holds back none of the others. The parts of a message whose delivery is given up
+    // are dropped with the notification of it, which is subscribed for that.
+    fn interleave(&self, on: bool) -> std::io::Result<()> {
+        sys::set_fragment_interleave_internal(self.as_fd(), on)?;
+        if on && !sys::sctp_event_subscribed_internal(self.as_fd(), Event::PartialDelivery)? {
+            self.subscribe_quietly(Event::PartialDelivery)?;
+        }
+        self.partials
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .set_interleaved(on);
+        Ok(())
+    }
+
+    // Receive the receive information of each message, or not: an endpoint without it cannot
+    // tell the parts of messages of several associations apart, which then come one message
+    // after the other.
+    pub(crate) fn request_rcvinfo(&self, on: bool) -> std::io::Result<()> {
+        sys::request_rcvinfo_internal(self.as_fd(), on)?;
+        if self.style == SocketToAssociation::OneToMany {
+            self.interleave(on)?;
+        }
+        Ok(())
+    }
+
+    fn subscribe_quietly(&self, event: Event) -> std::io::Result<()> {
+        sys::sctp_subscribe_event_internal(self.as_fd(), event, SubscribeEventAssocId::All, true)?;
+        self.quiet_events.fetch_or(bit(event), Ordering::AcqRel);
+        Ok(())
+    }
+
+    // Whether `notification` is of an event that the caller has not subscribed to.
+    fn quiet(&self, notification: &Notification) -> bool {
+        let event = match notification {
+            Notification::AssociationChange(_) => Event::Association,
+            Notification::PartialDelivery(_) => Event::PartialDelivery,
+            _ => return false,
+        };
+        self.quiet_events.load(Ordering::Acquire) & bit(event) != 0
     }
 
     fn register(fd: OwnedFd, style: SocketToAssociation) -> std::io::Result<Self> {
@@ -60,12 +114,12 @@ impl SocketCore {
         Ok(Self {
             fd,
             style,
-            partial: Mutex::new(None),
+            partials: Mutex::new(Partials::default()),
             max_message_size: AtomicUsize::new(DEFAULT_MAX_MESSAGE_SIZE),
             end: AtomicI32::new(RUNNING),
             write_shutdown: AtomicBool::new(false),
             read_shutdown: AtomicBool::new(false),
-            quiet_association_events: AtomicBool::new(false),
+            quiet_events: AtomicU32::new(0),
         })
     }
 
@@ -136,16 +190,17 @@ impl SocketCore {
         };
         let accepted = Self::from_association(fd)?;
         accepted.set_max_message_size(self.max_message_size());
+        // It has the subscriptions of this socket.
+        accepted
+            .quiet_events
+            .store(self.quiet_events.load(Ordering::Acquire), Ordering::Release);
         Ok((accepted, address))
     }
 
     pub(crate) fn peeloff(&self, assoc_id: AssociationId) -> std::io::Result<Self> {
         self.require_style(SocketToAssociation::OneToMany)?;
-        let partial = self.partial.lock().unwrap_or_else(PoisonError::into_inner);
-        if partial
-            .as_ref()
-            .is_some_and(|record| record.belongs_to(assoc_id))
-        {
+        let partials = self.partials.lock().unwrap_or_else(PoisonError::into_inner);
+        if partials.hold(assoc_id) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "cannot peel off an association during partial record delivery",
@@ -153,6 +208,10 @@ impl SocketCore {
         }
         let peeled = Self::from_association(sys::sctp_peeloff_internal(self.as_fd(), assoc_id)?)?;
         peeled.set_max_message_size(self.max_message_size());
+        // It has the subscriptions of the endpoint.
+        peeled
+            .quiet_events
+            .store(self.quiet_events.load(Ordering::Acquire), Ordering::Release);
         Ok(peeled)
     }
 
@@ -178,9 +237,9 @@ impl SocketCore {
     }
 
     fn receive_once(&self, fd: BorrowedFd<'_>) -> std::io::Result<Option<NotificationOrData>> {
-        let mut partial = self.partial.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut partials = self.partials.lock().unwrap_or_else(PoisonError::into_inner);
         receive::receive_message(
-            &mut partial,
+            &mut partials,
             self.max_message_size(),
             self.style == SocketToAssociation::OneToOne,
             |buffer| sys::sctp_recvmsg_once(fd, buffer),
@@ -218,8 +277,8 @@ impl SocketCore {
     // One read into the buffer of the caller, when no message is being assembled. The
     // only error is that of a read that would block.
     fn receive_direct(&self, fd: BorrowedFd<'_>, buffer: &mut [u8]) -> std::io::Result<Direct> {
-        let mut partial = self.partial.lock().unwrap_or_else(PoisonError::into_inner);
-        if partial.is_some() || buffer.is_empty() {
+        let mut partials = self.partials.lock().unwrap_or_else(PoisonError::into_inner);
+        if !partials.is_empty() || buffer.is_empty() {
             return Ok(Direct::Assembling);
         }
         let piece = match sys::sctp_recvmsg_once(fd, buffer) {
@@ -257,7 +316,7 @@ impl SocketCore {
             }));
         }
         // The first part of a longer message: the assembler goes on from it
-        *partial = Some(PartialMessage::begun(&buffer[..piece.len], &piece));
+        partials.begin(PartialMessage::begun(&buffer[..piece.len], &piece));
         Ok(Direct::Assembling)
     }
 
@@ -280,8 +339,8 @@ impl SocketCore {
     ) -> std::io::Result<Option<NotificationOrData>> {
         loop {
             match self.receive_once(self.as_fd()) {
-                Ok(Some(NotificationOrData::Notification(Notification::AssociationChange(_))))
-                    if self.quiet_association_events.load(Ordering::Acquire) => {}
+                Ok(Some(NotificationOrData::Notification(notification)))
+                    if self.quiet(&notification) => {}
                 Ok(Some(received)) => return Ok(Some(received)),
                 Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
                     // A message longer than the limit was discarded: the caller is told
@@ -299,6 +358,11 @@ impl SocketCore {
         received: std::io::Result<Option<NotificationOrData>>,
     ) -> Option<std::io::Result<Option<NotificationOrData>>> {
         if self.style != SocketToAssociation::OneToOne {
+            if let Ok(Some(NotificationOrData::Notification(notification))) = &received
+                && self.quiet(notification)
+            {
+                return None;
+            }
             return Some(received);
         }
         match &received {
@@ -315,7 +379,7 @@ impl SocketCore {
                     ),
                     _ => {}
                 }
-                if self.quiet_association_events.load(Ordering::Acquire) {
+                if self.quiet_events.load(Ordering::Acquire) & bit(Event::Association) != 0 {
                     return None;
                 }
             }
@@ -338,6 +402,11 @@ impl SocketCore {
                 {
                     return Some(end.map(|()| None));
                 }
+            }
+            Ok(Some(NotificationOrData::Notification(notification)))
+                if self.quiet(notification) =>
+            {
+                return None;
             }
             Ok(Some(_)) => {}
         }
@@ -385,20 +454,10 @@ impl SocketCore {
         if how != std::net::Shutdown::Read && self.style == SocketToAssociation::OneToOne {
             self.write_shutdown.store(true, Ordering::Release);
             if !sys::sctp_event_subscribed_internal(self.as_fd(), Event::Association)? {
-                self.subscribe_association_events(true)?;
-                self.quiet_association_events.store(true, Ordering::Release);
+                self.subscribe_quietly(Event::Association)?;
             }
         }
         sys::shutdown_internal(self.as_fd(), how)
-    }
-
-    fn subscribe_association_events(&self, on: bool) -> std::io::Result<()> {
-        sys::sctp_subscribe_event_internal(
-            self.as_fd(),
-            Event::Association,
-            SubscribeEventAssocId::All,
-            on,
-        )
     }
 
     pub(crate) fn subscribe_events(
@@ -407,23 +466,29 @@ impl SocketCore {
         assoc_id: SubscribeEventAssocId,
         on: bool,
     ) -> std::io::Result<()> {
-        let association = events.contains(&Event::Association);
-        if association && !on && self.write_shutdown.load(Ordering::Acquire) {
-            // `recv` still needs them: they stay subscribed and are no longer passed on.
-            self.quiet_association_events.store(true, Ordering::Release);
-            let others: Vec<Event> = events
-                .iter()
-                .filter(|event| **event != Event::Association)
-                .cloned()
-                .collect();
-            return sys::sctp_subscribe_events_internal(self.as_fd(), &others, assoc_id, on);
+        if on {
+            sys::sctp_subscribe_events_internal(self.as_fd(), events, assoc_id, on)?;
+            for event in events {
+                self.quiet_events.fetch_and(!bit(*event), Ordering::AcqRel);
+            }
+            return Ok(());
         }
-        sys::sctp_subscribe_events_internal(self.as_fd(), events, assoc_id, on)?;
-        if association && on {
-            self.quiet_association_events
-                .store(false, Ordering::Release);
+        // What the crate still needs stays subscribed, and is no longer passed on.
+        let needed = |event: &Event| match event {
+            Event::Association => self.write_shutdown.load(Ordering::Acquire),
+            Event::PartialDelivery => self
+                .partials
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .interleaved(),
+            _ => false,
+        };
+        let (kept, others): (Vec<Event>, Vec<Event>) =
+            events.iter().partition(|event| needed(event));
+        for event in kept {
+            self.quiet_events.fetch_or(bit(event), Ordering::AcqRel);
         }
-        Ok(())
+        sys::sctp_subscribe_events_internal(self.as_fd(), &others, assoc_id, on)
     }
 
     pub(crate) async fn send(
@@ -555,9 +620,9 @@ mod tests {
     async fn peeloff_rejects_partial_record_ownership_before_touching_the_kernel() {
         for identity in [Some(7), None] {
             let core = SocketCore::new(libc::AF_INET, SocketToAssociation::OneToMany).unwrap();
-            let mut partial = None;
+            let mut partials = Partials::default();
             let mut first = true;
-            let error = receive::receive_message(&mut partial, 100, false, |buffer| {
+            let error = receive::receive_message(&mut partials, 100, false, |buffer| {
                 if !first {
                     return Err(std::io::ErrorKind::WouldBlock.into());
                 }
@@ -577,15 +642,15 @@ mod tests {
             })
             .unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
-            *core.partial.lock().unwrap() = partial;
+            *core.partials.lock().unwrap() = partials;
             let error = core.peeloff(7).unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
             assert_eq!(error.raw_os_error(), None, "peeloff reached the kernel");
-            assert!(core.partial.lock().unwrap().is_some());
+            assert!(!core.partials.lock().unwrap().is_empty());
             if identity.is_some() {
                 let error = core.peeloff(8).unwrap_err();
                 assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
-                assert!(core.partial.lock().unwrap().is_some());
+                assert!(!core.partials.lock().unwrap().is_empty());
             }
         }
     }

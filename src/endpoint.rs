@@ -69,8 +69,14 @@ impl OneToManyEndpoint {
 
     /// Receive a complete record or notification. Cancellation retains partial delivery.
     ///
-    /// Assembly uses `MSG_EOR` and assumes `SCTP_FRAGMENT_INTERLEAVE` level zero. Records over
-    /// `options().max_message_size()` are drained before reporting `InvalidData`.
+    /// The parts of the messages of several associations come in turns
+    /// (`SCTP_FRAGMENT_INTERLEAVE` 1), and each is assembled apart until its `MSG_EOR`: a
+    /// long message of one association holds back none of the others. The parts of a
+    /// message whose delivery the kernel gives up go with the notification of it, which the
+    /// endpoint subscribes to for itself and passes on only if
+    /// [`Event::PartialDelivery`][crate::Event::PartialDelivery] is subscribed through
+    /// [`options`][Self::options]. Records over `options().max_message_size()` are drained
+    /// before reporting `InvalidData`.
     pub async fn recv(&self) -> std::io::Result<NotificationOrData> {
         // A one-to-many socket has no end of stream: its associations end in notifications
         self.core.recv().await?.ok_or_else(|| {

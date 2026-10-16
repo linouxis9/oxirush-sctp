@@ -76,29 +76,120 @@ pub(crate) struct Piece {
     pub(super) from: Option<SocketAddr>,
 }
 
+// The messages of a socket that are being assembled.
+//
+// With `SCTP_FRAGMENT_INTERLEAVE` level 0, the parts of a message are not interleaved with other
+// messages: there is one at most. The kernel only delivers something else after a part when it
+// aborts the delivery of the message, e.g. because the association is aborted. With level 1,
+// which an endpoint has, the parts of the messages of several associations come in turns, each
+// with its receive information: there is one message of each association at most, and one
+// notification.
+#[derive(Debug, Default)]
+pub(crate) struct Partials {
+    interleaved: bool,
+    messages: Vec<PartialMessage>,
+}
+
+impl Partials {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+
+    // Whether the parts of the messages of several associations come in turns.
+    pub(crate) fn set_interleaved(&mut self, interleaved: bool) {
+        self.interleaved = interleaved;
+    }
+
+    pub(crate) fn interleaved(&self) -> bool {
+        self.interleaved
+    }
+
+    // Whether a message of association `assoc_id` may be being assembled.
+    pub(crate) fn hold(&self, assoc_id: crate::AssociationId) -> bool {
+        self.messages
+            .iter()
+            .any(|message| message.belongs_to(assoc_id))
+    }
+
+    pub(crate) fn begin(&mut self, message: PartialMessage) {
+        self.messages.push(message);
+    }
+
+    // The message of the key of `piece`, if one is being assembled.
+    fn take(&mut self, piece: &Piece) -> Option<PartialMessage> {
+        let key = |info: &Option<RcvInfo>| info.as_ref().map(|info| info.assoc_id);
+        let index = self.messages.iter().position(|message| {
+            message.notification == piece.notification
+                && key(&message.rcv_info) == key(&piece.rcv_info)
+        })?;
+        Some(self.messages.swap_remove(index))
+    }
+
+    // An association whose end `notification` tells has no more parts to give.
+    fn learn(&mut self, notification: &crate::Notification) {
+        use crate::{AssocChangeState, Notification};
+        let ended = match notification {
+            Notification::PartialDelivery(delivery) => delivery.assoc_id,
+            Notification::AssociationChange(change)
+                if matches!(
+                    change.state,
+                    AssocChangeState::CommLost
+                        | AssocChangeState::Restart
+                        | AssocChangeState::ShutdownComplete
+                ) =>
+            {
+                change.assoc_id
+            }
+            _ => return,
+        };
+        self.messages.retain(|message| {
+            message.notification
+                || message
+                    .rcv_info
+                    .as_ref()
+                    .is_some_and(|info| info.assoc_id != ended)
+        });
+    }
+}
+
 // Reads the next message up to its end (`MSG_EOR`), or fails with `EWOULDBLOCK` after keeping the
-// part received so far in `partial`. `None` is the end of the stream: a read of no octets, which
+// parts received so far in `partials`. `None` is the end of the stream: a read of no octets, which
 // SCTP has no message for.
 //
 // The limit is for the messages of the peer. A notification is the kernel's, and is never
 // discarded: the longest one carries a message that this side sent.
-//
-// With the default `SCTP_FRAGMENT_INTERLEAVE` level 0, the parts of a message are not interleaved
-// with other messages. The kernel only delivers something else after a part when it aborts the
-// delivery of the message, e.g. because the association is aborted.
 pub(super) fn receive_message(
-    partial: &mut Option<PartialMessage>,
+    partials: &mut Partials,
     max_message_size: usize,
     one_association: bool,
     mut read: impl FnMut(&mut [u8]) -> std::io::Result<Piece>,
 ) -> std::io::Result<Option<NotificationOrData>> {
+    let received = assemble(partials, max_message_size, one_association, &mut read);
+    if let Ok(Some(NotificationOrData::Notification(notification))) = &received {
+        partials.learn(notification);
+    }
+    received
+}
+
+fn assemble(
+    partials: &mut Partials,
+    max_message_size: usize,
+    one_association: bool,
+    read: &mut impl FnMut(&mut [u8]) -> std::io::Result<Piece>,
+) -> std::io::Result<Option<NotificationOrData>> {
     loop {
-        let mut message = match partial.take() {
+        if partials.interleaved && !partials.messages.is_empty() {
+            match interleaved_read(partials, max_message_size, read)? {
+                Some(received) => return Ok(received),
+                None => continue,
+            }
+        }
+        let mut message = match partials.messages.pop() {
             Some(message) => message,
-            None => match first_read(max_message_size, &mut read)? {
+            None => match first_read(max_message_size, read)? {
                 First::Whole(received) => return Ok(received),
                 First::Part(message) => {
-                    *partial = Some(message);
+                    partials.begin(message);
                     continue;
                 }
                 First::Interrupted => continue,
@@ -132,11 +223,11 @@ pub(super) fn receive_message(
             Err(e) => {
                 message.payload.truncate(start);
                 if e.kind() == std::io::ErrorKind::Interrupted {
-                    *partial = Some(message);
+                    partials.begin(message);
                     continue;
                 }
                 if e.kind() == std::io::ErrorKind::WouldBlock && message.received > 0 {
-                    *partial = Some(message);
+                    partials.begin(message);
                 }
                 return Err(e);
             }
@@ -155,20 +246,7 @@ pub(super) fn receive_message(
         }
 
         let continued = message.received > 0;
-        let same_message = match (&message.rcv_info, &piece.rcv_info) {
-            (Some(first), Some(next)) => {
-                first.assoc_id == next.assoc_id
-                    && first.sid == next.sid
-                    && first.ppid == next.ppid
-                    && first.flags == next.flags
-                    // The SSN has no meaning for unordered messages.
-                    && (first.flags & 1 != 0 || first.ssn == next.ssn)
-            }
-            // Without receive information only the address tells senders apart, and the parts
-            // of a message can come from several addresses of a multihomed peer.
-            _ => one_association || message.from == piece.from,
-        };
-        if continued && (piece.notification != message.notification || !same_message) {
+        if continued && !continues(&message, &piece, one_association) {
             tracing::warn!(
                 "Dropping {} octets of a message whose delivery was aborted.",
                 message.received
@@ -184,35 +262,126 @@ pub(super) fn receive_message(
         message.received = message.received.saturating_add(piece.len);
 
         if !piece.end_of_record {
-            *partial = Some(message);
+            partials.begin(message);
             continue;
         }
-        if !message.notification && message.received > max_message_size {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "discarded a message of {} octets, longer than {}",
-                    message.received, max_message_size
-                ),
-            ));
-        }
-        if message.notification {
-            tracing::debug!("Received Notification.");
-            return Ok(Some(NotificationOrData::Notification(
-                notification_from_message(&message.payload),
-            )));
-        }
-        tracing::debug!("Received Data.");
-        // The buffer had room for the largest read, 4 KiB at least, which a
-        // program that keeps many short messages would pay for each
-        message.payload.shrink_to_fit();
-        return Ok(Some(NotificationOrData::Data(ReceivedData {
-            payload: message.payload,
-            from: message.from,
-            rcv_info: message.rcv_info,
-            nxt_info: piece.nxt_info,
-        })));
+        return finish(message, piece.nxt_info, max_message_size);
     }
+}
+
+// Whether `piece` is the next part of `message`.
+fn continues(message: &PartialMessage, piece: &Piece, one_association: bool) -> bool {
+    let same_message = match (&message.rcv_info, &piece.rcv_info) {
+        (Some(first), Some(next)) => {
+            first.assoc_id == next.assoc_id
+                && first.sid == next.sid
+                && first.ppid == next.ppid
+                && first.flags == next.flags
+                // The SSN has no meaning for unordered messages.
+                && (first.flags & 1 != 0 || first.ssn == next.ssn)
+        }
+        // Without receive information only the address tells senders apart, and the parts
+        // of a message can come from several addresses of a multihomed peer.
+        _ => one_association || message.from == piece.from,
+    };
+    piece.notification == message.notification && same_message
+}
+
+// A message whose last part has come.
+fn finish(
+    mut message: PartialMessage,
+    nxt_info: Option<NxtInfo>,
+    max_message_size: usize,
+) -> std::io::Result<Option<NotificationOrData>> {
+    if !message.notification && message.received > max_message_size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "discarded a message of {} octets, longer than {}",
+                message.received, max_message_size
+            ),
+        ));
+    }
+    if message.notification {
+        tracing::debug!("Received Notification.");
+        return Ok(Some(NotificationOrData::Notification(
+            notification_from_message(&message.payload),
+        )));
+    }
+    tracing::debug!("Received Data.");
+    // The buffer had room for the largest read, 4 KiB at least, which a
+    // program that keeps many short messages would pay for each
+    message.payload.shrink_to_fit();
+    Ok(Some(NotificationOrData::Data(ReceivedData {
+        payload: message.payload,
+        from: message.from,
+        rcv_info: message.rcv_info,
+        nxt_info,
+    })))
+}
+
+// The next part of one of the messages of several associations that come in turns, read into the
+// buffer of the thread and copied to the payload of its message: the association of a part is
+// known once it is read. `None` when no message is whole yet.
+fn interleaved_read(
+    partials: &mut Partials,
+    max_message_size: usize,
+    read: &mut impl FnMut(&mut [u8]) -> std::io::Result<Piece>,
+) -> std::io::Result<Option<Option<NotificationOrData>>> {
+    FIRST_READ.with_borrow_mut(|buffer| {
+        if buffer.is_empty() {
+            buffer.resize(FIRST_READ_SIZE, 0);
+        }
+        let piece = match read(buffer) {
+            Ok(piece) => piece,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let octets = &buffer[..piece.len];
+        if piece.len == 0 && !piece.notification {
+            tracing::debug!("Received end of stream.");
+            partials.messages.clear();
+            return Ok(Some(None));
+        }
+        let message = match partials.take(&piece) {
+            Some(message) if continues(&message, &piece, false) => Some(message),
+            Some(message) => {
+                tracing::warn!(
+                    "Dropping {} octets of a message whose delivery was aborted.",
+                    message.received
+                );
+                None
+            }
+            None => None,
+        };
+        let Some(mut message) = message else {
+            return match begin(octets, &piece, max_message_size)? {
+                First::Part(message) => {
+                    partials.begin(message);
+                    Ok(None)
+                }
+                First::Whole(received) => Ok(Some(received)),
+                First::Interrupted => Ok(None),
+            };
+        };
+        let limit = if message.notification {
+            usize::MAX
+        } else {
+            max_message_size
+        };
+        message.received = message.received.saturating_add(piece.len);
+        if message.received > limit {
+            // Its octets are not kept: it is discarded at its end
+            message.payload = Vec::new();
+        } else {
+            message.payload.extend_from_slice(octets);
+        }
+        if !piece.end_of_record {
+            partials.begin(message);
+            return Ok(None);
+        }
+        finish(message, piece.nxt_info, max_message_size).map(Some)
+    })
 }
 
 // What the first read of a message gave.
@@ -241,7 +410,13 @@ fn first_read(
             }
             Err(error) => return Err(error),
         };
-        let octets = &buffer[..piece.len];
+        begin(&buffer[..piece.len], &piece, max_message_size)
+    })
+}
+
+// What the first part of a message gives, whose octets are `octets`.
+fn begin(octets: &[u8], piece: &Piece, max_message_size: usize) -> std::io::Result<First> {
+    {
         if piece.len == 0 && !piece.notification {
             tracing::debug!("Received end of stream.");
             return Ok(First::Whole(None));
@@ -252,7 +427,7 @@ fn first_read(
             max_message_size
         };
         if !piece.end_of_record {
-            let mut message = PartialMessage::begun(octets, &piece);
+            let mut message = PartialMessage::begun(octets, piece);
             if piece.len > limit {
                 // Its octets are not kept: it is discarded at its end
                 message.payload = Vec::new();
@@ -278,10 +453,10 @@ fn first_read(
         Ok(First::Whole(Some(NotificationOrData::Data(ReceivedData {
             payload: octets.to_vec(),
             from: piece.from,
-            rcv_info: piece.rcv_info,
-            nxt_info: piece.nxt_info,
+            rcv_info: piece.rcv_info.clone(),
+            nxt_info: piece.nxt_info.clone(),
         }))))
-    })
+    }
 }
 
 #[cfg(test)]
@@ -357,7 +532,7 @@ mod tests {
     fn a_message_that_one_read_holds_takes_one_read() {
         for octets in [64, 1400, 16384, 65536] {
             let reads = std::cell::Cell::new(0);
-            let mut partial = None;
+            let mut partial = Partials::default();
             let message: Vec<u8> = (0..octets).map(|i| i as u8).collect();
             let read = kernel(message.clone(), &reads);
             let received = payload(receive_message(&mut partial, 1 << 20, true, read).unwrap());
@@ -367,7 +542,7 @@ mod tests {
         }
         // A longer one takes the reads that it needs.
         let reads = std::cell::Cell::new(0);
-        let mut partial = None;
+        let mut partial = Partials::default();
         let message = vec![7; 200_000];
         let received = payload(
             receive_message(&mut partial, 1 << 20, true, kernel(message.clone(), &reads)).unwrap(),
@@ -381,7 +556,7 @@ mod tests {
     /// of the message and no more, in one read or in several.
     #[test]
     fn a_message_keeps_no_more_memory_than_its_octets() {
-        let mut partial = None;
+        let mut partial = Partials::default();
         let read = reader(vec![data(b"sixty-four octets, say", true, None)]);
         let short = payload(receive_message(&mut partial, 1 << 20, true, read).unwrap());
         assert_eq!(short.capacity(), short.len());
@@ -394,7 +569,7 @@ mod tests {
 
     #[test]
     fn interrupted_read_retains_the_partial_record() {
-        let mut partial = None;
+        let mut partial = Partials::default();
         let read = reader(vec![
             data(b"first", false, None),
             Step::Error(std::io::ErrorKind::Interrupted),
@@ -404,7 +579,7 @@ mod tests {
             payload(receive_message(&mut partial, 100, false, read).unwrap()),
             b"firstlast"
         );
-        assert!(partial.is_none());
+        assert!(partial.is_empty());
     }
 
     #[test]
@@ -428,14 +603,14 @@ mod tests {
             Step::Error(std::io::ErrorKind::WouldBlock),
             last,
         ]);
-        let mut partial = None;
+        let mut partial = Partials::default();
         assert_eq!(
             receive_message(&mut partial, 100, false, &mut read)
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::WouldBlock
         );
-        assert_eq!(partial.as_ref().unwrap().payload, b"first");
+        assert_eq!(partial.messages[0].payload, b"first");
         let Some(NotificationOrData::Data(record)) =
             receive_message(&mut partial, 100, false, read).unwrap()
         else {
@@ -444,12 +619,12 @@ mod tests {
         assert_eq!(record.payload, b"firstlast");
         assert_eq!(record.rcv_info, Some(first));
         assert_eq!(record.nxt_info, Some(next));
-        assert!(partial.is_none());
+        assert!(partial.is_empty());
     }
 
     #[test]
     fn oversized_record_is_drained_before_the_next_record() {
-        let mut partial = None;
+        let mut partial = Partials::default();
         let mut read = reader(vec![
             data(b"12345", false, None),
             data(b"67", true, None),
@@ -461,7 +636,7 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::InvalidData
         );
-        assert!(partial.is_none());
+        assert!(partial.is_empty());
         assert_eq!(
             payload(receive_message(&mut partial, 4, false, read).unwrap()),
             b"ok"
@@ -470,7 +645,7 @@ mod tests {
 
     #[test]
     fn reducing_limit_after_cancellation_drains_the_record() {
-        let mut partial = None;
+        let mut partial = Partials::default();
         let mut read = reader(vec![
             data(b"12345678", false, None),
             Step::Error(std::io::ErrorKind::WouldBlock),
@@ -497,7 +672,7 @@ mod tests {
 
     #[test]
     fn aborted_record_does_not_contaminate_another_association() {
-        let mut partial = None;
+        let mut partial = Partials::default();
         let read = reader(vec![
             data(
                 b"aborted",
@@ -522,6 +697,124 @@ mod tests {
         );
     }
 
+    fn of(assoc_id: i32) -> Option<RcvInfo> {
+        Some(RcvInfo {
+            assoc_id,
+            ..Default::default()
+        })
+    }
+
+    /// On an endpoint, the parts of the messages of several associations come in
+    /// turns: each is assembled apart, and a long one holds back no other.
+    #[test]
+    fn the_messages_of_several_associations_are_assembled_apart() {
+        let mut partials = Partials::default();
+        partials.set_interleaved(true);
+        let mut read = reader(vec![
+            data(b"long ", false, of(7)),
+            data(b"short", true, of(8)),
+            data(b"long", false, of(7)),
+            data(b"other ", false, of(9)),
+            data(b" message", true, of(7)),
+            data(b"message", true, of(9)),
+            Step::Error(std::io::ErrorKind::WouldBlock),
+        ]);
+        let mut next = || {
+            let message = match receive_message(&mut partials, 100, false, &mut read) {
+                Ok(Some(NotificationOrData::Data(message))) => message,
+                other => panic!("{other:?}"),
+            };
+            (
+                message.assoc_id(),
+                String::from_utf8(message.payload).unwrap(),
+            )
+        };
+        assert_eq!(next(), (Some(8), "short".into()));
+        assert_eq!(next(), (Some(7), "long long message".into()));
+        assert_eq!(next(), (Some(9), "other message".into()));
+        assert!(partials.is_empty());
+    }
+
+    /// The parts that an endpoint has of a message whose delivery the kernel gave up
+    /// go with the notification of it, or of the end of its association: they are
+    /// not taken for the beginning of the next message of that association.
+    #[test]
+    fn the_parts_of_a_message_given_up_are_dropped() {
+        let notification = |event: crate::Event, assoc_id: i32| {
+            let mut octets = (event as u16).to_ne_bytes().to_vec();
+            octets.extend_from_slice(&0_u16.to_ne_bytes());
+            let length: u32 = if event == crate::Event::PartialDelivery {
+                24
+            } else {
+                20
+            };
+            octets.extend_from_slice(&length.to_ne_bytes());
+            match event {
+                // sctp_pdapi_event: indication, assoc_id, stream, sequence
+                crate::Event::PartialDelivery => {
+                    octets.extend_from_slice(&0_u32.to_ne_bytes());
+                    octets.extend_from_slice(&assoc_id.to_ne_bytes());
+                    octets.extend_from_slice(&0_u32.to_ne_bytes());
+                    octets.extend_from_slice(&0_u32.to_ne_bytes());
+                }
+                // sctp_assoc_change: state COMM_LOST, error, streams, assoc_id
+                _ => {
+                    octets.extend_from_slice(&1_u16.to_ne_bytes());
+                    octets.extend_from_slice(&0_u16.to_ne_bytes());
+                    octets.extend_from_slice(&0_u16.to_ne_bytes());
+                    octets.extend_from_slice(&0_u16.to_ne_bytes());
+                    octets.extend_from_slice(&assoc_id.to_ne_bytes());
+                }
+            }
+            Step::Piece(
+                octets.clone(),
+                Piece {
+                    len: octets.len(),
+                    notification: true,
+                    end_of_record: true,
+                    rcv_info: None,
+                    nxt_info: None,
+                    from: None,
+                },
+            )
+        };
+        for event in [crate::Event::PartialDelivery, crate::Event::Association] {
+            let mut partials = Partials::default();
+            partials.set_interleaved(true);
+            let mut read = reader(vec![
+                data(b"given up", false, of(7)),
+                data(b"kept ", false, of(8)),
+                notification(event, 7),
+                data(b"new", true, of(7)),
+                data(b"message", true, of(8)),
+            ]);
+            let mut next = || receive_message(&mut partials, 100, false, &mut read).unwrap();
+            assert!(matches!(next(), Some(NotificationOrData::Notification(_))));
+            assert_eq!(payload(next()), b"new");
+            assert_eq!(payload(next()), b"kept message");
+            assert!(partials.is_empty(), "{event:?}");
+        }
+    }
+
+    /// The limit discards the message of one association, and not those of the
+    /// others whose parts come in between.
+    #[test]
+    fn the_limit_discards_the_message_of_one_association_alone() {
+        let mut partials = Partials::default();
+        partials.set_interleaved(true);
+        let mut read = reader(vec![
+            data(b"0123456789", false, of(7)),
+            data(b"short", true, of(8)),
+            data(b"0123456789", true, of(7)),
+            data(b"next", true, of(7)),
+        ]);
+        let mut next = || receive_message(&mut partials, 15, false, &mut read);
+        assert_eq!(payload(next().unwrap()), b"short");
+        assert_eq!(next().unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(payload(next().unwrap()), b"next");
+        assert!(partials.is_empty());
+    }
+
     #[test]
     fn one_association_keeps_a_record_whose_pieces_come_from_two_peer_addresses() {
         let piece = |payload: &[u8], end_of_record, from: &str| {
@@ -538,12 +831,16 @@ mod tests {
             ]
         };
         assert_eq!(
-            payload(receive_message(&mut None, 100, true, reader(pieces())).unwrap()),
+            payload(
+                receive_message(&mut Partials::default(), 100, true, reader(pieces())).unwrap()
+            ),
             b"firstlast"
         );
         // The address is all that tells the associations of a one-to-many socket apart.
         assert_eq!(
-            payload(receive_message(&mut None, 100, false, reader(pieces())).unwrap()),
+            payload(
+                receive_message(&mut Partials::default(), 100, false, reader(pieces())).unwrap()
+            ),
             b"last"
         );
     }
@@ -553,7 +850,7 @@ mod tests {
         let raw = (crate::Event::PartialDelivery as u16)
             .to_ne_bytes()
             .to_vec();
-        let mut partial = None;
+        let mut partial = Partials::default();
         let read = reader(vec![
             data(b"aborted", false, None),
             Step::Piece(
@@ -597,20 +894,20 @@ mod tests {
             data(b"last", true, Some(last)),
         ]);
         assert_eq!(
-            payload(receive_message(&mut None, 100, false, read).unwrap()),
+            payload(receive_message(&mut Partials::default(), 100, false, read).unwrap()),
             b"firstlast"
         );
     }
 
     #[test]
     fn eof_discards_the_incomplete_record() {
-        let mut partial = None;
+        let mut partial = Partials::default();
         let read = reader(vec![data(b"partial", false, None), data(b"", false, None)]);
         assert_eq!(
             receive_message(&mut partial, 100, false, read).unwrap(),
             None
         );
-        assert!(partial.is_none());
+        assert!(partial.is_empty());
     }
 
     /// The limit is for what the peer sends. A notification is the kernel's, and the
@@ -639,7 +936,7 @@ mod tests {
             crate::Notification::Shutdown(crate::Shutdown { assoc_id: 7 }),
         ));
         // A limit of 10 octets gives reads of 11: the notification of 12 comes in two parts
-        let mut partial = None;
+        let mut partial = Partials::default();
         let mut read = reader(vec![
             part(&shutdown[..11], false),
             part(&shutdown[11..], true),
@@ -668,7 +965,8 @@ mod tests {
         let (socket, _peer) = UnixDatagram::pair().unwrap();
         socket.set_nonblocking(true).unwrap();
         for limit in [1000, 3 << 20, DEFAULT_MAX_MESSAGE_SIZE] {
-            let mut partial = Some(PartialMessage {
+            let mut partial = Partials::default();
+            partial.begin(PartialMessage {
                 payload: vec![0; limit],
                 received: limit,
                 ..Default::default()
@@ -681,7 +979,7 @@ mod tests {
                 .kind(),
                 std::io::ErrorKind::WouldBlock
             );
-            let message = partial.unwrap();
+            let message = partial.messages.pop().unwrap();
             assert_eq!(message.payload.len(), limit);
             assert!(
                 message.payload.capacity() <= limit + 1,

@@ -77,10 +77,11 @@ impl SocketOptions<'_> {
 
     /// Enable receive metadata: the stream, payload protocol and association of each message.
     /// Enabled by default. On a [`OneToManyEndpoint`][crate::OneToManyEndpoint], disabling it
-    /// loses the association's identity and can make partially delivered records from
-    /// multihomed peers ambiguous.
+    /// loses the association's identity, and the parts of the messages of several
+    /// associations, which the endpoint can then not tell apart, come one message after the
+    /// other (`SCTP_FRAGMENT_INTERLEAVE` 0): a long message holds back the others.
     pub fn request_rcvinfo(&self, on: bool) -> std::io::Result<()> {
-        sys::request_rcvinfo_internal(self.core.as_fd(), on)
+        self.core.request_rcvinfo(on)
     }
 
     /// Enable metadata describing the next queued message (`SCTP_NXTINFO`).

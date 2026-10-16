@@ -46,6 +46,9 @@ pub(crate) const SCTP_DEFAULT_SNDINFO: libc::c_int = 34;
 // Get SCTP Status
 pub(crate) const SCTP_STATUS: libc::c_int = 14;
 
+// Whether the parts of the messages of several associations may come in turns
+pub(crate) const SCTP_FRAGMENT_INTERLEAVE: libc::c_int = 18;
+
 // Heartbeats and path retransmission limits.
 pub(crate) const SCTP_PEER_ADDR_PARAMS: libc::c_int = 9;
 

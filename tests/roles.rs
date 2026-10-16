@@ -184,58 +184,186 @@ async fn raw_stream_import_transfers_ownership_of_an_established_association() {
     assert_eq!(closed, None, "imported descriptor remains open");
 }
 
-/// On a one-to-many endpoint, a message that arrives in several parts holds back the
-/// messages of the other associations until it is whole: Linux delivers one message at a
-/// time to a socket, and the crate has one assembler for it. This pins what the
-/// documentation says of it; a `Listener` gives each association a socket of its own.
-#[tokio::test]
-async fn a_long_message_of_one_association_holds_back_the_others_on_an_endpoint() {
-    const LONG: usize = 1 << 20;
+/// An endpoint with a receive buffer of `buffer` octets, and two clients: `slow`, whose send
+/// buffer holds `long` octets, and `quick`. `None` where `net.core.wmem_max` is too low.
+async fn endpoint_with_two_clients(
+    buffer: usize,
+    long: usize,
+) -> Option<(
+    oxirush_sctp::OneToManyEndpoint,
+    ConnectedSocket,
+    ConnectedSocket,
+)> {
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    socket.options().set_recv_buffer_size(8 * 1024).unwrap();
+    socket.options().set_recv_buffer_size(buffer).unwrap();
     let endpoint = socket.into_endpoint(4).unwrap();
     let address = endpoint.local_addr().unwrap();
 
     let slow = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-    slow.options().set_send_buffer_size(2 * LONG).unwrap();
-    if slow.options().send_buffer_size().unwrap() < 2 * LONG {
-        eprintln!("`net.core.wmem_max` is below 2 MiB; skipping");
-        return;
+    slow.options().set_send_buffer_size(2 * long).unwrap();
+    if slow.options().send_buffer_size().unwrap() < 2 * long {
+        eprintln!("`net.core.wmem_max` is below {} octets; skipping", 2 * long);
+        return None;
     }
     let (slow, _) = slow.connect(address).await.unwrap();
     let quick = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     let (quick, _) = quick.connect(address).await.unwrap();
+    Some((endpoint, slow, quick))
+}
 
-    // The long message first: the endpoint does not read, so that its delivery in parts
-    // has begun when the short one arrives.
-    let long = tokio::spawn(async move {
-        slow.send(&vec![0x5a; LONG], SendOptions::new())
+/// The endpoint reads from the start; `slow` sends a long message, and `quick`, 300 ms later,
+/// a short one. The lengths of the two messages in the order they came, with the time that
+/// the short one took.
+async fn long_and_short(
+    endpoint: oxirush_sctp::OneToManyEndpoint,
+    slow: ConnectedSocket,
+    quick: ConnectedSocket,
+    long: usize,
+) -> (Vec<usize>, std::time::Duration) {
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(None::<std::time::Instant>));
+    let reader = tokio::spawn({
+        let sent = sent.clone();
+        async move {
+            let mut lengths = Vec::new();
+            let mut short = std::time::Duration::ZERO;
+            while lengths.len() < 2 {
+                let next = endpoint.recv();
+                let received = tokio::time::timeout(std::time::Duration::from_secs(20), next)
+                    .await
+                    .expect("every message arrives")
+                    .unwrap();
+                if let NotificationOrData::Data(message) = received {
+                    if message.payload.len() == 15
+                        && let Some(sent) = *sent.lock().unwrap()
+                    {
+                        short = sent.elapsed();
+                    }
+                    lengths.push(message.payload.len());
+                }
+            }
+            (lengths, short)
+        }
+    });
+    let sending = tokio::spawn(async move {
+        slow.send(&vec![0x5a; long], SendOptions::new())
             .await
             .unwrap();
         slow
     });
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    *sent.lock().unwrap() = Some(std::time::Instant::now());
     quick
         .send(b"a short message", SendOptions::new())
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let result = reader.await.unwrap();
+    drop(sending.await.unwrap());
+    result
+}
 
-    let mut lengths = Vec::new();
-    while lengths.len() < 2 {
-        let received = tokio::time::timeout(std::time::Duration::from_secs(20), endpoint.recv())
-            .await
-            .expect("both messages arrive")
-            .unwrap();
-        if let NotificationOrData::Data(message) = received {
-            lengths.push(message.payload.len());
-        }
-    }
+/// On a one-to-many endpoint, the parts of the messages of several associations come in
+/// turns, and each is assembled apart: a message that arrives in many parts holds back none
+/// of the other associations. With Linux's default (`SCTP_FRAGMENT_INTERLEAVE` 0) and one
+/// assembler, the short message waited for the long one.
+#[tokio::test]
+async fn a_long_message_of_one_association_holds_back_none_of_the_others_on_an_endpoint() {
+    const LONG: usize = 512 << 10;
+    let Some((endpoint, slow, quick)) = endpoint_with_two_clients(BUFFER, LONG).await else {
+        return;
+    };
+    let (lengths, short) = long_and_short(endpoint, slow, quick, LONG).await;
+    eprintln!("{lengths:?}, the short message in {short:?}");
     assert_eq!(
         lengths,
-        [LONG, 15],
+        [15, LONG],
         "the short message waited for the long one"
     );
-    drop(long.await.unwrap());
+    assert!(
+        short < std::time::Duration::from_millis(500),
+        "the short message took {short:?}"
+    );
+}
+
+const BUFFER: usize = 64 << 10;
+
+/// Without the receive information, an endpoint cannot tell the parts of messages of two
+/// associations apart: they come one message after the other, as Linux has it by default,
+/// and a long one holds back the others. A `Listener` gives each association a socket.
+#[tokio::test]
+async fn without_the_receive_information_a_long_message_holds_back_the_others() {
+    const LONG: usize = 512 << 10;
+    let Some((endpoint, slow, quick)) = endpoint_with_two_clients(BUFFER, LONG).await else {
+        return;
+    };
+    endpoint.options().request_rcvinfo(false).unwrap();
+    let (lengths, short) = long_and_short(endpoint, slow, quick, LONG).await;
+    eprintln!("{lengths:?}, the short message in {short:?}");
+    assert_eq!(lengths, [LONG, 15]);
+}
+
+/// A peer that aborts in the middle of a long message leaves nothing of it to the endpoint:
+/// the parts go with the notification that the kernel gave up their delivery, which the
+/// endpoint subscribes to for itself and does not pass on, and the other associations go on.
+#[tokio::test]
+async fn a_peer_that_aborts_in_the_middle_of_a_message_leaves_the_others_alone() {
+    const LONG: usize = 1 << 20;
+    let Some((endpoint, slow, quick)) = endpoint_with_two_clients(8 << 10, LONG).await else {
+        return;
+    };
+    endpoint
+        .options()
+        .subscribe_events(
+            &[oxirush_sctp::Event::Association],
+            oxirush_sctp::SubscribeEventAssocId::All,
+        )
+        .unwrap();
+    let slow = std::sync::Arc::new(slow);
+    let sending = tokio::spawn({
+        let slow = slow.clone();
+        async move { slow.send(&vec![0x5a; LONG], SendOptions::new()).await }
+    });
+    // The endpoint reads, and has the first parts of the long message, when its peer aborts.
+    let receiving = tokio::spawn(async move {
+        let mut received = Vec::new();
+        loop {
+            let next = tokio::time::timeout(std::time::Duration::from_secs(5), endpoint.recv())
+                .await
+                .expect("the endpoint hears of the abort and of the next message")
+                .unwrap();
+            let done =
+                matches!(&next, NotificationOrData::Data(message) if message.payload == b"after");
+            received.push(next);
+            if done {
+                return received;
+            }
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    slow.options()
+        .set_linger(Some(std::time::Duration::ZERO))
+        .unwrap();
+    sending.abort();
+    let _ = sending.await;
+    drop(std::sync::Arc::into_inner(slow).expect("the only owner"));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    quick.send(b"after", SendOptions::new()).await.unwrap();
+    let received = receiving.await.unwrap();
+    use oxirush_sctp::{AssocChangeState, Notification};
+    let lost = received.iter().filter(|received| {
+        matches!(
+            received,
+            NotificationOrData::Notification(Notification::AssociationChange(change))
+                if change.state == AssocChangeState::CommLost
+        )
+    });
+    assert_eq!(lost.count(), 1, "{received:?}");
+    // Nothing of the long message, and no notification that was not subscribed.
+    for received in &received {
+        match received {
+            NotificationOrData::Data(message) => assert_eq!(message.payload, b"after"),
+            NotificationOrData::Notification(Notification::AssociationChange(_)) => {}
+            other => panic!("{other:?}"),
+        }
+    }
 }

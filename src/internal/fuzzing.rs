@@ -1,5 +1,5 @@
 //! Entry points for the fuzz targets of `fuzz/`.
-use super::receive::{Piece, receive_message};
+use super::receive::{Partials, Piece, receive_message};
 use super::{notifications, sys};
 use crate::{Notification, NotificationOrData, NxtInfo, RcvInfo};
 
@@ -19,7 +19,9 @@ pub fn ancillary(control: &[u8], truncated: bool) -> (Option<RcvInfo>, Option<Nx
 pub fn receive(script: &[u8]) {
     const LIMIT: usize = 64;
     let mut script = script;
-    let mut partial = None;
+    let mut partial = Partials::default();
+    // The parts of the messages of several associations in turns, as on an endpoint.
+    partial.set_interleaved(script.first().is_some_and(|first| first & 0x40 != 0));
     // Every call consumes a step, so the loop ends with the script.
     while !script.is_empty() {
         let received = receive_message(&mut partial, LIMIT, script[0] & 0x80 != 0, |buffer| {

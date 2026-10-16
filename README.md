@@ -340,12 +340,10 @@ The crate has no Cargo feature. Its diagnostics go through
 - SCTP over DTLS, the data channels of WebRTC.
 - The rest of RFC 6458: among others authentication, partial reliability
   and stream reconfiguration.
-- A `OneToManyEndpoint` for peers that are not trusted: a message that
-  arrives in several parts holds back the messages of the other
-  associations until it is whole, 3.9 s for a message of 1 MB with a
-  receive buffer of 16 KiB on loopback, and for as long as a peer takes
-  that stops in the middle. A `Listener` gives each association a socket
-  of its own.
+- A receive buffer for each association of a `OneToManyEndpoint`: they
+  share that of the socket, unless `net.sctp.rcvbuf_policy` is 1, and one
+  that fills it makes the others wait. A `Listener` gives each association
+  a socket of its own.
 
 ## Performance
 
