@@ -242,9 +242,9 @@ sctp-rs.
 - tokio's `net`, `rt`, `sync` and `time` features, `time` for the deadline
   of `close` and the overload of the driver, `rt` and `sync` for the tasks
   of the driver and their queues, where sctp-rs enabled `macros` and `rt`
-  for its dependents. The declared
-  minimum versions of the dependencies are ones the crate builds and
-  passes its tests with: tokio 1.32.0, libc 0.2.146, os_socketaddr 0.2.4
-  and tracing 0.1.40 (`cargo update -Z direct-minimal-versions`, Rust
-  1.88).
+  for its dependents. The declared minimum versions of the dependencies
+  are ones the crate builds and passes its tests with: tokio 1.34.0, for
+  the `recv_many` of its channels, libc 0.2.149, which tokio 1.34 needs,
+  os_socketaddr 0.2.4 and tracing 0.1.40 (`cargo update -Z
+  direct-minimal-versions`, Rust 1.88).
 - Diagnostics go through `tracing`, where sctp-rs used `log`.

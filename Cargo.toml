@@ -16,12 +16,12 @@ exclude = [".github/", ".gitignore", "benches/", "fuzz/"]
 
 [dependencies]
 os_socketaddr = { version = "0.2.4" }
-libc = { version = "0.2.145" }
-tokio = { version = "1.32", features = ["net", "rt", "sync", "time"] }
+libc = { version = "0.2.149" }
+tokio = { version = "1.34", features = ["net", "rt", "sync", "time"] }
 tracing = { version = "0.1.40", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-tokio = { version = "1.32", features = ["macros", "rt", "rt-multi-thread", "time"] }
+tokio = { version = "1.34", features = ["macros", "rt", "rt-multi-thread", "time"] }
 
 # `cargo fuzz` builds the crate with `--cfg fuzzing`, which gives the fuzz
 # targets the module `fuzzing`.
