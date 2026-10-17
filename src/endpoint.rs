@@ -158,8 +158,8 @@ impl OneToManyEndpoint {
     /// `messages` are bundled, as
     /// [`ConnectedSocket::send_many`][crate::ConnectedSocket::send_many] has it.
     pub async fn send_many(&self, messages: &[(&[u8], SendOptions)]) -> std::io::Result<usize> {
-        let messages = outgoing(messages)?;
-        self.core.send_many(&messages).await
+        with_associations(messages)?;
+        self.core.send_many(messages).await
     }
 
     /// [`send_many`][Self::send_many] as a poll.
@@ -168,8 +168,8 @@ impl OneToManyEndpoint {
         cx: &mut Context<'_>,
         messages: &[(&[u8], SendOptions)],
     ) -> Poll<std::io::Result<usize>> {
-        match outgoing(messages) {
-            Ok(messages) => self.core.poll_send_many(cx, &messages),
+        match with_associations(messages) {
+            Ok(()) => self.core.poll_send_many(cx, messages),
             Err(error) => Poll::Ready(Err(error)),
         }
     }
@@ -285,20 +285,12 @@ fn shut_down() -> std::io::Error {
 }
 
 // The messages of a batch, each with its association.
-fn outgoing<'a>(messages: &[(&'a [u8], SendOptions)]) -> std::io::Result<Vec<sys::Outgoing<'a>>> {
-    messages
-        .iter()
-        .map(|(payload, options)| {
-            if options.assoc_id() == 0 {
-                return Err(no_association());
-            }
-            Ok(sys::Outgoing {
-                to: None,
-                payload,
-                info: options.info(),
-            })
-        })
-        .collect()
+// The options of each message of a batch of an endpoint name its association.
+fn with_associations(messages: &[(&[u8], SendOptions)]) -> std::io::Result<()> {
+    if messages.iter().any(|(_, options)| options.assoc_id() == 0) {
+        return Err(no_association());
+    }
+    Ok(())
 }
 
 // What a send without an association returns.

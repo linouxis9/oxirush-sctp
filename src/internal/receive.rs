@@ -533,8 +533,8 @@ pub(super) fn receive_batch<'a>(
     max_message_size: usize,
     one_association: bool,
     pieces: impl IntoIterator<Item = (&'a [u8], &'a Piece)>,
-) -> Vec<std::io::Result<Option<NotificationOrData>>> {
-    let mut received = Vec::new();
+    received: &mut Vec<std::io::Result<Option<NotificationOrData>>>,
+) {
     for (octets, piece) in pieces {
         match push(partials, octets, piece, max_message_size, one_association) {
             Ok(None) => {
@@ -551,7 +551,6 @@ pub(super) fn receive_batch<'a>(
             Err(error) => received.push(Err(error)),
         }
     }
-    received
 }
 
 // What the first read of a message gave.

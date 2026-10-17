@@ -229,8 +229,8 @@ impl ConnectedSocket {
     /// that the kernel took waits for the next send. The errors are those of `send`, for the
     /// first message that is not sent.
     pub async fn send_many(&self, messages: &[(&[u8], SendOptions)]) -> std::io::Result<usize> {
-        let messages = Self::outgoing(messages)?;
-        self.core.send_many(&messages).await
+        Self::one_association(messages)?;
+        self.core.send_many(messages).await
     }
 
     /// [`send_many`][Self::send_many] as a poll.
@@ -239,28 +239,18 @@ impl ConnectedSocket {
         cx: &mut Context<'_>,
         messages: &[(&[u8], SendOptions)],
     ) -> Poll<std::io::Result<usize>> {
-        match Self::outgoing(messages) {
-            Ok(messages) => self.core.poll_send_many(cx, &messages),
+        match Self::one_association(messages) {
+            Ok(()) => self.core.poll_send_many(cx, messages),
             Err(error) => Poll::Ready(Err(error)),
         }
     }
 
-    fn outgoing<'a>(
-        messages: &[(&'a [u8], SendOptions)],
-    ) -> std::io::Result<Vec<sys::Outgoing<'a>>> {
-        messages
-            .iter()
-            .map(|(payload, options)| {
-                if options.assoc_id() != 0 {
-                    return Err(Self::not_one_to_many());
-                }
-                Ok(sys::Outgoing {
-                    to: None,
-                    payload,
-                    info: options.info(),
-                })
-            })
-            .collect()
+    // The options of a connected socket name no association.
+    fn one_association(messages: &[(&[u8], SendOptions)]) -> std::io::Result<()> {
+        if messages.iter().any(|(_, options)| options.assoc_id() != 0) {
+            return Err(Self::not_one_to_many());
+        }
+        Ok(())
     }
 
     /// Receive the messages and notifications that the kernel holds, up to `limit`, in one

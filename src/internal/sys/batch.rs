@@ -1,21 +1,12 @@
 //! Messages sent and received several at a time: `sendmmsg` and `recvmmsg`.
 use super::message::ancillary_info;
-use crate::SendInfo;
+use crate::SendOptions;
 use crate::consts::MSG_NOTIFICATION;
 use crate::internal::receive::Piece;
 use crate::types::CmsgType;
 use crate::types::internal::SndInfoWire;
 use os_socketaddr::OsSocketAddr;
-use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, BorrowedFd};
-
-/// One message of a batch to send: where it goes on a one-to-many socket, its octets and what
-/// it is sent with.
-pub(crate) struct Outgoing<'a> {
-    pub(crate) to: Option<SocketAddr>,
-    pub(crate) payload: &'a [u8],
-    pub(crate) info: SendInfo,
-}
 
 /// The size of the send buffer of a socket and what of it is free, in octets as the kernel
 /// counts them, which is more than the octets of the messages: `SO_MEMINFO`.
@@ -40,37 +31,56 @@ struct SndInfoControl {
     bytes: [u8; 64],
 }
 
+/// The buffers of a batch of sends, which a thread keeps from one batch to the next: what
+/// they point to is written again at each batch.
+#[derive(Default)]
+struct SendSlots {
+    iovecs: Vec<libc::iovec>,
+    controls: Vec<SndInfoControl>,
+    headers: Vec<libc::mmsghdr>,
+}
+
+std::thread_local! {
+    static SEND_SLOTS: std::cell::RefCell<SendSlots> = std::cell::RefCell::new(SendSlots::default());
+}
+
 /// Send `messages` with one `sendmmsg`, each with its own send information, and with
 /// `MSG_MORE` when `more`: the kernel then holds the DATA chunks of their association to
 /// bundle them with those of the next send, which has to come without it. The number of
 /// messages that the kernel took, from the first; the error of the first otherwise.
 pub(crate) fn sctp_sendmmsg_once(
     fd: BorrowedFd<'_>,
-    messages: &[Outgoing<'_>],
+    messages: &[(&[u8], SendOptions)],
     more: bool,
 ) -> std::io::Result<usize> {
+    SEND_SLOTS.with_borrow_mut(|slots| send_from(fd, messages, more, slots))
+}
+
+fn send_from(
+    fd: BorrowedFd<'_>,
+    messages: &[(&[u8], SendOptions)],
+    more: bool,
+    slots: &mut SendSlots,
+) -> std::io::Result<usize> {
     let count = messages.len().min(libc::c_uint::MAX as usize);
-    let mut addresses: Vec<Option<OsSocketAddr>> = Vec::with_capacity(count);
-    let mut iovecs: Vec<libc::iovec> = Vec::with_capacity(count);
-    let mut controls = vec![
-        SndInfoControl {
-            _align: [],
-            bytes: [0; 64]
-        };
-        count
-    ];
     // Safety: `CMSG_SPACE` and `CMSG_LEN` only compute sizes.
     let (space, length) = unsafe {
         let size = std::mem::size_of::<SndInfoWire>() as u32;
         (libc::CMSG_SPACE(size) as usize, libc::CMSG_LEN(size))
     };
     assert!(space <= 64, "SCTP_SNDINFO fits in its control buffer");
-    for (message, control) in messages[..count].iter().zip(&mut controls) {
-        addresses.push(message.to.map(OsSocketAddr::from));
-        iovecs.push(libc::iovec {
-            iov_base: message.payload.as_ptr() as *mut libc::c_void,
-            iov_len: message.payload.len(),
+    slots.iovecs.clear();
+    slots.controls.clear();
+    slots.headers.clear();
+    for (payload, options) in &messages[..count] {
+        slots.iovecs.push(libc::iovec {
+            iov_base: payload.as_ptr() as *mut libc::c_void,
+            iov_len: payload.len(),
         });
+        let mut control = SndInfoControl {
+            _align: [],
+            bytes: [0; 64],
+        };
         // Some platforms have private fields in `cmsghdr`.
         // Safety: an all-zero `cmsghdr` is valid, and the buffer has room for it and its data.
         unsafe {
@@ -80,7 +90,7 @@ pub(crate) fn sctp_sendmmsg_once(
             header.cmsg_len = length as _;
             std::ptr::write(control.bytes.as_mut_ptr().cast::<libc::cmsghdr>(), header);
             // The payload protocol identifier goes in network byte order
-            let wire = SndInfoWire::from(&message.info);
+            let wire = SndInfoWire::from(&options.info());
             let data = control.bytes.as_mut_ptr().add(libc::CMSG_LEN(0) as usize);
             std::ptr::copy_nonoverlapping(
                 std::ptr::addr_of!(wire).cast::<u8>(),
@@ -88,30 +98,26 @@ pub(crate) fn sctp_sendmmsg_once(
                 std::mem::size_of::<SndInfoWire>(),
             );
         }
+        slots.controls.push(control);
     }
-    let mut headers: Vec<libc::mmsghdr> = Vec::with_capacity(count);
-    for index in 0..count {
+    // The vectors are complete: what the headers point to stays where it is.
+    for (iovec, control) in slots.iovecs.iter_mut().zip(&mut slots.controls) {
         // Safety: an all-zero `mmsghdr` is valid; some platforms have private fields in it.
         let mut header: libc::mmsghdr = unsafe { std::mem::zeroed() };
-        if let Some(address) = &addresses[index] {
-            let address: &[u8] = address.as_ref();
-            header.msg_hdr.msg_name = address.as_ptr() as *mut libc::c_void;
-            header.msg_hdr.msg_namelen = address.len() as _;
-        }
-        header.msg_hdr.msg_iov = &mut iovecs[index];
+        header.msg_hdr.msg_iov = iovec;
         header.msg_hdr.msg_iovlen = 1;
-        header.msg_hdr.msg_control = controls[index].bytes.as_mut_ptr() as *mut libc::c_void;
+        header.msg_hdr.msg_control = control.bytes.as_mut_ptr() as *mut libc::c_void;
         header.msg_hdr.msg_controllen = space as _;
-        headers.push(header);
+        slots.headers.push(header);
     }
     // Report a closed association as `EPIPE` without raising `SIGPIPE`.
     let flags = libc::MSG_NOSIGNAL | if more { libc::MSG_MORE } else { 0 };
-    // Safety: every pointer of the headers points into `addresses`, `iovecs`, `controls` or
-    // the payloads, which outlive the call, with the lengths given beside them.
+    // Safety: every pointer of the headers points into the slots or the payloads, which
+    // outlive the call, with the lengths given beside them.
     let sent = unsafe {
         libc::sendmmsg(
             fd.as_raw_fd(),
-            headers.as_mut_ptr(),
+            slots.headers.as_mut_ptr(),
             count as libc::c_uint,
             flags as _,
         )
