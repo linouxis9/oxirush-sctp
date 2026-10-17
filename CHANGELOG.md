@@ -224,6 +224,12 @@ sctp-rs.
   messages of a `recvmsg`) and `receive` (the assembly of messages from any
   sequence of parts).
 - A `SECURITY.md` that says how to report a vulnerability.
+- The module `driver`: `driver::spawn(socket, DriverConfig)` gives a
+  `Writer` and a `Reader` of a `ConnectedSocket` or a `OneToManyEndpoint`,
+  with a task that sends what is queued in batches, the associations of an
+  endpoint in turns, and one that receives in batches. The writer's queue
+  is in overload when its messages wait longer than a target (CoDel's
+  rule), and a send then fails at once or waits, as `DriverConfig` says.
 - `benches/`, a package of its own that times a message through an
   association with criterion and profiles it with pprof, and measures the
   messages a second of one message a call against batches. The published
@@ -232,8 +238,10 @@ sctp-rs.
 ### Requirements
 
 - Linux 5.0 or later, and Rust 1.88 or later.
-- tokio's `net` and `time` features, `time` for the deadline of `close`,
-  where sctp-rs enabled `macros` and `rt` for its dependents. The declared
+- tokio's `net`, `rt`, `sync` and `time` features, `time` for the deadline
+  of `close` and the overload of the driver, `rt` and `sync` for the tasks
+  of the driver and their queues, where sctp-rs enabled `macros` and `rt`
+  for its dependents. The declared
   minimum versions of the dependencies are ones the crate builds and
   passes its tests with: tokio 1.32.0, libc 0.2.146, os_socketaddr 0.2.4
   and tracing 0.1.40 (`cargo update -Z direct-minimal-versions`, Rust

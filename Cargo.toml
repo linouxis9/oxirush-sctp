@@ -17,7 +17,7 @@ exclude = [".github/", ".gitignore", "benches/", "fuzz/"]
 [dependencies]
 os_socketaddr = { version = "0.2.4" }
 libc = { version = "0.2.145" }
-tokio = { version = "1.32" , features = ["net", "time"]}
+tokio = { version = "1.32", features = ["net", "rt", "sync", "time"] }
 tracing = { version = "0.1.40", default-features = false, features = ["std"] }
 
 [dev-dependencies]

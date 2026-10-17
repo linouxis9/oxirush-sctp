@@ -281,6 +281,7 @@ compile_error!(
 );
 
 mod connected_socket;
+pub mod driver;
 mod endpoint;
 mod listener;
 mod options;

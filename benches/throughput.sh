@@ -23,6 +23,7 @@ cases='pair 1 300000 1
 pair 1 300000 1:64
 pair 1 300000 64:1
 pair 1 300000 64
+pair 1 300000 driver:64
 to-endpoint 1 300000 1
 to-endpoint 1 300000 1:64
 to-endpoint 1 300000 64
@@ -35,6 +36,7 @@ to-endpoint 1000 300000 64
 from-endpoint 1 300000 1
 from-endpoint 1 300000 64:1
 from-endpoint 1 300000 64
+from-endpoint 1 300000 driver:64
 from-endpoint 100 100000 1
 from-endpoint 100 100000 64'
 

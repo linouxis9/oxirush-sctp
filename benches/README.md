@@ -34,7 +34,8 @@ CPUS=2,3 ROUNDS=3 OCTETS="100 200 400" ./throughput.sh             # every case,
 one connected socket for each association that sends to one endpoint, and
 `from-endpoint` an endpoint that sends to its associations in turns. A
 batch of 1 is `send` and `recv`, a larger one `send_many` and `recv_many`,
-and `64:1` a batch of 64 for the sender and of 1 for the receiver. The
+`64:1` a batch of 64 for the sender and of 1 for the receiver, and
+`driver:64` the writer of a driver, one message a `Writer::send`. The
 senders keep at most 4096 messages ahead of the receivers, and every socket
 has a receive buffer of 4 MiB: past what it holds, Linux drops packets, and
 a run would time retransmissions instead of calls.

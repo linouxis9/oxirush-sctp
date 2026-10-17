@@ -8,7 +8,9 @@
 //! The arguments are the scenario, the octets of a message, the messages, the associations
 //! and the batch. A batch of 1 is `send` and `recv`, one message a call; a larger one is
 //! `send_many` and `recv_many`, up to that many a call; `64:1` is a batch of 64 for the
-//! senders and of 1 for the receivers. The scenarios:
+//! senders and of 1 for the receivers. `driver:64` sends through the writer of a driver
+//! (`oxirush_sctp::driver`), one message a `Writer::send`, in `pair` and `from-endpoint`.
+//! The scenarios:
 //!
 //! - `pair`: one association, from a connected socket to another;
 //! - `to-endpoint`: one connected socket for each association, which send in turns, to one
@@ -19,6 +21,7 @@
 //! It prints the messages a second, the time and the CPU time of the process a message, user
 //! and system, from when the associations are up.
 
+use oxirush_sctp::driver::{self, DriverConfig, OnOverload};
 use oxirush_sctp::{
     ConnectedSocket, NotificationOrData, OneToManyEndpoint, SendOptions, Socket,
     SocketToAssociation,
@@ -77,7 +80,11 @@ fn main() {
         octets: octets.parse().unwrap(),
         messages: messages.parse().unwrap(),
         associations: associations.parse().unwrap(),
-        send_batch: batch.split(':').next().unwrap().parse().unwrap(),
+        // The writer of a driver is a batch of 0
+        send_batch: match batch.split(':').next().unwrap() {
+            "driver" => 0,
+            send => send.parse().unwrap(),
+        },
         receive_batch: batch.split(':').next_back().unwrap().parse().unwrap(),
     };
     let (elapsed, cpu) = match scenario.as_str() {
@@ -86,13 +93,16 @@ fn main() {
         "from-endpoint" => from_endpoint(&run),
         _ => panic!("no scenario {scenario}"),
     };
+    let sender = match run.send_batch {
+        0 => "driver".to_string(),
+        batch => batch.to_string(),
+    };
     println!(
-        "{scenario} octets {} messages {} associations {} batch {}:{}: \
+        "{scenario} octets {} messages {} associations {} batch {sender}:{}: \
          {:.0} messages/s, {:.3} s, {:.2} us of CPU a message",
         run.octets,
         run.messages,
         run.associations,
-        run.send_batch,
         run.receive_batch,
         run.messages as f64 / elapsed,
         elapsed,
@@ -151,6 +161,15 @@ async fn connect(address: SocketAddr) -> ConnectedSocket {
         .unwrap();
     let (socket, _) = socket.connect(address).await.unwrap();
     socket
+}
+
+/// A driver whose writer never refuses: this measures what it carries, not its overload.
+fn driver_config() -> DriverConfig {
+    let mut config = DriverConfig::default();
+    config.target = std::time::Duration::from_secs(10);
+    config.ceiling = std::time::Duration::from_secs(10);
+    config.on_overload = OnOverload::Wait;
+    config
 }
 
 /// Send `count` messages on `socket`, `batch` a call; `total` counts what all senders sent.
@@ -224,7 +243,16 @@ fn pair(run: &Run) -> (f64, f64) {
             }
         });
         let payload = vec![0x5a; octets];
-        send_on(&sender, &payload, count, send_batch, &window, &mut 0).await;
+        if send_batch == 0 {
+            let (writer, _) = driver::spawn(sender, driver_config()).unwrap();
+            for sent in 0..count {
+                window.wait(sent).await;
+                let options = SendOptions::new().ppid(60);
+                writer.send(payload.clone(), options).await.unwrap();
+            }
+        } else {
+            send_on(&sender, &payload, count, send_batch, &window, &mut 0).await;
+        }
         receiving.await.unwrap()
     })
 }
@@ -339,7 +367,14 @@ fn from_endpoint(run: &Run) -> (f64, f64) {
             .iter()
             .map(|identity| SendOptions::new().ppid(60).association(*identity))
             .collect();
-        if batch == 1 {
+        if batch == 0 {
+            let (writer, _) = driver::spawn(endpoint, driver_config()).unwrap();
+            for index in 0..count {
+                window.wait(index).await;
+                let options = options[index % associations];
+                writer.send(payload.clone(), options).await.unwrap();
+            }
+        } else if batch == 1 {
             for index in 0..count {
                 window.wait(index).await;
                 endpoint
@@ -364,7 +399,7 @@ fn from_endpoint(run: &Run) -> (f64, f64) {
             clients.push(task.await.unwrap());
         }
         let measured = (begun.elapsed().as_secs_f64(), cpu() - cpu_begun);
-        drop((endpoint, clients));
+        drop(clients);
         measured
     })
 }
