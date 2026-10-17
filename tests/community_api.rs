@@ -106,12 +106,11 @@ async fn borrowed_send_converts_host_ppid_without_changing_legacy_wire_order() {
     expect_message(&peer, payload, 60).await;
     // The low-level send information has the identifier as a number too.
     client
-        .send_data(SendData::new(payload.to_vec()).with_info({
-            let mut info = SendInfo::default();
-            info.sid = 2;
-            info.ppid = 18;
-            info.flags = 1;
-            info
+        .send_data(SendData::new(payload.to_vec()).with_info(SendInfo {
+            sid: 2,
+            ppid: 18,
+            flags: SendInfo::UNORDERED,
+            ..Default::default()
         }))
         .await
         .unwrap();

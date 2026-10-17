@@ -49,8 +49,10 @@ async fn the_options_of_an_association_are_set_and_read_back() {
 
         let before = options.association_params(0).unwrap();
         assert!(before.max_retransmissions > 0 && before.cookie_life > 0);
-        let mut params = AssociationParams::default();
-        params.max_retransmissions = 4;
+        let params = AssociationParams {
+            max_retransmissions: 4,
+            ..Default::default()
+        };
         options.set_association_params(params).unwrap();
         let after = options.association_params(0).unwrap();
         assert_eq!(after.max_retransmissions, 4);

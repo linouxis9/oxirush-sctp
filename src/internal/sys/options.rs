@@ -6,8 +6,8 @@ use crate::types::internal::{
     RtoInfoWire, SackInfoWire, SndInfoWire, SubscribeEvent,
 };
 use crate::{
-    AssociationId, AssociationParams, ConnStatus, Event, EventSubscriptionError, PeerAddressParams,
-    RtoInfo, SackInfo, SendInfo, SubscribeEventAssocId,
+    AssociationId, AssociationParams, ConnStatus, Event, EventSubscriptionError, InitParams,
+    PeerAddressParams, RtoInfo, SackInfo, SendInfo, SubscribeEventAssocId,
 };
 use os_socketaddr::OsSocketAddr;
 use std::convert::TryInto;
@@ -171,19 +171,33 @@ pub(crate) fn request_heartbeat_internal(
     setsockopt_internal(fd, SOL_SCTP, SCTP_PEER_ADDR_PARAMS, &value)
 }
 
+pub(crate) fn sctp_init_params_internal(fd: BorrowedFd<'_>) -> std::io::Result<InitParams> {
+    let empty = InitMsg {
+        ostreams: 0,
+        istreams: 0,
+        retries: 0,
+        timeout: 0,
+    };
+    // Safety: `InitMsg` holds integers only, so any bytes are a valid value.
+    let value = unsafe { getsockopt_internal(fd, SOL_SCTP, SCTP_INITMSG, empty)? };
+    Ok(InitParams {
+        outbound_streams: value.ostreams,
+        inbound_streams: value.istreams,
+        max_attempts: value.retries,
+        max_init_timeout: value.timeout,
+    })
+}
+
 pub(crate) fn sctp_setup_init_params_internal(
     fd: BorrowedFd<'_>,
-    ostreams: u16,
-    istreams: u16,
-    retries: u16,
-    timeout: u16,
+    params: InitParams,
 ) -> std::io::Result<()> {
     tracing::debug!("Setting up `init_params` using `setsockopt`");
     let init_params = InitMsg {
-        ostreams,
-        istreams,
-        retries,
-        timeout,
+        ostreams: params.outbound_streams,
+        istreams: params.inbound_streams,
+        retries: params.max_attempts,
+        timeout: params.max_init_timeout,
     };
 
     unsafe {

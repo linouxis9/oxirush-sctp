@@ -444,8 +444,10 @@ async fn a_lost_peer_in_network_namespace_is_a_time_out() {
     let mut path = PeerAddressParams::new(0, "0.0.0.0:0".parse().unwrap());
     path.path_max_retrans = 2;
     options.set_peer_address_params(path).unwrap();
-    let mut association = AssociationParams::default();
-    association.max_retransmissions = 2;
+    let association = AssociationParams {
+        max_retransmissions: 2,
+        ..Default::default()
+    };
     options.set_association_params(association).unwrap();
     assert_eq!(
         options.association_params(0).unwrap().max_retransmissions,

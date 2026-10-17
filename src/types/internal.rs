@@ -39,7 +39,7 @@ pub(crate) struct SubscribeEvent {
 
 // SCTP Initiation Structure (See Section 5.3.1 of RFC 6458)
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct InitMsg {
     pub(crate) ostreams: u16,
     pub(crate) istreams: u16,

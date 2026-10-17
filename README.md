@@ -250,7 +250,7 @@ Every socket type has `options()`. The sockets implement `AsFd` and
 `AsRawFd` for an option that the crate does not wrap.
 
 ```rust
-use oxirush_sctp::{Socket, SocketToAssociation};
+use oxirush_sctp::{InitParams, Socket, SocketToAssociation};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {
@@ -260,7 +260,7 @@ async fn main() -> std::io::Result<()> {
     socket.bind("127.0.0.1:0".parse().unwrap())?;
     let options = socket.options();
     options.set_nodelay(true)?; // send small messages at once
-    options.set_init_params(4, 4, 0, 0)?; // four streams each way
+    options.set_init_params(InitParams::streams(4, 4))?; // four streams each way
     options.set_max_message_size(64 << 10); // refuse longer received messages
     let listener = socket.listen(5)?;
 

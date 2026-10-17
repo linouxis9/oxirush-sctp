@@ -33,7 +33,7 @@ sctp-rs.
 | `sctp_get_status` | `status` |
 | `sctp_subscribe_event`, `sctp_subscribe_events` | `options().subscribe_events(&[Event], SubscribeEventAssocId)` |
 | `sctp_unsubscribe_event`, `sctp_unsubscribe_events` | `options().unsubscribe_events(..)` |
-| `sctp_setup_init_params` | `options().set_init_params` |
+| `sctp_setup_init_params(ostreams, istreams, retries, timeout)` | `options().set_init_params(InitParams)`, with `InitParams::streams(4, 4)`; `init_params()` reads them |
 | `sctp_request_rcvinfo`, `sctp_request_nxtinfo` | `options().request_rcvinfo`, `options().request_nxtinfo` |
 | `sctp_set_default_sendinfo` | `options().set_default_sendinfo` |
 
@@ -41,9 +41,19 @@ sctp-rs.
 
 - Every public enum and every public structure is `#[non_exhaustive]`: a
   `match` needs a wildcard arm, and a structure is not written as a literal.
-  `SendData::new(payload).with_info(info)`, `RtoInfo::new(initial, max,
-  min)`, `PeerAddressParams::new(assoc_id, address)` and `Default` make the
-  values that a program gives, whose fields it can then set.
+  `SendData::new(payload).with_info(info)`, `PeerAddressParams::new(assoc_id,
+  address)` and `Default` make the values that a program gives, whose
+  fields it can then set. The structures of RFC 6458 that a program gives
+  the kernel, whose fields the RFC fixes, are the exception: `SendInfo`,
+  `InitParams`, `RtoInfo`, `AssociationParams` and `SackInfo` are written
+  as literals, as in `SendInfo { ppid: 60, ..Default::default() }`.
+- The flags of a send have names: `SendInfo::UNORDERED`, `ADDR_OVER`,
+  `ABORT`, `SACK_IMMEDIATELY`, `SENDALL` and `EOF`, where `flags` took
+  numbers.
+- `Debug` prints octets as their number and in hexadecimal, `6 octets
+  001570696e67`, in a received or sent message, a send failure, a remote
+  error, the information of an association change and an unsupported
+  notification.
 - `Notification` has five more variants, `PeerAddressChange`,
   `SendFailure`, `RemoteError`, `PartialDelivery` and `SenderDry`, and
   `Unsupported` now carries the number of the type and the octets of a

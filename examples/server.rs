@@ -6,8 +6,8 @@
 //! ```
 
 use oxirush_sctp::{
-    AssocChangeState, ConnectedSocket, Event, Listener, Notification, NotificationOrData,
-    SendOptions, Socket, SocketToAssociation, SubscribeEventAssocId,
+    AssocChangeState, ConnectedSocket, Event, InitParams, Listener, Notification,
+    NotificationOrData, SendOptions, Socket, SocketToAssociation, SubscribeEventAssocId,
 };
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -84,7 +84,7 @@ async fn main() -> std::io::Result<()> {
     // The associations accepted later inherit these options.
     let options = socket.options();
     options.set_nodelay(true)?; // send small messages at once
-    options.set_init_params(4, 4, 0, 0)?; // four streams each way
+    options.set_init_params(InitParams::streams(4, 4))?; // four streams each way
     options.subscribe_events(
         &[Event::Association, Event::Shutdown],
         SubscribeEventAssocId::All,

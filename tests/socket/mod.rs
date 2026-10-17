@@ -212,7 +212,7 @@ async fn socket_init_params_set_ostreams_success() {
     let client_socket = create_client_socket(SocketToAssociation::OneToMany, true);
     let result = client_socket
         .options()
-        .set_init_params(client_ostreams, client_istreams, 0, 0);
+        .set_init_params(InitParams::streams(client_ostreams, client_istreams));
     assert!(result.is_ok(), "{:#?}", result.err().unwrap());
 
     let assoc_id = connect_endpoint(client_socket, &[bindaddr]).await;
@@ -345,8 +345,22 @@ async fn connect_in_network_namespace_times_out() {
     // One INIT, given up after 100 ms.
     client_socket
         .options()
-        .set_init_params(1, 1, 1, 100)
+        .set_init_params(InitParams {
+            outbound_streams: 1,
+            inbound_streams: 1,
+            max_attempts: 1,
+            max_init_timeout: 100,
+        })
         .unwrap();
+    assert_eq!(
+        client_socket.options().init_params().unwrap(),
+        InitParams {
+            outbound_streams: 1,
+            inbound_streams: 1,
+            max_attempts: 1,
+            max_init_timeout: 100,
+        }
+    );
     client_socket
         .options()
         .set_rto_info(RtoInfo::new(100, 100, 100))

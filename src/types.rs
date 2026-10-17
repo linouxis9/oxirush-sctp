@@ -1,5 +1,18 @@
 //! Types used by the Public APIs
 
+/// Octets as `Debug` prints them: their number, then each in hexadecimal.
+pub(crate) struct Octets<'a>(pub(crate) &'a [u8]);
+
+impl std::fmt::Debug for Octets<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} octets ", self.0.len())?;
+        for octet in self.0 {
+            write!(f, "{octet:02x}")?;
+        }
+        Ok(())
+    }
+}
+
 /// SCTP Association ID Type
 pub type AssociationId = i32;
 
@@ -43,8 +56,9 @@ pub enum NotificationOrData {
 /// Structure Representing SCTP Received Data.
 ///
 /// This structure is returned by the `recv` API call. This contains in addition to 'received'
-/// data, any ancillary data that is received during the underlying system call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// data, any ancillary data that is received during the underlying system call. `Debug`
+/// prints the payload as its length and its octets in hexadecimal.
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReceivedData {
     /// Received Message Payload.
@@ -60,6 +74,17 @@ pub struct ReceivedData {
 
     /// Optional ancillary information about the next call to `recv`.
     pub nxt_info: Option<NxtInfo>,
+}
+
+impl std::fmt::Debug for ReceivedData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReceivedData")
+            .field("payload", &Octets(&self.payload))
+            .field("from", &self.from)
+            .field("rcv_info", &self.rcv_info)
+            .field("nxt_info", &self.nxt_info)
+            .finish()
+    }
 }
 
 impl ReceivedData {
@@ -107,7 +132,7 @@ pub enum ReceivedInto {
 /// Structure Representing Data to be Sent.
 ///
 /// This structure contains actual payload and optional ancillary data.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SendData {
     /// Message payload.
@@ -115,6 +140,15 @@ pub struct SendData {
 
     /// Optional ancillary information used to send the data.
     pub snd_info: Option<SendInfo>,
+}
+
+impl std::fmt::Debug for SendData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SendData")
+            .field("payload", &Octets(&self.payload))
+            .field("snd_info", &self.snd_info)
+            .finish()
+    }
 }
 
 impl SendData {
@@ -294,19 +328,23 @@ impl PeerAddressParams {
     }
 }
 
-/// Ancillary send information (Section 5.3.4 of RFC 6458).
+/// Ancillary send information (Section 5.3.4 of RFC 6458): `struct sctp_sndinfo`, whose
+/// fields the RFC fixes.
 ///
-/// `SendInfo::default()` is an ordered message on stream 0, and its fields are set one by
-/// one.
+/// ```
+/// use oxirush_sctp::SendInfo;
+///
+/// // An unordered message of NGAP on stream 1
+/// let info = SendInfo { sid: 1, ppid: 60, flags: SendInfo::UNORDERED, ..Default::default() };
+/// assert_eq!(info.assoc_id, 0);
+/// ```
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct SendInfo {
     /// Stream ID of the stream to send the data on.
     pub sid: u16,
 
-    /// Flags to be used while sending the data, from `enum sctp_sinfo_flags`: 1 sends
-    /// unordered. On a one-to-many socket, 4 aborts the association (`SCTP_ABORT`) and 0x200
-    /// with an empty payload shuts it down (`SCTP_EOF`); a one-to-one socket refuses both.
+    /// Flags of the send, `enum sctp_sinfo_flags`, among them [`UNORDERED`][Self::UNORDERED],
+    /// [`ABORT`][Self::ABORT] and [`EOF`][Self::EOF], which can be combined with `|`.
     pub flags: u16,
 
     /// Payload protocol identifier, as a number: 60 for NGAP. The crate converts it to the
@@ -320,10 +358,73 @@ pub struct SendInfo {
     pub assoc_id: AssociationId,
 }
 
+impl SendInfo {
+    /// Deliver without ordering relative to the other messages of the stream
+    /// (`SCTP_UNORDERED`).
+    pub const UNORDERED: u16 = 1;
+
+    /// Send to the address of the send, a peer address of the association, rather than to its
+    /// primary path (`SCTP_ADDR_OVER`).
+    pub const ADDR_OVER: u16 = 1 << 1;
+
+    /// Abort the association, with the payload as the reason of a user-initiated abort
+    /// (`SCTP_ABORT`). A one-to-many socket alone takes it: `ConnectedSocket::abort` does it
+    /// on a one-to-one socket.
+    pub const ABORT: u16 = 1 << 2;
+
+    /// Ask the peer to acknowledge this message at once (`SCTP_SACK_IMMEDIATELY`).
+    pub const SACK_IMMEDIATELY: u16 = 1 << 3;
+
+    /// Send the message on every association of a one-to-many socket (`SCTP_SENDALL`).
+    pub const SENDALL: u16 = 1 << 6;
+
+    /// Shut the association down gracefully, with an empty payload (`SCTP_EOF`). A
+    /// one-to-many socket alone takes it: `ConnectedSocket::shutdown` does it on a one-to-one
+    /// socket.
+    pub const EOF: u16 = 0x200;
+}
+
 impl From<SendOptions> for SendInfo {
     /// The send information of these options, to which flags can be added.
     fn from(options: SendOptions) -> Self {
         options.info()
+    }
+}
+
+/// What the associations of a socket start with (`SCTP_INITMSG`, Section 8.1.3 of RFC 6458).
+/// When setting them, a 0 leaves the value unchanged, as `Default` has it.
+///
+/// ```
+/// use oxirush_sctp::InitParams;
+///
+/// // Four streams each way
+/// let init = InitParams::streams(4, 4);
+/// assert_eq!(init, InitParams { outbound_streams: 4, inbound_streams: 4, ..Default::default() });
+/// ```
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct InitParams {
+    /// Outbound streams that this side asks for. Linux opens ten by default.
+    pub outbound_streams: u16,
+
+    /// Inbound streams that this side takes at most.
+    pub inbound_streams: u16,
+
+    /// Times that the INIT is sent before the association fails to start.
+    pub max_attempts: u16,
+
+    /// The longest that the INIT waits before it is sent again, in milliseconds.
+    pub max_init_timeout: u16,
+}
+
+impl InitParams {
+    /// Ask for `outbound` streams, and take `inbound` at most, leaving the rest unchanged.
+    pub const fn streams(outbound: u16, inbound: u16) -> Self {
+        Self {
+            outbound_streams: outbound,
+            inbound_streams: inbound,
+            max_attempts: 0,
+            max_init_timeout: 0,
+        }
     }
 }
 
@@ -339,7 +440,6 @@ impl From<SendOptions> for SendInfo {
 /// assert_eq!((rto.assoc_id, rto.initial, rto.max, rto.min), (0, 200, 1000, 100));
 /// ```
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct RtoInfo {
     /// Association ID of the association, or 0 for the defaults of the socket, which new
     /// associations start with. It is ignored for the association of a One-to-one socket.
@@ -373,7 +473,6 @@ impl RtoInfo {
 ///
 /// When setting them, a 0 leaves the value unchanged.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct AssociationParams {
     /// Association ID of the association, or 0 for the defaults of the socket, which new
     /// associations start with. It is ignored for the association of a One-to-one socket.
@@ -397,7 +496,6 @@ pub struct AssociationParams {
 
 /// Delayed acknowledgement (`SCTP_DELAYED_SACK`, see Section 8.1.19 of RFC 6458).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct SackInfo {
     /// Association ID of the association, or 0 for the defaults of the socket. It is ignored
     /// for the association of a One-to-one socket.
@@ -461,9 +559,10 @@ pub struct NxtInfo {
     pub assoc_id: AssociationId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
-/// An `enum` representing the notifications received on the SCTP Sockets.
+/// An `enum` representing the notifications received on the SCTP Sockets. `Debug` prints
+/// octets as their length and each in hexadecimal.
 pub enum Notification {
     /// Association Change Notification. See Section 6.1.1 of RFC 6458.
     AssociationChange(AssociationChange),
@@ -501,6 +600,34 @@ pub enum Notification {
         /// The notification as the kernel delivered it, header included, in host byte order.
         data: Vec<u8>,
     },
+}
+
+impl std::fmt::Debug for Notification {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AssociationChange(change) => {
+                f.debug_tuple("AssociationChange").field(change).finish()
+            }
+            Self::Shutdown(shutdown) => f.debug_tuple("Shutdown").field(shutdown).finish(),
+            Self::PeerAddressChange(change) => {
+                f.debug_tuple("PeerAddressChange").field(change).finish()
+            }
+            Self::SendFailure(failure) => f.debug_tuple("SendFailure").field(failure).finish(),
+            Self::RemoteError(error) => f.debug_tuple("RemoteError").field(error).finish(),
+            Self::PartialDelivery(delivery) => {
+                f.debug_tuple("PartialDelivery").field(delivery).finish()
+            }
+            Self::SenderDry { assoc_id } => f
+                .debug_struct("SenderDry")
+                .field("assoc_id", assoc_id)
+                .finish(),
+            Self::Unsupported { kind, data } => f
+                .debug_struct("Unsupported")
+                .field("kind", kind)
+                .field("data", &Octets(data))
+                .finish(),
+        }
+    }
 }
 
 /// Status reported by a peer-address-change notification.
@@ -568,7 +695,7 @@ pub struct PeerAddressChange {
 }
 
 /// A send failure (`SCTP_SEND_FAILED_EVENT`, RFC 6458 Section 6.1.11).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SendFailure {
     /// Whether the message was put on the wire, without its delivery being confirmed. A
@@ -589,8 +716,20 @@ pub struct SendFailure {
     pub payload: Vec<u8>,
 }
 
+impl std::fmt::Debug for SendFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SendFailure")
+            .field("sent", &self.sent)
+            .field("cause", &self.cause)
+            .field("snd_info", &self.snd_info)
+            .field("assoc_id", &self.assoc_id)
+            .field("payload", &Octets(&self.payload))
+            .finish()
+    }
+}
+
 /// An ERROR chunk of the peer (`SCTP_REMOTE_ERROR`, RFC 6458 Section 6.1.3).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RemoteError {
     /// The error cause of SCTP that the peer reports (RFC 9260, Section 3.3.10).
@@ -601,6 +740,16 @@ pub struct RemoteError {
 
     /// The error cause as the peer sent it, from its cause code on.
     pub data: Vec<u8>,
+}
+
+impl std::fmt::Debug for RemoteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteError")
+            .field("cause", &self.cause)
+            .field("assoc_id", &self.assoc_id)
+            .field("data", &Octets(&self.data))
+            .finish()
+    }
 }
 
 /// The delivery of a message in several parts was given up
@@ -627,7 +776,7 @@ pub struct PartialDelivery {
 /// To subscribe to this notification type, an application should call
 /// [`subscribe_events`][crate::SocketOptions::subscribe_events] using the [`Event`]
 /// type as [`Event::Association`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct AssociationChange {
     /// Association Change state. See also [`AssocChangeState`].
@@ -649,6 +798,19 @@ pub struct AssociationChange {
     /// Additional data for the event: the error causes of the ABORT when the peer aborted the
     /// association.
     pub info: Vec<u8>,
+}
+
+impl std::fmt::Debug for AssociationChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AssociationChange")
+            .field("state", &self.state)
+            .field("cause", &self.cause)
+            .field("outbound_streams", &self.outbound_streams)
+            .field("inbound_streams", &self.inbound_streams)
+            .field("assoc_id", &self.assoc_id)
+            .field("info", &Octets(&self.info))
+            .finish()
+    }
 }
 
 /// Shutdown: Structure returned as notification when the peer shuts the association down.
@@ -910,3 +1072,51 @@ pub struct ConnStatus {
 }
 
 pub(crate) mod internal;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Octets are printed as their number and in hexadecimal, as in the other crates of the
+    /// family, where they were a list of numbers in decimal.
+    #[test]
+    fn debug_prints_octets_in_hexadecimal() {
+        let message = ReceivedData {
+            payload: b"\x00\x15ping".to_vec(),
+            from: None,
+            rcv_info: None,
+            nxt_info: None,
+        };
+        assert_eq!(
+            format!("{message:?}"),
+            "ReceivedData { payload: 6 octets 001570696e67, from: None, rcv_info: None, \
+             nxt_info: None }"
+        );
+        let unsupported = Notification::Unsupported {
+            kind: 0x8010,
+            data: vec![0x10, 0x80],
+        };
+        assert_eq!(
+            format!("{unsupported:?}"),
+            "Unsupported { kind: 32784, data: 2 octets 1080 }"
+        );
+    }
+
+    /// The flags of a send are named, and a value of the structure is written as a literal.
+    #[test]
+    fn the_flags_of_a_send_have_names() {
+        let info = SendInfo {
+            flags: SendInfo::UNORDERED | SendInfo::SACK_IMMEDIATELY,
+            ..Default::default()
+        };
+        assert_eq!(info.flags, 9);
+        assert_eq!(
+            (SendInfo::ABORT, SendInfo::EOF),
+            (crate::consts::SCTP_ABORT, crate::consts::SCTP_EOF)
+        );
+        assert_eq!(
+            SendInfo::from(SendOptions::new().unordered(true)).flags,
+            SendInfo::UNORDERED
+        );
+    }
+}

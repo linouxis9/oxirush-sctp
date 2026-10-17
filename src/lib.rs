@@ -218,7 +218,7 @@
 //! | 6.1.9 `SCTP_SENDER_DRY_EVENT` | `Notification::SenderDry` |
 //! | 8.1.1 `SCTP_RTOINFO` | `set_rto_info`, `rto_info` |
 //! | 8.1.2 `SCTP_ASSOCINFO` | `set_association_params`, `association_params`: the retransmission limit of an association |
-//! | 8.1.3 `SCTP_INITMSG` | `set_init_params` |
+//! | 8.1.3 `SCTP_INITMSG` | `set_init_params`, `init_params`, `InitParams` |
 //! | 8.1.4 `SO_LINGER` | `set_linger`, off or zero |
 //! | 8.1.5 `SCTP_NODELAY` | `set_nodelay`, `nodelay` |
 //! | 8.1.9 `SCTP_PRIMARY_ADDR` | `set_primary_address` |
@@ -313,8 +313,8 @@ mod types;
 #[doc(inline)]
 pub use types::{
     AssocChangeState, AssociationChange, AssociationId, AssociationParams, BindxFlags, ConnState,
-    ConnStatus, Event, EventSubscriptionError, Notification, NotificationOrData, NxtInfo,
-    PartialDelivery, PeerAddress, PeerAddressChange, PeerAddressParams, PeerAddressState, RcvInfo,
-    ReceivedData, ReceivedInto, RemoteError, RtoInfo, SackInfo, SendData, SendFailure, SendInfo,
-    SendOptions, Shutdown, SocketToAssociation, SubscribeEventAssocId,
+    ConnStatus, Event, EventSubscriptionError, InitParams, Notification, NotificationOrData,
+    NxtInfo, PartialDelivery, PeerAddress, PeerAddressChange, PeerAddressParams, PeerAddressState,
+    RcvInfo, ReceivedData, ReceivedInto, RemoteError, RtoInfo, SackInfo, SendData, SendFailure,
+    SendInfo, SendOptions, Shutdown, SocketToAssociation, SubscribeEventAssocId,
 };

@@ -1,8 +1,8 @@
 //! Borrowed configuration shared by every SCTP socket role.
 use crate::internal::{SocketCore, sys};
 use crate::{
-    AssociationId, AssociationParams, Event, PeerAddressParams, RtoInfo, SackInfo, SendInfo,
-    SubscribeEventAssocId,
+    AssociationId, AssociationParams, Event, InitParams, PeerAddressParams, RtoInfo, SackInfo,
+    SendInfo, SubscribeEventAssocId,
 };
 use std::net::SocketAddr;
 use std::os::fd::AsFd;
@@ -16,12 +16,12 @@ use std::os::fd::AsFd;
 /// ```
 /// # #[tokio::main(flavor = "current_thread")]
 /// # async fn main() -> std::io::Result<()> {
-/// use oxirush_sctp::{Event, Socket, SocketToAssociation, SubscribeEventAssocId};
+/// use oxirush_sctp::{Event, InitParams, Socket, SocketToAssociation, SubscribeEventAssocId};
 ///
 /// let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
 /// let options = socket.options();
 /// options.set_nodelay(true)?;
-/// options.set_init_params(4, 4, 0, 0)?; // four streams each way
+/// options.set_init_params(InitParams::streams(4, 4))?; // four streams each way
 /// options.subscribe_events(
 ///     &[Event::Association, Event::Shutdown],
 ///     SubscribeEventAssocId::All,
@@ -56,23 +56,16 @@ impl SocketOptions<'_> {
         self.core.subscribe_events(events, assoc_id, false)
     }
 
-    /// Set outgoing/incoming stream counts, INIT retry count and timeout in milliseconds for
-    /// associations established after this call (`SCTP_INITMSG`). A zero leaves that value
-    /// unchanged; by default Linux opens ten outgoing streams.
-    pub fn set_init_params(
-        &self,
-        ostreams: u16,
-        istreams: u16,
-        retries: u16,
-        timeout: u16,
-    ) -> std::io::Result<()> {
-        sys::sctp_setup_init_params_internal(
-            self.core.as_fd(),
-            ostreams,
-            istreams,
-            retries,
-            timeout,
-        )
+    /// Set the streams, the attempts and the timeout of the INIT of the associations that
+    /// start after this call (`SCTP_INITMSG`). A zero leaves that value unchanged; by default
+    /// Linux opens ten outgoing streams.
+    pub fn set_init_params(&self, params: InitParams) -> std::io::Result<()> {
+        sys::sctp_setup_init_params_internal(self.core.as_fd(), params)
+    }
+
+    /// What the associations that start from now on start with.
+    pub fn init_params(&self) -> std::io::Result<InitParams> {
+        sys::sctp_init_params_internal(self.core.as_fd())
     }
 
     /// Enable receive metadata: the stream, payload protocol and association of each message.
