@@ -95,19 +95,27 @@ async fn a_batch_keeps_each_message_with_its_stream_and_its_order() {
 }
 
 /// A send buffer that a batch does not fit in takes a prefix of it: the number sent says
-/// where the next call starts, and nothing is lost or repeated.
+/// where the next call starts, and nothing is lost or repeated. The peer reads nothing
+/// until the first call has returned, so that its window closes whatever the host's
+/// buffers are: 8 MB do not fit in the window of an unread receive buffer.
 #[tokio::test]
 async fn a_full_send_buffer_takes_a_prefix_of_the_batch() {
+    const COUNT: usize = 8000;
     let (client, server) = pair().await;
     client.options().set_send_buffer_size(16 << 10).unwrap();
-    let payloads: Vec<Vec<u8>> = (0..400).map(|index| payload(index, 1000)).collect();
+    let payloads: Vec<Vec<u8>> = (0..COUNT).map(|index| payload(index, 1000)).collect();
     let messages: Vec<(&[u8], SendOptions)> = payloads
         .iter()
         .map(|payload| (payload.as_slice(), SendOptions::new()))
         .collect();
-    let reader = tokio::spawn(async move { received(&server, 400).await.0 });
-    let mut sent = 0;
-    let mut calls = 0;
+    let first = tokio::time::timeout(WAIT, client.send_many(&messages))
+        .await
+        .expect("the buffer takes something")
+        .unwrap();
+    assert!(first > 0);
+    assert!(first < COUNT, "an unread peer took 8 MB at once");
+    let reader = tokio::spawn(async move { received(&server, COUNT).await.0 });
+    let mut sent = first;
     while sent < messages.len() {
         let count = tokio::time::timeout(WAIT, client.send_many(&messages[sent..]))
             .await
@@ -115,9 +123,7 @@ async fn a_full_send_buffer_takes_a_prefix_of_the_batch() {
             .unwrap();
         assert!(count > 0);
         sent += count;
-        calls += 1;
     }
-    assert!(calls > 1, "a buffer of 16 KiB took 400 KB at once");
     let got = reader.await.unwrap();
     for (index, message) in got.iter().enumerate() {
         assert_eq!(message.payload, payloads[index]);
