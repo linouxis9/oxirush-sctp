@@ -354,12 +354,43 @@ impl SocketCore {
 
     fn receive_once(&self, fd: BorrowedFd<'_>) -> std::io::Result<Option<NotificationOrData>> {
         let mut partials = self.partials.lock().unwrap_or_else(PoisonError::into_inner);
-        receive::receive_message(
+        let received = receive::receive_message(
             &mut partials,
             self.max_message_size(),
             self.style == SocketToAssociation::OneToOne,
             |buffer| sys::sctp_recvmsg_once(fd, buffer),
-        )
+        );
+        // The associations whose messages in assembly went past the limit of the endpoint.
+        for assoc_id in partials.take_aborts() {
+            let info = SendInfo {
+                flags: crate::consts::SCTP_ABORT,
+                assoc_id,
+                ..Default::default()
+            };
+            if let Err(error) = sys::sctp_sendmsg_once(
+                fd,
+                None,
+                b"messages in assembly past the limit",
+                Some(&info),
+            ) {
+                tracing::warn!("Could not abort association {assoc_id}: {error}");
+            }
+        }
+        received
+    }
+
+    pub(crate) fn max_assembly(&self) -> usize {
+        self.partials
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .max_assembly()
+    }
+
+    pub(crate) fn set_max_assembly(&self, octets: usize) {
+        self.partials
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .set_max_assembly(octets);
     }
 
     // The next message, into the buffer of the caller when one read gives it whole: no

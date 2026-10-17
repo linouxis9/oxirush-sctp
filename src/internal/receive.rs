@@ -7,6 +7,15 @@ use std::net::SocketAddr;
 // cannot make us buffer without bound.
 pub(crate) const DEFAULT_MAX_MESSAGE_SIZE: usize = 4 << 20;
 
+// The octets that an endpoint holds of the messages that it assembles, over its associations:
+// sixteen messages of the longest size. Past it the association with the longest message in
+// assembly is aborted, so that peers together cannot make it buffer without bound either.
+pub(crate) const DEFAULT_MAX_ASSEMBLY: usize = 16 * DEFAULT_MAX_MESSAGE_SIZE;
+
+// The associations aborted for that limit whose parts are dropped until the kernel says that it
+// gave up their message: those it had queued before the abort would otherwise begin a message.
+const DROPPING: usize = 64;
+
 // Initial size of the buffer of a message that one read did not give whole. It doubles for
 // longer messages.
 const RECV_BUFFER_SIZE: usize = 4096;
@@ -84,15 +93,104 @@ pub(crate) struct Piece {
 // which an endpoint has, the parts of the messages of several associations come in turns, each
 // with its receive information: there is one message of each association at most, and one
 // notification.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Partials {
     interleaved: bool,
     messages: Vec<PartialMessage>,
+    // The octets of `messages`.
+    held: usize,
+    // The most that they may hold when the parts of several associations come in turns.
+    max_assembly: usize,
+    // The associations aborted for that limit, which the socket has still to abort.
+    to_abort: Vec<crate::AssociationId>,
+    // The associations aborted for it whose parts are dropped.
+    dropping: Vec<crate::AssociationId>,
+}
+
+impl Default for Partials {
+    fn default() -> Self {
+        Self {
+            interleaved: false,
+            messages: Vec::new(),
+            held: 0,
+            max_assembly: DEFAULT_MAX_ASSEMBLY,
+            to_abort: Vec::new(),
+            dropping: Vec::new(),
+        }
+    }
 }
 
 impl Partials {
     pub(crate) fn is_empty(&self) -> bool {
         self.messages.is_empty()
+    }
+
+    pub(crate) fn set_max_assembly(&mut self, octets: usize) {
+        self.max_assembly = octets;
+    }
+
+    pub(crate) fn max_assembly(&self) -> usize {
+        self.max_assembly
+    }
+
+    // The associations to abort for the limit of the assembly, which the caller aborts.
+    pub(crate) fn take_aborts(&mut self) -> Vec<crate::AssociationId> {
+        std::mem::take(&mut self.to_abort)
+    }
+
+    fn pop(&mut self) -> Option<PartialMessage> {
+        let message = self.messages.pop()?;
+        self.held -= message.payload.len();
+        Some(message)
+    }
+
+    fn clear(&mut self) {
+        self.messages.clear();
+        self.held = 0;
+    }
+
+    // Past the limit of the assembly, the association with the longest message in assembly is
+    // to be aborted, and its message is dropped: the error says so. Only an endpoint, whose
+    // associations come in turns, has several messages in assembly.
+    fn within_limit(&mut self) -> std::io::Result<()> {
+        if !self.interleaved || self.held <= self.max_assembly {
+            return Ok(());
+        }
+        let held = self.held;
+        let longest = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| !message.notification)
+            .filter_map(|(index, message)| {
+                let assoc_id = message.rcv_info.as_ref()?.assoc_id;
+                Some((message.payload.len(), index, assoc_id))
+            })
+            .max();
+        let Some((octets, index, assoc_id)) = longest else {
+            return Ok(());
+        };
+        let message = self.messages.swap_remove(index);
+        self.held -= message.payload.len();
+        self.to_abort.push(assoc_id);
+        if self.dropping.len() == DROPPING {
+            self.dropping.remove(0);
+        }
+        self.dropping.push(assoc_id);
+        tracing::warn!(
+            "Aborting association {assoc_id}: the endpoint held {held} octets of messages in \
+             assembly, past its limit of {}, {octets} of them of its message.",
+            self.max_assembly
+        );
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "aborted association {assoc_id}, whose message of {octets} octets so far was the \
+                 longest of the {held} octets in assembly, past the limit of {} \
+                 (`max_assembly`)",
+                self.max_assembly
+            ),
+        ))
     }
 
     // Whether the parts of the messages of several associations come in turns.
@@ -112,6 +210,7 @@ impl Partials {
     }
 
     pub(crate) fn begin(&mut self, message: PartialMessage) {
+        self.held += message.payload.len();
         self.messages.push(message);
     }
 
@@ -122,7 +221,18 @@ impl Partials {
             message.notification == piece.notification
                 && key(&message.rcv_info) == key(&piece.rcv_info)
         })?;
-        Some(self.messages.swap_remove(index))
+        let message = self.messages.swap_remove(index);
+        self.held -= message.payload.len();
+        Some(message)
+    }
+
+    // Whether `piece` is of an association aborted for the limit, whose parts are dropped.
+    fn dropped(&self, piece: &Piece) -> bool {
+        !piece.notification
+            && piece
+                .rcv_info
+                .as_ref()
+                .is_some_and(|info| self.dropping.contains(&info.assoc_id))
     }
 
     // An association whose end `notification` tells has no more parts to give.
@@ -149,6 +259,12 @@ impl Partials {
                     .as_ref()
                     .is_some_and(|info| info.assoc_id != ended)
         });
+        self.held = self
+            .messages
+            .iter()
+            .map(|message| message.payload.len())
+            .sum();
+        self.dropping.retain(|assoc_id| *assoc_id != ended);
     }
 }
 
@@ -178,13 +294,17 @@ fn assemble(
     read: &mut impl FnMut(&mut [u8]) -> std::io::Result<Piece>,
 ) -> std::io::Result<Option<NotificationOrData>> {
     loop {
-        if partials.interleaved && !partials.messages.is_empty() {
+        if partials.interleaved && (!partials.messages.is_empty() || !partials.dropping.is_empty())
+        {
             match interleaved_read(partials, max_message_size, read)? {
                 Some(received) => return Ok(received),
-                None => continue,
+                None => {
+                    partials.within_limit()?;
+                    continue;
+                }
             }
         }
-        let mut message = match partials.messages.pop() {
+        let mut message = match partials.pop() {
             Some(message) => message,
             None => match first_read(max_message_size, read)? {
                 First::Whole(received) => return Ok(received),
@@ -340,8 +460,11 @@ fn interleaved_read(
         let octets = &buffer[..piece.len];
         if piece.len == 0 && !piece.notification {
             tracing::debug!("Received end of stream.");
-            partials.messages.clear();
+            partials.clear();
             return Ok(Some(None));
+        }
+        if partials.dropped(&piece) {
+            return Ok(None);
         }
         let message = match partials.take(&piece) {
             Some(message) if continues(&message, &piece, false) => Some(message),
@@ -813,6 +936,67 @@ mod tests {
         assert_eq!(next().unwrap_err().kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(payload(next().unwrap()), b"next");
         assert!(partials.is_empty());
+    }
+
+    /// Past the limit of the octets in assembly, the association with the longest message is
+    /// to be aborted: its message is dropped, and so are the parts of it that come until the
+    /// kernel says that it gave its delivery up. The others are assembled.
+    #[test]
+    fn past_the_limit_of_the_assembly_the_longest_message_goes_with_its_association() {
+        let given_up = {
+            // sctp_pdapi_event: type, flags, length, indication, assoc_id, stream, sequence
+            let mut octets = (crate::Event::PartialDelivery as u16)
+                .to_ne_bytes()
+                .to_vec();
+            octets.extend_from_slice(&0_u16.to_ne_bytes());
+            octets.extend_from_slice(&24_u32.to_ne_bytes());
+            for value in [0_i32, 7, 0, 0] {
+                octets.extend_from_slice(&value.to_ne_bytes());
+            }
+            Step::Piece(
+                octets.clone(),
+                Piece {
+                    len: octets.len(),
+                    notification: true,
+                    end_of_record: true,
+                    rcv_info: None,
+                    nxt_info: None,
+                    from: None,
+                },
+            )
+        };
+        let mut partials = Partials::default();
+        partials.set_interleaved(true);
+        partials.set_max_assembly(25);
+        let mut read = reader(vec![
+            data(b"0123456789", false, of(7)),
+            data(b"short ", false, of(8)),
+            data(b"0123456789", false, of(7)),
+            // 26 octets in assembly: 7 goes
+            data(b"one", true, of(8)),
+            data(b"a part of 7 still queued", true, of(7)),
+            given_up,
+            data(b"new", true, of(7)),
+        ]);
+        let mut next = || receive_message(&mut partials, 100, false, &mut read);
+        let error = next().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "aborted association 7, whose message of 20 octets so far was the longest of the 26 \
+             octets in assembly, past the limit of 25 (`max_assembly`)"
+        );
+        assert_eq!(partials.take_aborts(), [7]);
+        assert_eq!(partials.held, 6);
+        let mut next = || receive_message(&mut partials, 100, false, &mut read);
+        assert_eq!(payload(next().unwrap()), b"short one");
+        assert!(matches!(
+            next().unwrap(),
+            Some(NotificationOrData::Notification(_))
+        ));
+        assert_eq!(payload(next().unwrap()), b"new");
+        assert!(partials.is_empty() && partials.dropping.is_empty());
+        assert_eq!(partials.held, 0);
     }
 
     #[test]

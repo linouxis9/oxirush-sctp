@@ -367,3 +367,51 @@ async fn a_peer_that_aborts_in_the_middle_of_a_message_leaves_the_others_alone()
         }
     }
 }
+
+/// Peers together cannot make an endpoint hold more than its limit of messages in assembly:
+/// past it, the endpoint aborts the association whose message is the longest, says so once,
+/// and drops what comes of that message. The other associations go on.
+#[tokio::test]
+async fn past_its_limit_of_messages_in_assembly_an_endpoint_aborts_the_longest() {
+    const LONG: usize = 1 << 20;
+    let Some((endpoint, slow, quick)) = endpoint_with_two_clients(8 << 10, LONG).await else {
+        return;
+    };
+    endpoint.options().set_max_assembly(64 << 10);
+    assert_eq!(endpoint.options().max_assembly(), 64 << 10);
+    let receiving = tokio::spawn(async move {
+        let mut received = Vec::new();
+        loop {
+            let next = tokio::time::timeout(std::time::Duration::from_secs(5), endpoint.recv())
+                .await
+                .expect("the endpoint says that it aborted, and gets the next message");
+            let done = matches!(
+                &next,
+                Ok(NotificationOrData::Data(message)) if message.payload == b"after"
+            );
+            received.push(next.map_err(|error| (error.kind(), error.to_string())));
+            if done {
+                return received;
+            }
+        }
+    });
+    slow.send(&vec![0x5a; LONG], SendOptions::new())
+        .await
+        .unwrap();
+    // The peer whose association was aborted learns of it.
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(5), slow.recv())
+        .await
+        .expect("the abort reaches the peer");
+    assert_eq!(
+        ended.unwrap_err().kind(),
+        std::io::ErrorKind::ConnectionReset
+    );
+    quick.send(b"after", SendOptions::new()).await.unwrap();
+    let received = receiving.await.unwrap();
+    let [Err((kind, text)), Ok(NotificationOrData::Data(after))] = &received[..] else {
+        panic!("{received:?}");
+    };
+    assert_eq!(*kind, std::io::ErrorKind::InvalidData);
+    assert!(text.starts_with("aborted association "), "{text}");
+    assert_eq!(after.payload, b"after");
+}

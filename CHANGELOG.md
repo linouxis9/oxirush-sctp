@@ -119,6 +119,12 @@ sctp-rs.
   subscribes to `Event::PartialDelivery` for itself, to drop the parts of
   a message whose delivery the kernel gives up, and passes those
   notifications on only to a caller that subscribes to them.
+- The messages that an endpoint assembles hold `options().max_assembly()`
+  octets at most over its associations, 64 MiB by default: past it the
+  endpoint aborts the association whose message is the longest, drops what
+  it has and still gets of that message, and `recv` reports it once as
+  `InvalidData`. Each association had a limit, `max_message_size`, and
+  their peers together none.
 - A notification too short for its type is `Unsupported`, where sctp-rs
   panicked. Control messages are read within the buffer that `recvmsg`
   filled.

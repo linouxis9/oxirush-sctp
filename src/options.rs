@@ -242,4 +242,20 @@ impl SocketOptions<'_> {
     pub fn max_message_size(&self) -> usize {
         self.core.max_message_size()
     }
+
+    /// Set the most octets that a [`OneToManyEndpoint`][crate::OneToManyEndpoint] holds of
+    /// the messages that it assembles, over all its associations: 64 MiB by default, sixteen
+    /// messages of the default [`max_message_size`][Self::max_message_size]. Each
+    /// association has one message in assembly at most, and past this limit the endpoint
+    /// aborts the association whose message is the longest, drops what it has of it, and
+    /// `recv` reports it once as `InvalidData`. A one-to-one socket has one message in
+    /// assembly, which `max_message_size` bounds.
+    pub fn set_max_assembly(&self, octets: usize) {
+        self.core.set_max_assembly(octets);
+    }
+
+    /// The limit of the octets of the messages in assembly.
+    pub fn max_assembly(&self) -> usize {
+        self.core.max_assembly()
+    }
 }

@@ -20,8 +20,10 @@ pub fn receive(script: &[u8]) {
     const LIMIT: usize = 64;
     let mut script = script;
     let mut partial = Partials::default();
-    // The parts of the messages of several associations in turns, as on an endpoint.
+    // The parts of the messages of several associations in turns, as on an endpoint, which
+    // holds three messages of the longest size in assembly at most.
     partial.set_interleaved(script.first().is_some_and(|first| first & 0x40 != 0));
+    partial.set_max_assembly(3 * LIMIT);
     // Every call consumes a step, so the loop ends with the script.
     while !script.is_empty() {
         let received = receive_message(&mut partial, LIMIT, script[0] & 0x80 != 0, |buffer| {
@@ -54,5 +56,6 @@ pub fn receive(script: &[u8]) {
         if let Ok(Some(NotificationOrData::Data(message))) = received {
             assert!(message.payload.len() <= LIMIT);
         }
+        partial.take_aborts();
     }
 }
