@@ -1,8 +1,8 @@
 //! Borrowed configuration shared by every SCTP socket role.
 use crate::internal::{SocketCore, sys};
 use crate::{
-    AssociationId, AssociationParams, Event, InitParams, PeerAddressParams, RtoInfo, SackInfo,
-    SendInfo, SubscribeEventAssocId,
+    AssociationId, AssociationParams, Event, InitParams, PeerAddress, PeerAddressParams, RtoInfo,
+    SackInfo, SendInfo, SubscribeEventAssocId,
 };
 use std::net::SocketAddr;
 use std::os::fd::AsFd;
@@ -138,6 +138,18 @@ impl SocketOptions<'_> {
     /// Change heartbeat and retransmission settings, preserving unrelated path settings.
     pub fn set_peer_address_params(&self, params: PeerAddressParams) -> std::io::Result<()> {
         sys::set_peer_address_params_internal(self.core.as_fd(), params)
+    }
+
+    /// The state, the congestion window, the smoothed round trip, the retransmission timeout
+    /// and the MTU of the path to `address`, one of the peer's addresses of association
+    /// `assoc_id` (`SCTP_GET_PEER_ADDR_INFO`); a one-to-one socket ignores the association.
+    /// [`ConnectedSocket::paths`][crate::ConnectedSocket::paths] reads every path.
+    pub fn peer_address_info(
+        &self,
+        assoc_id: AssociationId,
+        address: SocketAddr,
+    ) -> std::io::Result<PeerAddress> {
+        sys::peer_address_info_internal(self.core.as_fd(), assoc_id, address)
     }
 
     /// Request an immediate heartbeat on a peer path.

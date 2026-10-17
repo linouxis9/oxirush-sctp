@@ -253,7 +253,7 @@ impl TryFrom<PeerAddrInternal> for PeerAddress {
         Ok(Self {
             assoc_id: val.assoc_id,
             address,
-            state: val.state,
+            state: crate::PathState::from_i32(val.state),
             cwnd: val.cwnd,
             srtt: val.srtt,
             rto: val.rto,

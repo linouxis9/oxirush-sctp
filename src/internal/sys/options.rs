@@ -2,12 +2,12 @@
 use super::SOL_SCTP;
 use crate::consts::*;
 use crate::types::internal::{
-    AssocParamsWire, ConnStatusInternal, InitMsg, PeerAddressParamsInternal, PrimaryAddressWire,
-    RtoInfoWire, SackInfoWire, SndInfoWire, SubscribeEvent,
+    AssocParamsWire, ConnStatusInternal, InitMsg, PeerAddrInternal, PeerAddressParamsInternal,
+    PrimaryAddressWire, RtoInfoWire, SackInfoWire, SndInfoWire, SubscribeEvent,
 };
 use crate::{
     AssociationId, AssociationParams, ConnStatus, Event, EventSubscriptionError, InitParams,
-    PeerAddressParams, RtoInfo, SackInfo, SendInfo, SubscribeEventAssocId,
+    PeerAddress, PeerAddressParams, RtoInfo, SackInfo, SendInfo, SubscribeEventAssocId,
 };
 use os_socketaddr::OsSocketAddr;
 use std::convert::TryInto;
@@ -546,6 +546,30 @@ pub(crate) unsafe fn getsockopt_internal<T>(
     } else {
         Ok(value)
     }
+}
+
+pub(crate) fn peer_address_info_internal(
+    fd: BorrowedFd<'_>,
+    assoc_id: AssociationId,
+    address: SocketAddr,
+) -> std::io::Result<PeerAddress> {
+    let address = OsSocketAddr::from(address);
+    let address = address.as_ref();
+    // Safety: `PeerAddrInternal` holds integers only, so any bytes are a valid value, and the
+    // address fits in its storage.
+    let value = unsafe {
+        let mut storage: libc::sockaddr_storage = std::mem::zeroed();
+        std::ptr::copy_nonoverlapping(
+            address.as_ptr(),
+            std::ptr::addr_of_mut!(storage).cast::<u8>(),
+            address.len(),
+        );
+        let mut value = std::mem::MaybeUninit::<PeerAddrInternal>::zeroed().assume_init();
+        value.assoc_id = assoc_id;
+        value.address = storage;
+        getsockopt_internal(fd, SOL_SCTP, SCTP_GET_PEER_ADDR_INFO, value)?
+    };
+    value.try_into()
 }
 
 pub(crate) fn sctp_get_status_internal(

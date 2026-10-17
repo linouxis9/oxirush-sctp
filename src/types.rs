@@ -1012,7 +1012,42 @@ impl ConnState {
     }
 }
 
-/// PeerAddress: one path to the peer (`struct sctp_paddrinfo`, RFC 6458 Section 8.2.2).
+/// The state of a path to the peer (`enum sctp_spinfo_state`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PathState {
+    /// Unreachable: its retransmissions went past the limit of the path.
+    Inactive,
+
+    /// Potentially failed: retransmissions went past the threshold of RFC 7829, and the
+    /// association prefers another path.
+    PotentiallyFailed,
+
+    /// Reachable.
+    Active,
+
+    /// Not yet confirmed by a heartbeat: the association does not send data on it.
+    Unconfirmed,
+
+    /// A state unknown to this crate; its kernel value is preserved.
+    Unknown(i32),
+}
+
+impl PathState {
+    pub(crate) fn from_i32(state: i32) -> Self {
+        match state {
+            0 => Self::Inactive,
+            1 => Self::PotentiallyFailed,
+            2 => Self::Active,
+            3 => Self::Unconfirmed,
+            value => Self::Unknown(value),
+        }
+    }
+}
+
+/// PeerAddress: one path to the peer (`struct sctp_paddrinfo`, RFC 6458 Section 8.2.2), as
+/// [`ConnectedSocket::paths`][crate::ConnectedSocket::paths] and
+/// [`peer_address_info`][crate::SocketOptions::peer_address_info] read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PeerAddress {
@@ -1022,14 +1057,13 @@ pub struct PeerAddress {
     /// The peer's address.
     pub address: std::net::SocketAddr,
 
-    /// State of the path, from `enum sctp_spinfo_state`: 0 inactive, 1 potentially failed,
-    /// 2 active, 3 unconfirmed.
-    pub state: i32,
+    /// State of the path.
+    pub state: PathState,
 
     /// Congestion window in octets.
     pub cwnd: u32,
 
-    /// Smoothed round-trip time, as the kernel reports it.
+    /// Smoothed round-trip time, in milliseconds.
     pub srtt: u32,
 
     /// Retransmission timeout in milliseconds.

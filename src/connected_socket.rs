@@ -1,8 +1,8 @@
 //! A socket owning one SCTP association.
 use crate::internal::{SocketCore, sys};
 use crate::{
-    BindxFlags, ConnStatus, NotificationOrData, ReceivedData, ReceivedInto, SendData, SendOptions,
-    SocketOptions,
+    BindxFlags, ConnStatus, NotificationOrData, PeerAddress, ReceivedData, ReceivedInto, SendData,
+    SendOptions, SocketOptions,
 };
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
@@ -123,6 +123,16 @@ impl ConnectedSocket {
     /// The status of the association.
     pub fn status(&self) -> std::io::Result<ConnStatus> {
         sys::sctp_get_status_internal(self.as_fd(), 0)
+    }
+
+    /// Each path to the peer, one an address of the peer, with its state, its congestion
+    /// window, its smoothed round trip, its retransmission timeout and its MTU
+    /// (`SCTP_GET_PEER_ADDR_INFO`). [`status`][Self::status] has the primary path alone.
+    pub fn paths(&self) -> std::io::Result<Vec<PeerAddress>> {
+        self.peer_addrs()?
+            .into_iter()
+            .map(|address| sys::peer_address_info_internal(self.as_fd(), 0, address))
+            .collect()
     }
 
     /// Receive the next message or notification. `None` is the end of an association that

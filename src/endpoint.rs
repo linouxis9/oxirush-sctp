@@ -213,6 +213,15 @@ impl OneToManyEndpoint {
         sys::sctp_get_status_internal(self.as_fd(), assoc_id)
     }
 
+    /// Each path of association `assoc_id`, as
+    /// [`ConnectedSocket::paths`][crate::ConnectedSocket::paths] reads them.
+    pub fn paths(&self, assoc_id: AssociationId) -> std::io::Result<Vec<crate::PeerAddress>> {
+        self.peer_addrs(assoc_id)?
+            .into_iter()
+            .map(|address| sys::peer_address_info_internal(self.as_fd(), assoc_id, address))
+            .collect()
+    }
+
     pub(crate) fn from_core(core: SocketCore) -> Self {
         Self { core }
     }

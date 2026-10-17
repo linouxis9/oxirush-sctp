@@ -468,3 +468,64 @@ async fn connected_bindx_adds_and_removes_local_addresses() {
     client.bindx(&[added], BindxFlags::Remove).unwrap();
     assert!(!client.local_addrs().unwrap().contains(&added));
 }
+
+/// Each path of a multihomed association has its state, window, round trip, timeout and MTU,
+/// on a connected socket and on an endpoint, and the primary path is one of them.
+#[tokio::test]
+async fn each_path_of_an_association_has_its_information() {
+    let server = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
+    let both = [
+        "127.0.0.1:0".parse().unwrap(),
+        "127.0.0.2:0".parse().unwrap(),
+    ];
+    server.bindx(&both, BindxFlags::Add).unwrap();
+    let endpoint = server.into_endpoint(5).unwrap();
+    let server_addresses = endpoint.local_addrs(0).unwrap();
+    // Bound, so that it offers one address of its own and not every one of the host.
+    let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
+    client.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    client.options().set_nodelay(true).unwrap();
+    let (client, _) = client.connectx(&server_addresses).await.unwrap();
+    client.send(b"hello", SendOptions::new()).await.unwrap();
+    let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() else {
+        panic!("not the message");
+    };
+    let assoc_id = message.assoc_id().unwrap();
+
+    // The second address is confirmed by a heartbeat, which may take a moment.
+    let confirmed = async {
+        loop {
+            let paths = client.paths().unwrap();
+            if paths.iter().all(|path| path.state == PathState::Active) {
+                return paths;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    };
+    let paths = tokio::time::timeout(std::time::Duration::from_secs(5), confirmed)
+        .await
+        .expect("every path is confirmed");
+    assert_eq!(paths.len(), 2);
+    for path in &paths {
+        assert!(path.cwnd > 0 && path.rto > 0 && path.mtu > 0, "{path:?}");
+    }
+    let primary = client.status().unwrap().peer_primary;
+    assert!(paths.iter().any(|path| path.address == primary.address));
+    let one = client
+        .options()
+        .peer_address_info(0, paths[0].address)
+        .unwrap();
+    assert_eq!(
+        (one.address, one.state),
+        (paths[0].address, PathState::Active)
+    );
+
+    let seen = endpoint.paths(assoc_id).unwrap();
+    assert_eq!(seen.len(), 1, "the client has one address: {seen:?}");
+    assert_eq!(seen[0].assoc_id, assoc_id);
+    let error = client
+        .options()
+        .peer_address_info(0, "127.0.0.9:9".parse().unwrap())
+        .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
+}

@@ -196,6 +196,12 @@ sctp-rs.
 - `Notification::PeerAddressChange` and `Notification::SendFailure`, typed.
 - `ConnStatus`, `ConnState`, `PeerAddress` and the other status types are
   exported and documented, as is every public item.
+- `ConnectedSocket::paths()`, `OneToManyEndpoint::paths(assoc_id)` and
+  `options().peer_address_info(assoc_id, address)`
+  (`SCTP_GET_PEER_ADDR_INFO`): the state, congestion window, smoothed round
+  trip, retransmission timeout and MTU of each path, where `status()` has
+  the primary path alone. `PeerAddress::state` is a `PathState`, where it
+  was the number of the kernel.
 - The examples `hello`, `notifications`, `association_end`, `multihoming`,
   `options`, `one_to_many` and `server`, which run both sides on loopback,
   replace `ping` and `pong`. The README shows all but the last: a test

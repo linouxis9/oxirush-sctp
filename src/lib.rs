@@ -229,6 +229,7 @@
 //! | 8.1.29 `SCTP_RECVRCVINFO`, 8.1.30 `SCTP_RECVNXTINFO` | `request_rcvinfo`, `request_nxtinfo` |
 //! | 8.1.31 `SCTP_DEFAULT_SNDINFO` | `set_default_sendinfo` |
 //! | 8.2.1 `SCTP_STATUS` | `status` |
+//! | 8.2.2 `SCTP_GET_PEER_ADDR_INFO` | `paths`, `peer_address_info`: the state, window, round trip, timeout and MTU of each path |
 //! | 9.1 `sctp_bindx`, 9.9 `sctp_connectx` | `bindx`, `connectx` |
 //! | 9.2 `sctp_peeloff` | `OneToManyEndpoint::peeloff` |
 //! | 9.3 `sctp_getpaddrs`, 9.5 `sctp_getladdrs` | `peer_addrs`, `local_addrs` |
@@ -314,7 +315,8 @@ mod types;
 pub use types::{
     AssocChangeState, AssociationChange, AssociationId, AssociationParams, BindxFlags, ConnState,
     ConnStatus, Event, EventSubscriptionError, InitParams, Notification, NotificationOrData,
-    NxtInfo, PartialDelivery, PeerAddress, PeerAddressChange, PeerAddressParams, PeerAddressState,
-    RcvInfo, ReceivedData, ReceivedInto, RemoteError, RtoInfo, SackInfo, SendData, SendFailure,
-    SendInfo, SendOptions, Shutdown, SocketToAssociation, SubscribeEventAssocId,
+    NxtInfo, PartialDelivery, PathState, PeerAddress, PeerAddressChange, PeerAddressParams,
+    PeerAddressState, RcvInfo, ReceivedData, ReceivedInto, RemoteError, RtoInfo, SackInfo,
+    SendData, SendFailure, SendInfo, SendOptions, Shutdown, SocketToAssociation,
+    SubscribeEventAssocId,
 };
