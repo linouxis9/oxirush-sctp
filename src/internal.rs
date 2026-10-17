@@ -42,6 +42,35 @@ pub(crate) struct SocketCore {
     // The association came up while its changes were the crate's alone: the notification of
     // that, which comes first, is not passed on to a caller who subscribes to them later.
     quiet_comm_up: AtomicBool,
+    // The errors of messages that a batch of reads discarded after others that it delivered,
+    // which the next calls return first, one each.
+    pending: Mutex<std::collections::VecDeque<std::io::Error>>,
+    has_pending: AtomicBool,
+    // Held by every send while it calls the kernel: a batch of sends counts on the room
+    // that it found in the send buffer, which no send of another task takes meanwhile.
+    sending: Mutex<()>,
+}
+
+std::thread_local! {
+    // The buffers of the batches of reads of the thread, made at its first batch.
+    static SLOTS: std::cell::RefCell<Option<sys::Slots>> = const { std::cell::RefCell::new(None) };
+}
+
+// What the kernel counts in the send buffer for a message of `octets`, at most: its buffer
+// and its chunk, 1216 octets for one of 200 and 2560 for one of 1400 on Linux 7.0, about
+// twice its octets for a longer one, and three times when it is cut in small chunks.
+fn queued_at_most(octets: usize) -> usize {
+    octets.saturating_mul(3).saturating_add(2048)
+}
+
+// What one batch of reads gave.
+enum Batch {
+    // Parts of messages, none whole yet.
+    Parts,
+    // This many messages and notifications, appended.
+    Delivered(usize),
+    // The end of the association of a one-to-one socket that was shut down.
+    End,
 }
 
 fn style_name(style: SocketToAssociation) -> &'static str {
@@ -164,6 +193,9 @@ impl SocketCore {
             read_shutdown: AtomicBool::new(false),
             quiet_events: AtomicU32::new(0),
             quiet_comm_up: AtomicBool::new(false),
+            pending: Mutex::new(std::collections::VecDeque::new()),
+            has_pending: AtomicBool::new(false),
+            sending: Mutex::new(()),
         })
     }
 
@@ -315,6 +347,9 @@ impl SocketCore {
     // The next message or notification. `None` is the end of an association that was shut
     // down, which a one-to-one socket alone has.
     pub(crate) async fn recv(&self) -> std::io::Result<Option<NotificationOrData>> {
+        if let Some(error) = self.take_pending() {
+            return Err(error);
+        }
         loop {
             if let Some(end) = self.end() {
                 return self.after_the_end(end);
@@ -339,6 +374,9 @@ impl SocketCore {
         &self,
         cx: &mut Context<'_>,
     ) -> Poll<std::io::Result<Option<NotificationOrData>>> {
+        if let Some(error) = self.take_pending() {
+            return Poll::Ready(Err(error));
+        }
         loop {
             if let Some(end) = self.end() {
                 return Poll::Ready(self.after_the_end(end));
@@ -362,6 +400,9 @@ impl SocketCore {
         cx: &mut Context<'_>,
         buffer: &mut [u8],
     ) -> Poll<std::io::Result<Option<ReceivedInto>>> {
+        if let Some(error) = self.take_pending() {
+            return Poll::Ready(Err(error));
+        }
         loop {
             if self.end().is_none() {
                 let mut guard = ready!(self.fd.poll_read_ready(cx))?;
@@ -393,7 +434,12 @@ impl SocketCore {
             self.style == SocketToAssociation::OneToOne,
             |buffer| sys::sctp_recvmsg_once(fd, buffer),
         );
-        // The associations whose messages in assembly went past the limit of the endpoint.
+        Self::abort_past_the_limit(fd, &mut partials);
+        received
+    }
+
+    // Abort the associations whose messages in assembly went past the limit of the endpoint.
+    fn abort_past_the_limit(fd: BorrowedFd<'_>, partials: &mut Partials) {
         for assoc_id in partials.take_aborts() {
             let info = SendInfo {
                 flags: crate::consts::SCTP_ABORT,
@@ -409,7 +455,274 @@ impl SocketCore {
                 tracing::warn!("Could not abort association {assoc_id}: {error}");
             }
         }
-        received
+    }
+
+    // The next error that a batch of reads left for a later call.
+    fn take_pending(&self) -> Option<std::io::Error> {
+        if !self.has_pending.load(Ordering::Acquire) {
+            return None;
+        }
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let error = pending.pop_front();
+        self.has_pending
+            .store(!pending.is_empty(), Ordering::Release);
+        error
+    }
+
+    fn leave_pending(&self, error: std::io::Error) {
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        pending.push_back(error);
+        self.has_pending.store(true, Ordering::Release);
+    }
+
+    // Up to `limit` messages and notifications, appended to `out`, waiting for the first:
+    // those that one batch of reads makes whole. 0 is the end of the association of a
+    // one-to-one socket that was shut down, as `None` is for `recv`.
+    pub(crate) fn poll_recv_many(
+        &self,
+        cx: &mut Context<'_>,
+        out: &mut Vec<NotificationOrData>,
+        limit: usize,
+    ) -> Poll<std::io::Result<usize>> {
+        if limit == 0 {
+            return Poll::Ready(Ok(0));
+        }
+        if let Some(error) = self.take_pending() {
+            return Poll::Ready(Err(error));
+        }
+        loop {
+            if let Some(end) = self.end() {
+                return Poll::Ready(self.after_the_end(end).map(|received| match received {
+                    Some(received) => {
+                        out.push(received);
+                        1
+                    }
+                    None => 0,
+                }));
+            }
+            let mut guard = ready!(self.fd.poll_read_ready(cx))?;
+            if self.end().is_some() {
+                continue;
+            }
+            match guard.try_io(|inner| self.receive_batch_once(inner.as_fd(), out, limit)) {
+                Ok(Ok(Batch::Parts)) | Err(_) => {}
+                Ok(Ok(Batch::Delivered(count))) => return Poll::Ready(Ok(count)),
+                Ok(Ok(Batch::End)) => return Poll::Ready(Ok(0)),
+                Ok(Err(error)) => {
+                    if let Some(result) = self.note_received(Err(error)) {
+                        return Poll::Ready(result.map(|_| 0));
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn recv_many(
+        &self,
+        out: &mut Vec<NotificationOrData>,
+        limit: usize,
+    ) -> std::io::Result<usize> {
+        std::future::poll_fn(|cx| self.poll_recv_many(cx, out, limit)).await
+    }
+
+    // One batch of reads, without waiting, its parts assembled. `WouldBlock` when the kernel
+    // has nothing, which clears the readiness. An error of a message that comes after others
+    // that are delivered is left for the next call.
+    fn receive_batch_once(
+        &self,
+        fd: BorrowedFd<'_>,
+        out: &mut Vec<NotificationOrData>,
+        limit: usize,
+    ) -> std::io::Result<Batch> {
+        let mut partials = self.partials.lock().unwrap_or_else(PoisonError::into_inner);
+        let results = SLOTS.with_borrow_mut(|slots| {
+            let slots = slots.get_or_insert_with(sys::Slots::new);
+            match sys::sctp_recvmmsg_once(fd, slots, limit) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    return Ok(Vec::new());
+                }
+                Err(error) => return Err(error),
+            }
+            let slots = &*slots;
+            Ok(receive::receive_batch(
+                &mut partials,
+                self.max_message_size(),
+                self.style == SocketToAssociation::OneToOne,
+                slots
+                    .pieces()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, piece)| (slots.octets(index, piece), piece)),
+            ))
+        })?;
+        Self::abort_past_the_limit(fd, &mut partials);
+        drop(partials);
+        let mut delivered = 0;
+        let mut first_error = None;
+        let mut end = false;
+        for result in results {
+            match self.note_received(result) {
+                None => {}
+                Some(Ok(Some(received))) => {
+                    out.push(received);
+                    delivered += 1;
+                }
+                // Nothing comes after the end
+                Some(Ok(None)) => end = true,
+                Some(Err(error)) if delivered == 0 && first_error.is_none() => {
+                    first_error = Some(error);
+                }
+                Some(Err(error)) => self.leave_pending(error),
+            }
+        }
+        if let Some(error) = first_error {
+            if delivered == 0 {
+                return Err(error);
+            }
+            self.leave_pending(error);
+        }
+        Ok(if delivered > 0 {
+            Batch::Delivered(delivered)
+        } else if end {
+            Batch::End
+        } else {
+            Batch::Parts
+        })
+    }
+
+    // Send a prefix of `messages`, waiting for the socket to take the first: how many it took.
+    // The messages of an association that follow one another are sent with `MSG_MORE` but
+    // their last, for the kernel to put their DATA chunks in fewer packets.
+    pub(crate) fn poll_send_many(
+        &self,
+        cx: &mut Context<'_>,
+        messages: &[sys::Outgoing<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        let Some(first) = messages.first() else {
+            return Poll::Ready(Ok(0));
+        };
+        if messages.iter().any(|message| message.payload.is_empty()) {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "a message has one octet at least: SCTP has no empty message",
+            )));
+        }
+        loop {
+            if let Some(end) = self.end() {
+                return Poll::Ready(Err(end
+                    .err()
+                    .unwrap_or_else(|| std::io::Error::from_raw_os_error(libc::EPIPE))));
+            }
+            let mut guard = ready!(self.fd.poll_write_ready(cx))?;
+            let sent = guard.try_io(|inner| self.send_batch_once(inner.as_fd(), messages));
+            match sent {
+                Ok(Ok(count)) => return Poll::Ready(Ok(count)),
+                Ok(Err(error)) => {
+                    self.note_error(&error);
+                    if let Some(end) = self.end() {
+                        return Poll::Ready(Err(end
+                            .err()
+                            .unwrap_or_else(|| std::io::Error::from_raw_os_error(libc::EPIPE))));
+                    }
+                    if let Some(stream) = self.stream_out_of_range(&error, Some(&first.info)) {
+                        return Poll::Ready(Err(stream));
+                    }
+                    if error.raw_os_error() == Some(libc::EMSGSIZE) {
+                        return Poll::Ready(Err(self.too_long(first.payload.len())));
+                    }
+                    return Poll::Ready(Err(error));
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    pub(crate) async fn send_many(&self, messages: &[sys::Outgoing<'_>]) -> std::io::Result<usize> {
+        std::future::poll_fn(|cx| self.poll_send_many(cx, messages)).await
+    }
+
+    // One prefix of `messages` sent without waiting, in runs of one flag each: `WouldBlock`
+    // when the socket takes none, and how many it took otherwise.
+    //
+    // The kernel holds back the DATA chunks of an association that a send with `MSG_MORE`
+    // left, until a send without it, or until they fill a packet: one of 64 KiB on loopback.
+    // Nothing else sends them, not even the acknowledgement of all that went before. So a
+    // message goes with the flag only when the kernel is sure to take the next, which goes
+    // to the same association: the send buffer has room for both, as `SO_MEMINFO` counts it,
+    // the next has no flag that makes it more than a message, and goes to a stream that the
+    // association has. The last message that a batch sends then has no flag, and nothing
+    // that it took is held back after it, unless the system runs out of memory for SCTP in
+    // the middle of it.
+    fn send_batch_once(
+        &self,
+        fd: BorrowedFd<'_>,
+        messages: &[sys::Outgoing<'_>],
+    ) -> std::io::Result<usize> {
+        let _sending = self.sending.lock().unwrap_or_else(PoisonError::into_inner);
+        let bundling = messages.len() > 1;
+        let (size, free) = if bundling {
+            sys::send_buffer(fd).unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
+        let same = |a: &sys::Outgoing<'_>, b: &sys::Outgoing<'_>| {
+            a.to == b.to && a.info.assoc_id == b.info.assoc_id
+        };
+        let special =
+            crate::consts::SCTP_EOF | crate::consts::SCTP_ABORT | crate::consts::SCTP_SENDALL;
+        let mut flags = Vec::with_capacity(messages.len());
+        // What the messages so far take of the send buffer, at most
+        let mut used = 0_usize;
+        // The streams of the association of the message, below this one, that it has: those
+        // of the messages of the association that come before, or all of them once its
+        // status was asked for
+        let mut streams = 0_u32;
+        let mut asked = false;
+        for (index, message) in messages.iter().enumerate() {
+            used = used.saturating_add(queued_at_most(message.payload.len()));
+            if index > 0 && !same(&messages[index - 1], message) {
+                (streams, asked) = (0, false);
+            }
+            streams = streams.max(u32::from(message.info.sid) + 1);
+            let Some(next) = messages.get(index + 1).filter(|next| {
+                bundling
+                    && same(message, next)
+                    && next.info.flags & special == 0
+                    && next.payload.len() <= size
+                    && used.saturating_add(queued_at_most(next.payload.len())) <= free
+            }) else {
+                flags.push(false);
+                continue;
+            };
+            if u32::from(next.info.sid) >= streams && !asked {
+                asked = true;
+                if let Ok(status) = sys::sctp_get_status_internal(fd, message.info.assoc_id) {
+                    streams = streams.max(u32::from(status.outstreams));
+                }
+            }
+            flags.push(u32::from(next.info.sid) < streams);
+        }
+        let mut sent = 0;
+        while sent < messages.len() {
+            let flag = flags[sent];
+            let run = flags[sent..]
+                .iter()
+                .take_while(|more| **more == flag)
+                .count();
+            match sys::sctp_sendmmsg_once(fd, &messages[sent..sent + run], flag) {
+                Ok(count) => {
+                    sent += count;
+                    if count < run {
+                        return Ok(sent);
+                    }
+                }
+                // The next call has the error again, on the message that this one did not
+                // send
+                Err(error) => return if sent > 0 { Ok(sent) } else { Err(error) },
+            }
+        }
+        Ok(sent)
     }
 
     pub(crate) fn max_assembly(&self) -> usize {
@@ -433,6 +746,9 @@ impl SocketCore {
         &self,
         buffer: &mut [u8],
     ) -> std::io::Result<Option<ReceivedInto>> {
+        if let Some(error) = self.take_pending() {
+            return Err(error);
+        }
         loop {
             if self.end().is_none() {
                 let mut guard = self.fd.ready(Interest::READABLE | Interest::ERROR).await?;
@@ -710,9 +1026,10 @@ impl SocketCore {
                     .unwrap_or_else(|| std::io::Error::from_raw_os_error(libc::EPIPE))));
             }
             let mut guard = ready!(self.fd.poll_write_ready(cx))?;
-            if let Ok(result) =
-                guard.try_io(|inner| sys::sctp_sendmsg_once(inner.as_fd(), to, payload, info))
-            {
+            if let Ok(result) = guard.try_io(|inner| {
+                let _sending = self.sending.lock().unwrap_or_else(PoisonError::into_inner);
+                sys::sctp_sendmsg_once(inner.as_fd(), to, payload, info)
+            }) {
                 if let Err(error) = &result {
                     // This call may be the one that Linux tells of the end
                     self.note_error(error);

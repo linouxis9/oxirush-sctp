@@ -138,11 +138,23 @@ sctp-rs.
 - A notification too short for its type is `Unsupported`, where sctp-rs
   panicked. Control messages are read within the buffer that `recvmsg`
   filled.
+- `recv_many` and `poll_recv_many` of a `ConnectedSocket` and of a
+  `OneToManyEndpoint` receive what the kernel holds, up to a limit, with one
+  `recvmmsg`: whole messages and notifications, as `recv` returns them. The
+  error of a message that comes after others is returned by the next call.
 
 ### Sending
 
 - `send` waits until the socket takes the message. sctp-rs returned
   `EWOULDBLOCK` and left the socket marked as writable.
+- `send_many` and `poll_send_many` send a batch of messages, each with its
+  options, with one `sendmmsg` or a few, and return how many the socket
+  took. The messages of an association that follow one another go with
+  `MSG_MORE` but the last, so that the kernel bundles their DATA chunks in
+  as few packets as it can: two to three times the messages a second of
+  `send` on loopback, for half the CPU. A message that the kernel holds
+  back waits for the next send, so one goes with the flag only when the
+  next is sure to be taken, and the last that a call sends goes without it.
 - Sends pass `MSG_NOSIGNAL`: an association that has ended is an error and
   no `SIGPIPE`.
 - An empty message, a stream that the association does not have, an
@@ -213,7 +225,8 @@ sctp-rs.
   sequence of parts).
 - A `SECURITY.md` that says how to report a vulnerability.
 - `benches/`, a package of its own that times a message through an
-  association with criterion and profiles it with pprof. The published
+  association with criterion and profiles it with pprof, and measures the
+  messages a second of one message a call against batches. The published
   crate does not have it.
 
 ### Requirements

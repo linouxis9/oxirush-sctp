@@ -17,6 +17,28 @@ go tool pprof -top target/criterion/send-recv/65536/profile/profile.pb
 The profile is one that Go's `pprof` reads. With `PROFILE=flamegraph` in
 the environment it is `flamegraph.svg`, in the same directory.
 
+## Messages a second
+
+`throughput` sends many small messages, as NGAP has, from one task and
+receives them in another, on two threads, and prints the messages a second
+and the CPU time of the process a message, which counts the kernel's work
+for the loopback interface:
+
+```bash
+cargo run --release --bin throughput -- pair 200 300000 1 64       # send_many and recv_many
+cargo run --release --bin throughput -- to-endpoint 200 300000 100 1   # send and recv, 100 associations
+CPUS=2,3 ROUNDS=3 OCTETS="100 200 400" ./throughput.sh             # every case, the median of three
+```
+
+`pair` is one association between two connected sockets, `to-endpoint`
+one connected socket for each association that sends to one endpoint, and
+`from-endpoint` an endpoint that sends to its associations in turns. A
+batch of 1 is `send` and `recv`, a larger one `send_many` and `recv_many`,
+and `64:1` a batch of 64 for the sender and of 1 for the receiver. The
+senders keep at most 4096 messages ahead of the receivers, and every socket
+has a receive buffer of 4 MiB: past what it holds, Linux drops packets, and
+a run would time retransmissions instead of calls.
+
 ## Figures
 
 On one core of an AMD Ryzen 7 5700G with Linux 7.0 and Rust 1.98.1, a

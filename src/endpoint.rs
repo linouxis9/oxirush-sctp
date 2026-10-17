@@ -151,6 +151,55 @@ impl OneToManyEndpoint {
         self.core.send(Some(address), payload, Some(&info)).await
     }
 
+    /// Send several messages, each to the association of its options, in a few system calls:
+    /// a prefix of `messages`, which is all of them unless the send buffer filled, after
+    /// waiting for room for the first. The number sent. Each needs an association, as
+    /// [`send`][Self::send] does. The messages of an association that follow one another in
+    /// `messages` are bundled, as
+    /// [`ConnectedSocket::send_many`][crate::ConnectedSocket::send_many] has it.
+    pub async fn send_many(&self, messages: &[(&[u8], SendOptions)]) -> std::io::Result<usize> {
+        let messages = outgoing(messages)?;
+        self.core.send_many(&messages).await
+    }
+
+    /// [`send_many`][Self::send_many] as a poll.
+    pub fn poll_send_many(
+        &self,
+        cx: &mut Context<'_>,
+        messages: &[(&[u8], SendOptions)],
+    ) -> Poll<std::io::Result<usize>> {
+        match outgoing(messages) {
+            Ok(messages) => self.core.poll_send_many(cx, &messages),
+            Err(error) => Poll::Ready(Err(error)),
+        }
+    }
+
+    /// Receive the messages and notifications that the kernel holds of every association,
+    /// up to `limit`, in one system call, and append them to `out`, waiting for the first:
+    /// how many were appended. They are whole, as [`recv`][Self::recv] returns them.
+    pub async fn recv_many(
+        &self,
+        out: &mut Vec<NotificationOrData>,
+        limit: usize,
+    ) -> std::io::Result<usize> {
+        std::future::poll_fn(|cx| self.poll_recv_many(cx, out, limit)).await
+    }
+
+    /// [`recv_many`][Self::recv_many] as a poll.
+    pub fn poll_recv_many(
+        &self,
+        cx: &mut Context<'_>,
+        out: &mut Vec<NotificationOrData>,
+        limit: usize,
+    ) -> Poll<std::io::Result<usize>> {
+        match self.core.poll_recv_many(cx, out, limit) {
+            // A one-to-many socket has no end of stream: its associations end in
+            // notifications
+            Poll::Ready(Ok(0)) if limit > 0 => Poll::Ready(Err(shut_down())),
+            other => other,
+        }
+    }
+
     /// Send an owned record with wire-order low-level ancillary data. `to` may be `None` when
     /// `data.snd_info` selects an association (including SCTP EOF/ABORT controls).
     pub async fn send_data(&self, to: Option<SocketAddr>, data: SendData) -> std::io::Result<()> {
@@ -233,6 +282,23 @@ fn shut_down() -> std::io::Error {
         std::io::ErrorKind::UnexpectedEof,
         "the socket was shut down for reading",
     )
+}
+
+// The messages of a batch, each with its association.
+fn outgoing<'a>(messages: &[(&'a [u8], SendOptions)]) -> std::io::Result<Vec<sys::Outgoing<'a>>> {
+    messages
+        .iter()
+        .map(|(payload, options)| {
+            if options.assoc_id() == 0 {
+                return Err(no_association());
+            }
+            Ok(sys::Outgoing {
+                to: None,
+                payload,
+                info: options.info(),
+            })
+        })
+        .collect()
 }
 
 // What a send without an association returns.

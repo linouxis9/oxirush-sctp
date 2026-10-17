@@ -457,54 +457,101 @@ fn interleaved_read(
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => return Ok(None),
             Err(error) => return Err(error),
         };
-        let octets = &buffer[..piece.len];
-        if piece.len == 0 && !piece.notification {
-            tracing::debug!("Received end of stream.");
-            partials.clear();
-            return Ok(Some(None));
-        }
-        if partials.dropped(&piece) {
-            return Ok(None);
-        }
-        let message = match partials.take(&piece) {
-            Some(message) if continues(&message, &piece, false) => Some(message),
-            Some(message) => {
-                tracing::warn!(
-                    "Dropping {} octets of a message whose delivery was aborted.",
-                    message.received
-                );
-                None
-            }
-            None => None,
-        };
-        let Some(mut message) = message else {
-            return match begin(octets, &piece, max_message_size)? {
-                First::Part(message) => {
-                    partials.begin(message);
-                    Ok(None)
-                }
-                First::Whole(received) => Ok(Some(received)),
-                First::Interrupted => Ok(None),
-            };
-        };
-        let limit = if message.notification {
-            usize::MAX
-        } else {
-            max_message_size
-        };
-        message.received = message.received.saturating_add(piece.len);
-        if message.received > limit {
-            // Its octets are not kept: it is discarded at its end
-            message.payload = Vec::new();
-        } else {
-            message.payload.extend_from_slice(octets);
-        }
-        if !piece.end_of_record {
-            partials.begin(message);
-            return Ok(None);
-        }
-        finish(message, piece.nxt_info, max_message_size).map(Some)
+        push(
+            partials,
+            &buffer[..piece.len],
+            &piece,
+            max_message_size,
+            false,
+        )
     })
+}
+
+// One part of a message, `octets`, read elsewhere: it continues the message of its key, or begins
+// one. `None` when no message is whole yet, `Some(None)` at the end of the stream.
+fn push(
+    partials: &mut Partials,
+    octets: &[u8],
+    piece: &Piece,
+    max_message_size: usize,
+    one_association: bool,
+) -> std::io::Result<Option<Option<NotificationOrData>>> {
+    if piece.len == 0 && !piece.notification {
+        tracing::debug!("Received end of stream.");
+        partials.clear();
+        return Ok(Some(None));
+    }
+    if partials.dropped(piece) {
+        return Ok(None);
+    }
+    let message = match partials.take(piece) {
+        Some(message) if continues(&message, piece, one_association) => Some(message),
+        Some(message) => {
+            tracing::warn!(
+                "Dropping {} octets of a message whose delivery was aborted.",
+                message.received
+            );
+            None
+        }
+        None => None,
+    };
+    let Some(mut message) = message else {
+        return match begin(octets, piece, max_message_size)? {
+            First::Part(message) => {
+                partials.begin(message);
+                Ok(None)
+            }
+            First::Whole(received) => Ok(Some(received)),
+            First::Interrupted => Ok(None),
+        };
+    };
+    let limit = if message.notification {
+        usize::MAX
+    } else {
+        max_message_size
+    };
+    message.received = message.received.saturating_add(piece.len);
+    if message.received > limit {
+        // Its octets are not kept: it is discarded at its end
+        message.payload = Vec::new();
+    } else {
+        message.payload.extend_from_slice(octets);
+    }
+    if !piece.end_of_record {
+        partials.begin(message);
+        return Ok(None);
+    }
+    finish(message, piece.nxt_info.clone(), max_message_size).map(Some)
+}
+
+// The messages and notifications that one batch of reads makes whole, in their order, each as
+// `receive_message` returns it: the parts of each are assembled with those that came before,
+// and with those of the next batches when it is not whole yet. `pieces` are the reads, whose
+// octets `octets` gives.
+pub(super) fn receive_batch<'a>(
+    partials: &mut Partials,
+    max_message_size: usize,
+    one_association: bool,
+    pieces: impl IntoIterator<Item = (&'a [u8], &'a Piece)>,
+) -> Vec<std::io::Result<Option<NotificationOrData>>> {
+    let mut received = Vec::new();
+    for (octets, piece) in pieces {
+        match push(partials, octets, piece, max_message_size, one_association) {
+            Ok(None) => {
+                if let Err(error) = partials.within_limit() {
+                    received.push(Err(error));
+                }
+            }
+            Ok(Some(message)) => {
+                if let Some(NotificationOrData::Notification(notification)) = &message {
+                    partials.learn(notification);
+                }
+                received.push(Ok(message));
+            }
+            Err(error) => received.push(Err(error)),
+        }
+    }
+    received
 }
 
 // What the first read of a message gave.
