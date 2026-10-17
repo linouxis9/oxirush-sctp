@@ -189,11 +189,12 @@ impl ConnectedSocket {
     /// Send a message, waiting for room in the send buffer. Dropping the future before
     /// completion sends no part of it.
     ///
-    /// An empty payload, a stream the association does not have ([`ConnStatus::outstreams`])
-    /// and [`SendOptions::association`] with another value than 0 are `InvalidInput`, and a
-    /// message longer than the send buffer (`SO_SNDBUF`) is `EMSGSIZE`. After the end of the
-    /// association, every call returns at once: `BrokenPipe` for an association that was
-    /// shut down, and the error of one that was aborted or lost, such as `ConnectionReset`.
+    /// An empty payload, a stream the association does not have ([`ConnStatus::outstreams`]),
+    /// [`SendOptions::association`] with another value than 0 and a message longer than the
+    /// send buffer (`SO_SNDBUF`) are `InvalidInput`, with a text that says which. After the
+    /// end of the association, every call returns at once: `BrokenPipe` for an association
+    /// that was shut down, and the error of one that was aborted or lost, such as
+    /// `ConnectionReset`.
     pub async fn send(&self, payload: &[u8], options: SendOptions) -> std::io::Result<()> {
         if options.assoc_id() != 0 {
             return Err(Self::not_one_to_many());

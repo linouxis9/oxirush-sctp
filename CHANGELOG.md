@@ -138,7 +138,13 @@ sctp-rs.
 - An empty message, a stream that the association does not have, an
   address of IPv6 on a socket of IPv4 and addresses of one call with
   different ports are `InvalidInput` with a text that says which, where
-  Linux answers a bare `EINVAL`.
+  Linux answers a bare `EINVAL`. So is a message longer than the send
+  buffer, with its size and the call that makes it larger, where Linux
+  answers `EMSGSIZE`.
+- A call for the other kind of socket, such as `listen` on a one-to-many
+  socket, says which kind it is for and what to call instead. `peeloff` of
+  an association that the endpoint does not have is `NotFound` and says
+  so, where Linux answers `EINVAL`.
 - `status`, `peer_addrs` and `local_addrs` of a `ConnectedSocket`, a
   `Listener` and a `Socket` take no association identifier, which they
   ignored, and a `ConnectedSocket` refuses `SendOptions::association`.

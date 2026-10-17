@@ -44,6 +44,13 @@ pub(crate) struct SocketCore {
     quiet_comm_up: AtomicBool,
 }
 
+fn style_name(style: SocketToAssociation) -> &'static str {
+    match style {
+        SocketToAssociation::OneToOne => "one-to-one",
+        _ => "one-to-many",
+    }
+}
+
 // The bit of `event` among the quiet events.
 fn bit(event: Event) -> u32 {
     1 << (event as u16 - Event::DataIo as u16)
@@ -173,15 +180,30 @@ impl SocketCore {
         Ok(core)
     }
 
-    pub(crate) fn require_style(&self, style: SocketToAssociation) -> std::io::Result<()> {
+    // That `call` is for a socket of `style`, and what to call on a socket of the other.
+    pub(crate) fn require_style(
+        &self,
+        style: SocketToAssociation,
+        call: &str,
+    ) -> std::io::Result<()> {
         if self.style == style {
-            Ok(())
-        } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "operation is incompatible with the SCTP socket style",
-            ))
+            return Ok(());
         }
+        let instead = match style {
+            SocketToAssociation::OneToOne => {
+                "`Socket::into_endpoint` makes it an endpoint, whose `connect` starts an \
+                 association and which receives those of its peers"
+            }
+            _ => "`Socket::listen` accepts associations on it, and `Socket::connect` starts one",
+        };
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "`{call}` is for a {} socket, and this one is {}: {instead}",
+                style_name(style),
+                style_name(self.style)
+            ),
+        ))
     }
 
     pub(crate) fn max_message_size(&self) -> usize {
@@ -196,7 +218,7 @@ impl SocketCore {
         self,
         addrs: &[SocketAddr],
     ) -> std::io::Result<(Self, AssociationId)> {
-        self.require_style(SocketToAssociation::OneToOne)?;
+        self.require_style(SocketToAssociation::OneToOne, "connect")?;
         let assoc_id = sys::initiate_connect(self.as_fd(), addrs)?;
         loop {
             // Failure can make a socket readable when an association event is queued. Successful
@@ -233,7 +255,7 @@ impl SocketCore {
         &self,
         cx: &mut Context<'_>,
     ) -> Poll<std::io::Result<(Self, SocketAddr)>> {
-        self.require_style(SocketToAssociation::OneToOne)?;
+        self.require_style(SocketToAssociation::OneToOne, "accept")?;
         let (fd, address) = loop {
             let mut guard = ready!(self.fd.poll_read_ready(cx))?;
             if let Ok(result) = guard.try_io(|inner| sys::accept_once(inner.as_fd())) {
@@ -261,7 +283,7 @@ impl SocketCore {
     }
 
     pub(crate) fn peeloff(&self, assoc_id: AssociationId) -> std::io::Result<Self> {
-        self.require_style(SocketToAssociation::OneToMany)?;
+        self.require_style(SocketToAssociation::OneToMany, "peeloff")?;
         let partials = self.partials.lock().unwrap_or_else(PoisonError::into_inner);
         if partials.hold(assoc_id) {
             return Err(std::io::Error::new(
@@ -269,7 +291,18 @@ impl SocketCore {
                 "cannot peel off an association during partial record delivery",
             ));
         }
-        let peeled = Self::from_association(sys::sctp_peeloff_internal(self.as_fd(), assoc_id)?)?;
+        let peeled = sys::sctp_peeloff_internal(self.as_fd(), assoc_id).map_err(|error| {
+            // Linux's answer for an association that the endpoint does not have
+            if error.raw_os_error() == Some(libc::EINVAL) {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("the endpoint has no association {assoc_id} to peel off"),
+                )
+            } else {
+                error
+            }
+        })?;
+        let peeled = Self::from_association(peeled)?;
         peeled.set_max_message_size(self.max_message_size());
         // It has the subscriptions of the endpoint, and those of a one-to-one socket.
         peeled
@@ -691,6 +724,9 @@ impl SocketCore {
                     if let Some(stream) = self.stream_out_of_range(error, info) {
                         return Poll::Ready(Err(stream));
                     }
+                    if error.raw_os_error() == Some(libc::EMSGSIZE) {
+                        return Poll::Ready(Err(self.too_long(payload.len())));
+                    }
                 }
                 return Poll::Ready(result);
             }
@@ -740,6 +776,21 @@ fn into_buffer(
 }
 
 impl SocketCore {
+    // The `EMSGSIZE` of a message longer than the send buffer, said in words.
+    fn too_long(&self, octets: usize) -> std::io::Error {
+        let buffer = sys::buffer_size_internal(self.as_fd(), libc::SO_SNDBUF)
+            .map(|size| format!(" of {size} octets"))
+            .unwrap_or_default();
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "a message of {octets} octets does not fit in the send buffer{buffer} \
+                 (SO_SNDBUF): `options().set_send_buffer_size` makes it larger, up to \
+                 `net.core.wmem_max`"
+            ),
+        )
+    }
+
     // The `EINVAL` of a send on a stream that the association does not have, said in words.
     fn stream_out_of_range(
         &self,
@@ -829,8 +880,9 @@ mod tests {
             assert_eq!(error.raw_os_error(), None, "peeloff reached the kernel");
             assert!(!core.partials.lock().unwrap().is_empty());
             if identity.is_some() {
+                // The kernel's `EINVAL`, said in words: the endpoint has no association 8
                 let error = core.peeloff(8).unwrap_err();
-                assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
+                assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
                 assert!(!core.partials.lock().unwrap().is_empty());
             }
         }

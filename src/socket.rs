@@ -93,7 +93,8 @@ impl Socket {
     /// Become a one-to-one accepting listener. A one-to-many socket returns `InvalidInput`
     /// before listening; use [`into_endpoint`][Self::into_endpoint] for that role.
     pub fn listen(self, backlog: i32) -> std::io::Result<Listener> {
-        self.core.require_style(SocketToAssociation::OneToOne)?;
+        self.core
+            .require_style(SocketToAssociation::OneToOne, "listen")?;
         sys::sctp_listen_internal(self.as_fd(), backlog)?;
         Ok(Listener::from_core(self.core))
     }
@@ -104,7 +105,8 @@ impl Socket {
     /// endpoint keeps this socket's registered descriptor and receive limit. A failure closes
     /// it.
     pub fn into_endpoint(self, backlog: i32) -> std::io::Result<OneToManyEndpoint> {
-        self.core.require_style(SocketToAssociation::OneToMany)?;
+        self.core
+            .require_style(SocketToAssociation::OneToMany, "into_endpoint")?;
         sys::sctp_listen_internal(self.as_fd(), backlog)?;
         Ok(OneToManyEndpoint::from_core(self.core))
     }

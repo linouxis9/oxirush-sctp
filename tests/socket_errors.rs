@@ -176,3 +176,33 @@ async fn aborted_partial_delivery_does_not_contaminate_another_sender() {
         }
     }
 }
+
+/// A message longer than the send buffer: the error says what to make larger, where Linux
+/// says "Message too long".
+#[tokio::test]
+async fn a_message_longer_than_the_send_buffer_says_which_buffer() {
+    let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = socket.listen(1).unwrap();
+    let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
+    client.options().set_send_buffer_size(4096).unwrap();
+    let buffer = client.options().send_buffer_size().unwrap();
+    let (client, _) = client
+        .connect(listener.local_addrs().unwrap()[0])
+        .await
+        .unwrap();
+    let error = client
+        .send(&vec![0; 4 * buffer], SendOptions::new())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "a message of {} octets does not fit in the send buffer of {buffer} octets \
+             (SO_SNDBUF): `options().set_send_buffer_size` makes it larger, up to \
+             `net.core.wmem_max`",
+            4 * buffer
+        )
+    );
+}

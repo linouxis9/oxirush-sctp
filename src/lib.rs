@@ -115,8 +115,8 @@
 //!   200 ms a message without it, and 9 µs with it.
 //! - A received message holds the memory of its octets and no more.
 //! - A sent message must fit in the send buffer (`SO_SNDBUF`): a longer one
-//!   fails with `EMSGSIZE`. An empty one is `InvalidInput`, as is a stream
-//!   that the association does not have: the error says which.
+//!   is `InvalidInput`, as are an empty one and a stream that the
+//!   association does not have: the error says which.
 //! - `ReceivedData::stream_id`, `ppid` and `assoc_id` read the receive
 //!   information (`SCTP_RCVINFO`) that every socket requests. They return
 //!   `None` after `options().request_rcvinfo(false)`.

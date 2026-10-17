@@ -9,7 +9,15 @@ async fn one_to_many_socket_cannot_become_an_accepting_listener() {
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     match socket.listen(4) {
         Ok(_) => panic!("a one-to-many socket became an accepting listener"),
-        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput),
+        Err(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(
+                error.to_string(),
+                "`listen` is for a one-to-one socket, and this one is one-to-many: \
+                 `Socket::into_endpoint` makes it an endpoint, whose `connect` starts an \
+                 association and which receives those of its peers"
+            );
+        }
     }
 }
 
@@ -22,7 +30,15 @@ async fn one_to_many_socket_cannot_become_a_single_association() {
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     match socket.connect(address).await {
         Ok(_) => panic!("a one-to-many socket became a single association"),
-        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput),
+        Err(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(
+                error.to_string().starts_with(
+                    "`connect` is for a one-to-one socket, and this one is one-to-many: "
+                ),
+                "{error}"
+            );
+        }
     }
 }
 
@@ -31,6 +47,26 @@ async fn one_to_one_socket_cannot_become_a_multi_association_endpoint() {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     let error = socket.into_endpoint(4).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        error.to_string(),
+        "`into_endpoint` is for a one-to-many socket, and this one is one-to-one: \
+         `Socket::listen` accepts associations on it, and `Socket::connect` starts one"
+    );
+}
+
+/// Peeling off an association that the endpoint does not have says so, where Linux says
+/// `EINVAL`.
+#[tokio::test]
+async fn peeling_off_an_association_that_the_endpoint_has_not_says_so() {
+    let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let endpoint = socket.into_endpoint(4).unwrap();
+    let error = endpoint.peeloff(77).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(
+        error.to_string(),
+        "the endpoint has no association 77 to peel off"
+    );
 }
 
 #[tokio::test]
