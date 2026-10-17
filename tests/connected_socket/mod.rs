@@ -580,7 +580,14 @@ async fn recv_returns_partially_delivered_messages_whole() {
     };
     let payload = long_payload(len);
     let send = sending.send_data(SendData::new(payload.clone()));
-    let (sent, received) = tokio::join!(send, receiving.recv());
+    // Once in a gate run of the fourth round, Linux stopped here for half an hour: the
+    // receiver's queue held 65 716 octets in a buffer of 16 KiB, nothing readable, and the
+    // sender retransmitted each 10 ms. A stall fails the test instead of hanging it.
+    let (sent, received) = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        tokio::join!(send, receiving.recv())
+    })
+    .await
+    .expect("Linux delivered no part of the message in 60 s");
     sent.unwrap();
     let received = data_payload(received.unwrap().unwrap());
     assert_eq!(received.len(), payload.len());
