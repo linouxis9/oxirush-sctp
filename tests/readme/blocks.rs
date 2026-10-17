@@ -38,6 +38,8 @@ pub const BLOCKS: &[fn()] = &[
     block_5,
     block_6,
     block_7,
+    block_8,
+    block_9,
 ];
 
 /// The Rust block 1 of README.md.
@@ -277,8 +279,85 @@ fn block_6() {
     main().unwrap();
 }
 
-/// The Rust block 1 of src/lib.rs.
+/// The Rust block 7 of README.md.
 fn block_7() {
+    use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
+
+    #[tokio::main(flavor = "current_thread")]
+    async fn main() -> std::io::Result<()> {
+        let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+        socket.bind("127.0.0.1:0".parse().unwrap())?;
+        let listener = socket.listen(5)?;
+        let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+        let (client, _) = client.connect(listener.local_addr()?).await?;
+        let (server, _) = listener.accept().await?;
+
+        // Three messages, each with its options, in one system call
+        let messages = [
+            (&b"one"[..], SendOptions::new().stream(0).ppid(60)),
+            (b"two", SendOptions::new().stream(1).ppid(60)),
+            (b"three", SendOptions::new().stream(1).ppid(60)),
+        ];
+        let mut sent = 0;
+        while sent < messages.len() {
+            sent += client.send_many(&messages[sent..]).await?;
+        }
+
+        // What has come, 64 messages a call at most
+        let mut received = Vec::new();
+        while received.len() < messages.len() {
+            server.recv_many(&mut received, 64).await?;
+        }
+        for item in &received {
+            if let NotificationOrData::Data(message) = item {
+                let text = String::from_utf8_lossy(&message.payload);
+                println!("{text:?} on stream {:?}", message.stream_id());
+            }
+        }
+        Ok(())
+    }
+    main().unwrap();
+}
+
+/// The Rust block 8 of README.md.
+fn block_8() {
+    use oxirush_sctp::driver::{self, DriverConfig};
+    use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
+
+    #[tokio::main(flavor = "current_thread")]
+    async fn main() -> std::io::Result<()> {
+        let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+        socket.bind("127.0.0.1:0".parse().unwrap())?;
+        let listener = socket.listen(5)?;
+        let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+        let (client, _) = client.connect(listener.local_addr()?).await?;
+        let (server, _) = listener.accept().await?;
+
+        // A writer, which every task that sends can clone, and a reader
+        let (writer, _) = driver::spawn(client, DriverConfig::default())?;
+        let (_, mut reader) = driver::spawn(server, DriverConfig::default())?;
+        for index in 0..1000_u32 {
+            let options = SendOptions::new().ppid(60);
+            writer.send(index.to_be_bytes().to_vec(), options).await?;
+        }
+        let mut last = 0;
+        for _ in 0..1000 {
+            if let Some(Ok(NotificationOrData::Data(message))) = reader.recv().await {
+                last = u32::from_be_bytes(message.payload[..4].try_into().unwrap());
+            }
+        }
+        let overload = writer.overload();
+        println!(
+            "last {last}, refused {}, in overload {}",
+            overload.refused, overload.overloaded
+        );
+        Ok(())
+    }
+    main().unwrap();
+}
+
+/// The Rust block 1 of src/lib.rs.
+fn block_9() {
     use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
 
     #[tokio::main(flavor = "current_thread")]

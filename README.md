@@ -1,6 +1,8 @@
 # oxirush-sctp
 
-[![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg)](https://github.com/linouxis9/oxirush-sctp/blob/main/COPYRIGHT)
+[![Crates.io](https://img.shields.io/crates/v/oxirush-sctp.svg)](https://crates.io/crates/oxirush-sctp)
+[![Documentation](https://docs.rs/oxirush-sctp/badge.svg)](https://docs.rs/oxirush-sctp)
+[![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg)](COPYRIGHT)
 
 Async SCTP sockets for [Tokio](https://tokio.rs) on Linux, over the SCTP of
 the kernel and its sockets API
@@ -49,18 +51,26 @@ server: "ping" on stream Some(1) with PPID Some(60)
 client: "pong"
 ```
 
-> This crate is not on crates.io yet.
+## Installation
 
-## Install
+```toml
+[dependencies]
+oxirush-sctp = "0.1"
+tokio = { version = "1", features = ["macros", "rt"] }
+```
+
+The crate has no Cargo feature. It needs Linux 5.0 or later with SCTP,
+which `sudo modprobe sctp` loads, and a Tokio runtime with the I/O driver.
+Its diagnostics go through [`tracing`](https://crates.io/crates/tracing).
+
+Until 0.1.0 is on crates.io, a program takes the crate from its repository:
 
 ```toml
 [dependencies]
 oxirush-sctp = { git = "https://github.com/linouxis9/oxirush-sctp" }
-tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
-It needs Linux 5.0 or later with SCTP, which `sudo modprobe sctp` loads, a
-Tokio runtime with the I/O driver, and Rust 1.88 or later.
+The minimum supported Rust version is 1.88.
 
 ## Notifications
 
@@ -325,15 +335,110 @@ peer: "pong"
 an address, and `peeloff` moves one association to a `ConnectedSocket` of
 its own.
 
+## Many messages a call
+
+`send_many` sends a batch, each message with its options, and returns how
+many the socket took: all of them unless its buffer filled. The kernel
+puts the messages of an association that follow one another in as few
+packets as it can. `recv_many` returns whole messages, as `recv` does.
+
+```rust
+use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::io::Result<()> {
+    let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    let listener = socket.listen(5)?;
+    let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    let (client, _) = client.connect(listener.local_addr()?).await?;
+    let (server, _) = listener.accept().await?;
+
+    // Three messages, each with its options, in one system call
+    let messages = [
+        (&b"one"[..], SendOptions::new().stream(0).ppid(60)),
+        (b"two", SendOptions::new().stream(1).ppid(60)),
+        (b"three", SendOptions::new().stream(1).ppid(60)),
+    ];
+    let mut sent = 0;
+    while sent < messages.len() {
+        sent += client.send_many(&messages[sent..]).await?;
+    }
+
+    // What has come, 64 messages a call at most
+    let mut received = Vec::new();
+    while received.len() < messages.len() {
+        server.recv_many(&mut received, 64).await?;
+    }
+    for item in &received {
+        if let NotificationOrData::Data(message) = item {
+            let text = String::from_utf8_lossy(&message.payload);
+            println!("{text:?} on stream {:?}", message.stream_id());
+        }
+    }
+    Ok(())
+}
+```
+
+```text
+"one" on stream Some(0)
+"two" on stream Some(1)
+"three" on stream Some(1)
+```
+
+## A writer and a reader for a socket
+
+[`driver::spawn`](https://docs.rs/oxirush-sctp/latest/oxirush_sctp/driver/)
+gives a socket a task that sends what its `Writer` queued, in batches, the
+associations of an endpoint in turns, and one that receives. The queue is
+in overload when its messages wait: once the shortest wait of an interval
+of 100 ms is above 5 ms, as CoDel tells a queue that stands from a burst.
+A send then fails at once, or waits for the end of the overload, as
+`DriverConfig` says.
+
+```rust
+use oxirush_sctp::driver::{self, DriverConfig};
+use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::io::Result<()> {
+    let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    let listener = socket.listen(5)?;
+    let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    let (client, _) = client.connect(listener.local_addr()?).await?;
+    let (server, _) = listener.accept().await?;
+
+    // A writer, which every task that sends can clone, and a reader
+    let (writer, _) = driver::spawn(client, DriverConfig::default())?;
+    let (_, mut reader) = driver::spawn(server, DriverConfig::default())?;
+    for index in 0..1000_u32 {
+        let options = SendOptions::new().ppid(60);
+        writer.send(index.to_be_bytes().to_vec(), options).await?;
+    }
+    let mut last = 0;
+    for _ in 0..1000 {
+        if let Some(Ok(NotificationOrData::Data(message))) = reader.recv().await {
+            last = u32::from_be_bytes(message.payload[..4].try_into().unwrap());
+        }
+    }
+    let overload = writer.overload();
+    println!(
+        "last {last}, refused {}, in overload {}",
+        overload.refused, overload.overloaded
+    );
+    Ok(())
+}
+```
+
+```text
+last 999, refused 0, in overload false
+```
+
 `examples/` has these programs, which `cargo run --example <name>` runs,
 and `server`, which serves several associations in a task each.
 
-## Features
-
-The crate has no Cargo feature. Its diagnostics go through
-[`tracing`](https://crates.io/crates/tracing).
-
-## What it does not do
+## Limits
 
 - SCTP itself: the protocol runs in the Linux kernel.
 - Other systems than Linux.
@@ -344,19 +449,63 @@ The crate has no Cargo feature. Its diagnostics go through
   share that of the socket, unless `net.sctp.rcvbuf_policy` is 1, and one
   that fills it makes the others wait. A `Listener` gives each association
   a socket of its own.
+- A send buffer for each: unless `net.sctp.sndbuf_policy` is 1, Linux
+  wakes the endpoint once for each of its associations when one of them has
+  data acknowledged. To 100 associations a message took 40 µs of CPU
+  on loopback, and to one 14 µs.
 
 ## Performance
 
-On one core of an AMD Ryzen 7 5700G, a message sent on one end of an
-association and received on the other, over the loopback interface, takes
-9 µs for 64 or 1400 octets and 40 µs for 64 KiB. Without
+On an AMD Ryzen 7 5700G with Linux 7.0 and Rust 1.98.1, over the loopback
+interface, with a load of 7 to 11 from other work:
+
+| | `send` and `recv` | `send_many` and `recv_many` |
+|---|---|---|
+| A message of 200 octets sent and received, one at a time, on one thread | 9.0 µs | |
+| A message of 64 KiB, the same | 47 µs | |
+| Messages of 200 octets from one task to another, on two threads | 117 000 a second, 14 µs each | 343 000 a second, 4.6 µs each |
+| The same from 1000 connected sockets to one endpoint | 93 000 a second, 17 µs each | 317 000 a second, 4.9 µs each |
+| The same from one endpoint to 100 associations, held back by Linux ([Limits](#limits)) | 45 000 a second, 40 µs each | 47 000 a second, 38 µs each |
+
+A rate is in messages a second, with the CPU time of the process a message,
+the kernel's work for the loopback interface included. Without
 `options().set_nodelay(true)` a small message can wait 200 ms for the
-acknowledgement of the one before it. `recv_into` reads into a buffer of
-the caller: in one run of both while the machine did other work, a message
-of 16 KiB took 13 µs with it and 16 µs with `recv`, and one of 64 KiB
-36 µs and 44 µs.
-[`benches/`](https://github.com/linouxis9/oxirush-sctp/blob/main/benches/README.md)
-has the benchmarks and how to profile.
+acknowledgement of the one before it. The
+[driver](https://docs.rs/oxirush-sctp/latest/oxirush_sctp/driver/) carries
+what `send_many` carries. [`benches/`](benches/README.md) has the
+benchmarks, `throughput.sh` for the rates, and how to profile.
+
+### Against other implementations
+
+The same loops for the SCTP crates of crates.io that run here, at pinned
+versions, and for a program in C on the kernel's sockets, on two cores of
+the same machine, a load of 7 to 8. The time is the fastest of five runs in
+turns; cycles and instructions are a message, user and kernel, from `perf
+stat`; the last column is the time against this crate's `send` and `recv`.
+With one message a call every crate is within 13 % of C, as the kernel
+takes most of the time; 64 messages a call take two fifths of the time of
+one, near C with `sendmmsg` and `recvmmsg`.
+
+| Loop | Implementation | ns a message | Cycles | Instructions | Allocations | Octets allocated | Peak memory | Time ÷ oxirush-sctp |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| Ping-pong, 200 octets | C | 8 256 | 36 520 | 25 850 | 0.00 | 0 | 1.9 MiB | 0.92 |
+|  | oxirush-sctp | 8 973 | 39 229 | 27 944 | 1.00 | 200 | 3.9 MiB |  |
+|  | oxirush-sctp, `recv_into` | 8 818 | 38 779 | 27 569 | 0.00 | 0 | 3.7 MiB | 0.98 |
+|  | tokio-sctp 0.2.0 | 8 927 | 39 249 | 28 041 | 0.00 | 0 | 3.8 MiB | 0.99 |
+|  | async-sctp 1.0.0 | 9 331 | 41 349 | 31 501 | 1.00 | 65 536 | 3.9 MiB | 1.04 |
+|  | lksctp 0.1.0 | 8 630 | 38 425 | 27 632 | 0.00 | 0 | 3.7 MiB | 0.96 |
+|  | sctp-rs 0.3.1 | 8 794 | 38 517 | 28 726 | 5.00 | 4 648 | 3.7 MiB | 0.98 |
+| 200 octets, one association, two threads | C | 7 325 | 50 084 | 31 741 | 0.00 | 0 | 2.2 MiB | 1.06 |
+|  | C, `sendmmsg` and `recvmmsg` | 2 423 | 15 364 | 11 714 | 0.00 | 0 | 2.4 MiB | 0.35 |
+|  | oxirush-sctp | 6 898 | 51 905 | 32 381 | 1.00 | 200 | 4.2 MiB |  |
+|  | oxirush-sctp, `send_many` and `recv_many` | 2 800 | 19 498 | 14 652 | 1.00 | 201 | 4.2 MiB | 0.41 |
+|  | tokio-sctp 0.2.0 | 7 124 | 54 008 | 31 639 | 0.00 | 0 | 4.2 MiB | 1.03 |
+|  | async-sctp 1.0.0 | 6 787 | 53 834 | 33 978 | 1.00 | 65 536 | 4.1 MiB | 0.98 |
+|  | lksctp 0.1.0 | 7 153 | 51 771 | 33 958 | 0.00 | 0 | 4.3 MiB | 1.04 |
+|  | sctp-rs 0.3.1 | 7 279 | 52 953 | 34 898 | 5.00 | 4 648 | 4.0 MiB | 1.06 |
+
+`benches/compare.sh` builds and runs them all; the rows for 16 KiB and for
+100 associations are in [`benches/`](benches/README.md).
 
 ## Tests and fuzzing
 
@@ -369,36 +518,24 @@ The tests open associations over the loopback interface. CI fuzzes three
 `cargo fuzz` targets for a minute each: what the kernel hands over is read
 without a panic.
 
-[The documentation](https://github.com/linouxis9/oxirush-sctp/blob/main/src/lib.rs)
-has the terms, the sections of RFC 6458 that the crate covers, the socket
-types, and the rules of `send` and `recv`: `cargo doc --open` builds it.
+[The documentation](https://docs.rs/oxirush-sctp) has the terms, the
+sections of RFC 6458 that the crate covers, the socket types, and the rules
+of `send` and `recv`.
 
 ## The OxiRush family
 
-[oxirush-nas](https://github.com/linouxis9/oxirush-nas) (NAS messages),
-[oxirush-security](https://github.com/linouxis9/oxirush-security) (NAS
-security), [oxirush-ngap](https://github.com/linouxis9/oxirush-ngap)
-(NGAP), [oxirush-s1ap](https://github.com/linouxis9/oxirush-s1ap) (S1AP)
-and [oxirush-gtp-u](https://github.com/linouxis9/oxirush-gtp-u) (GTP-U).
-NGAP and S1AP are carried over SCTP.
-
-## Contributing
-
-Open a pull request with a test for what it changes. The programs of this
-page are those of `examples/`, and
-[`tests/readme.rs`](https://github.com/linouxis9/oxirush-sctp/blob/main/tests/readme.rs)
-checks what they print. Sign off your commits (`git commit -s`): by
-contributing you agree to the
-[Developer Certificate of Origin](https://developercertificate.org/).
-[SECURITY.md](https://github.com/linouxis9/oxirush-sctp/blob/main/SECURITY.md)
-says how to report a vulnerability.
+- [oxirush-utils](https://github.com/linouxis9/oxirush-utils): the 3GPP identities, and the JSON tree with its paths that the others share.
+- [oxirush-aper](https://github.com/linouxis9/oxirush-aper): aligned PER, the runtime of the NGAP and S1AP codecs.
+- [oxirush-nas](https://github.com/linouxis9/oxirush-nas): the NAS messages of 5GS and EPS.
+- [oxirush-security](https://github.com/linouxis9/oxirush-security): NAS security, AKA and the derivation of keys.
+- [oxirush-ngap](https://github.com/linouxis9/oxirush-ngap): NGAP, between a gNB and an AMF.
+- [oxirush-s1ap](https://github.com/linouxis9/oxirush-s1ap): S1AP, between an eNB and an MME.
+- [oxirush-gtp-u](https://github.com/linouxis9/oxirush-gtp-u): GTP-U tunnels, with a test UPF.
+- [oxirush-sctp](https://github.com/linouxis9/oxirush-sctp): SCTP sockets, which carry NGAP and S1AP.
 
 ## License
 
-Licensed under either of the Apache License, Version 2.0
-([LICENSE-APACHE](https://github.com/linouxis9/oxirush-sctp/blob/main/LICENSE-APACHE))
-or the MIT License
-([LICENSE-MIT](https://github.com/linouxis9/oxirush-sctp/blob/main/LICENSE-MIT)),
-at your option.
+Licensed under the Apache License, Version 2.0, or the MIT License, at your
+option: see [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT).
 
 oxirush-sctp started as a fork of [sctp-rs](https://github.com/gabhijit/ellora).

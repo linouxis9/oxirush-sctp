@@ -48,7 +48,8 @@
 //!
 //! The [README](https://github.com/linouxis9/oxirush-sctp#readme) has a
 //! program for each task: notifications, the end of an association,
-//! multihoming, options and status, a one-to-many socket.
+//! multihoming, options and status, a one-to-many socket, many messages a
+//! call, and a writer and a reader for a socket ([`driver`]).
 //!
 //! # Requirements
 //!
@@ -108,6 +109,12 @@
 //!   it readable, and passes them on only to a caller that subscribes to them.
 //! - `send` waits for room in the send buffer. A dropped `send` future has
 //!   sent nothing.
+//! - `send_many` and `recv_many` move a batch with one `sendmmsg` or
+//!   `recvmmsg`. `send_many` returns how many messages the socket took, a
+//!   prefix of the batch; the kernel puts the messages of an association
+//!   that follow one another in as few packets as it can (`MSG_MORE`), and
+//!   holds none back past the call. `recv_many` returns whole messages, as
+//!   `recv` does. [`driver`] runs them in a task each.
 //! - A message shorter than a packet, sent while the one before it is not
 //!   acknowledged, waits for that acknowledgement, which the peer may delay by
 //!   200 ms: SCTP gathers small messages as TCP does. With
@@ -245,7 +252,7 @@
 //! | SCTP itself | The protocol runs in the Linux kernel: the crate is not an SCTP implementation. |
 //! | Other systems | Linux only. |
 //! | SCTP over DTLS | The data channels of WebRTC are another stack: not served. |
-//! | Many associations on one socket | On a [`OneToManyEndpoint`], the parts of the messages of several associations come in turns (`SCTP_FRAGMENT_INTERLEAVE` 1) and are assembled apart: a long message of one association holds back none of the others. Each association has one message in assembly at most, of `max_message_size()` at most, until it ends, and all of them together hold `max_assembly()` octets at most, 64 MiB by default: past it the endpoint aborts the association whose message is the longest. The associations share the receive buffer of the socket (Linux's `net.sctp.rcvbuf_policy` 0): one that fills it makes the others wait for room, and their peers send again after a time-out; `net.sctp.rcvbuf_policy` 1, or a [`Listener`], gives each its own. After `request_rcvinfo(false)` the parts come one message after the other, and a long message holds back the others. |
+//! | Many associations on one socket | On a [`OneToManyEndpoint`], the parts of the messages of several associations come in turns (`SCTP_FRAGMENT_INTERLEAVE` 1) and are assembled apart: a long message of one association holds back none of the others. Each association has one message in assembly at most, of `max_message_size()` at most, until it ends, and all of them together hold `max_assembly()` octets at most, 64 MiB by default: past it the endpoint aborts the association whose message is the longest. The associations share the receive buffer of the socket (Linux's `net.sctp.rcvbuf_policy` 0): one that fills it makes the others wait for room, and their peers send again after a time-out; `net.sctp.rcvbuf_policy` 1, or a [`Listener`], gives each its own. They share its send buffer too (`net.sctp.sndbuf_policy` 0): Linux wakes the socket once for each association when one of them has data acknowledged, and a message to one of 100 associations took 40 µs of CPU on loopback, where one to a single association took 14. After `request_rcvinfo(false)` the parts come one message after the other, and a long message holds back the others. |
 //! | The rest of RFC 6458 | Not wrapped: among others authentication, partial reliability and stream reconfiguration. The sockets implement `AsFd` and `AsRawFd` for them. The interfaces that the RFC deprecates are left out on purpose. |
 //!
 //! # Terms

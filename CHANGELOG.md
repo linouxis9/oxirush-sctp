@@ -215,8 +215,8 @@ sctp-rs.
   the primary path alone. `PeerAddress::state` is a `PathState`, where it
   was the number of the kernel.
 - The examples `hello`, `notifications`, `association_end`, `multihoming`,
-  `options`, `one_to_many` and `server`, which run both sides on loopback,
-  replace `ping` and `pong`. The README shows all but the last: a test
+  `options`, `one_to_many`, `batches`, `driver` and `server`, which run both
+  sides on loopback, replace `ping` and `pong`. The README shows all but the last: a test
   compares the two, and what each prints with the text that the README
   shows under it.
 - Three `cargo fuzz` targets under `fuzz/`, which CI runs for a minute each:
@@ -232,8 +232,9 @@ sctp-rs.
   rule), and a send then fails at once or waits, as `DriverConfig` says.
 - `benches/`, a package of its own that times a message through an
   association with criterion and profiles it with pprof, and measures the
-  messages a second of one message a call against batches. The published
-  crate does not have it.
+  messages a second of one message a call against batches; `compare.sh`
+  runs the same loops with the other SCTP crates of crates.io and with C.
+  The published crate does not have it.
 
 ### Requirements
 

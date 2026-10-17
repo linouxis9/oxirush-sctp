@@ -37,13 +37,15 @@ const PAGES: &[(&str, &str)] = &[
     ("src/lib.rs", include_str!("../src/lib.rs")),
 ];
 /// The programs of `examples/` that the README shows.
-const EXAMPLES: [&str; 6] = [
+const EXAMPLES: [&str; 8] = [
     include_str!("../examples/hello.rs"),
     include_str!("../examples/notifications.rs"),
     include_str!("../examples/association_end.rs"),
     include_str!("../examples/multihoming.rs"),
     include_str!("../examples/options.rs"),
     include_str!("../examples/one_to_many.rs"),
+    include_str!("../examples/batches.rs"),
+    include_str!("../examples/driver.rs"),
 ];
 const BLOCKS: &str = include_str!("readme/blocks.rs");
 const BLOCKS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/readme/blocks.rs");
@@ -227,7 +229,7 @@ fn the_rust_blocks_of_the_readme_are_parts_of_the_examples() {
         .filter_map(|block| block.split_once('\n'))
         .map(|(_, code)| code)
         .collect();
-    assert_eq!(blocks.len(), 6);
+    assert_eq!(blocks.len(), 8);
     for code in blocks {
         assert!(
             examples.iter().any(|example| example.contains(code)),

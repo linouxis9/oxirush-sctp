@@ -1,2 +1,4 @@
 target
 Cargo.lock
+# The comparison builds with its lock file
+!compare/Cargo.lock
