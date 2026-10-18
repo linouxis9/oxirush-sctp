@@ -94,8 +94,8 @@ which is why `send_many` always bundles.
 
 All the rows of `compare.sh`, the median of three runs. The last column is
 the time of each implementation over this crate's `send` and `recv`, "about
-the same" where it is within the spread of the three runs of its loop,
-11 % at most:
+the same" within 10 %, which two builds of the same code can differ by. The
+three runs of a loop differed by 11 % at most, for C with 100 associations.
 
 | Loop | Implementation | ns a message | Cycles | Instructions | Allocations | Octets allocated | Peak memory | Other / this crate |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
@@ -103,16 +103,16 @@ the same" where it is within the spread of the three runs of its loop,
 | | oxirush-sctp | 7,999 | 37,624 | 27,981 | 1 | 200 | 3.8 MiB | |
 | | oxirush-sctp, `recv_into` | 7,846 | 36,770 | 27,505 | 0 | 0 | 3.8 MiB | about the same |
 | | tokio-sctp 0.2.0 | 8,283 | 38,903 | 27,877 | 0 | 0 | 3.7 MiB | about the same |
-| | async-sctp 1.0.0 | 8,698 | 40,881 | 31,430 | 1 | 65,536 | 3.7 MiB | 1.09x |
+| | async-sctp 1.0.0 | 8,698 | 40,881 | 31,430 | 1 | 65,536 | 3.7 MiB | about the same |
 | | lksctp 0.1.0 | 8,137 | 38,262 | 27,373 | 0 | 0 | 3.7 MiB | about the same |
 | | sctp-rs 0.3.1 | 7,998 | 37,587 | 28,428 | 5 | 4,648 | 3.7 MiB | about the same |
-| Ping-pong, 16 KiB | C | 10,094 | 47,833 | 31,380 | 0 | 0 | 1.9 MiB | 0.90x |
+| Ping-pong, 16 KiB | C | 10,094 | 47,833 | 31,380 | 0 | 0 | 1.9 MiB | about the same |
 | | oxirush-sctp | 11,170 | 54,904 | 36,240 | 1 | 16,384 | 3.8 MiB | |
 | | oxirush-sctp, `recv_into` | 10,882 | 53,625 | 34,110 | 0 | 0 | 3.7 MiB | about the same |
 | | tokio-sctp 0.2.0 | 10,809 | 53,220 | 34,064 | 0 | 0 | 3.8 MiB | about the same |
-| | async-sctp 1.0.0 | 11,724 | 57,761 | 37,994 | 1 | 65,536 | 3.8 MiB | 1.05x |
+| | async-sctp 1.0.0 | 11,724 | 57,761 | 37,994 | 1 | 65,536 | 3.8 MiB | about the same |
 | | lksctp 0.1.0 | 10,814 | 53,420 | 33,617 | 0 | 0 | 3.8 MiB | about the same |
-|  | sctp-rs 0.3.1 | fails: EAGAIN | | | | | | |
+| | sctp-rs 0.3.1 | fails: EAGAIN | | | | | | |
 | 200 octets, one association, two threads | C | 7,045 | 49,551 | 32,047 | 0 | 0 | 2.2 MiB | about the same |
 | | C, `sendmmsg` and `recvmmsg` | 2,278 | 15,210 | 11,684 | 0 | 0 | 2.4 MiB | 0.32x |
 | | oxirush-sctp | 7,118 | 51,647 | 36,053 | 1 | 200 | 4.3 MiB | |
