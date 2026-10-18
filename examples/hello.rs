@@ -8,12 +8,12 @@
 use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Stream 1, and the payload protocol identifier of NGAP
     let options = SendOptions::new().stream(1).ppid(60);
 
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    socket.bind("127.0.0.1:0".parse()?)?;
     let listener = socket.listen(5)?;
     let address = listener.local_addr()?;
 
@@ -37,5 +37,5 @@ async fn main() -> std::io::Result<()> {
         std::io::Result::Ok(())
     };
     let (server, client) = tokio::join!(server, client);
-    server.and(client)
+    Ok(server.and(client)?)
 }

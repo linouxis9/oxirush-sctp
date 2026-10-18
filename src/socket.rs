@@ -151,6 +151,24 @@ impl Socket {
 
     /// Establish one association, consuming a one-to-one socket. Dropping the returned future
     /// closes it. Success leaves any association notification queued for `recv`.
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use oxirush_sctp::{Socket, SocketToAssociation};
+    ///
+    /// let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// socket.bind("127.0.0.1:0".parse()?)?;
+    /// let listener = socket.listen(5)?;
+    ///
+    /// // A gNB connects to its AMF: the association is up when `connect` returns
+    /// let gnb = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// let (association, _id) = gnb.connect(listener.local_addr()?).await?;
+    /// assert_eq!(association.peer_addrs()?, [listener.local_addr()?]);
+    /// let (_amf, _) = listener.accept().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn connect(
         self,
         addr: SocketAddr,

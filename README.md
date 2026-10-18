@@ -13,12 +13,12 @@ move one whole message, with its stream and its payload protocol identifier.
 use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Stream 1, and the payload protocol identifier of NGAP
     let options = SendOptions::new().stream(1).ppid(60);
 
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    socket.bind("127.0.0.1:0".parse()?)?;
     let listener = socket.listen(5)?;
     let address = listener.local_addr()?;
 
@@ -42,7 +42,7 @@ async fn main() -> std::io::Result<()> {
         std::io::Result::Ok(())
     };
     let (server, client) = tokio::join!(server, client);
-    server.and(client)
+    Ok(server.and(client)?)
 }
 ```
 
@@ -52,6 +52,8 @@ client: "pong"
 ```
 
 The text under a block is what the block prints.
+
+This page describes oxirush-sctp 0.1.0, which is not on crates.io yet.
 
 ## Installation
 
@@ -77,23 +79,22 @@ The minimum supported Rust version is 1.88.
 ## An NGAP association, with a writer and a reader
 
 [`driver::spawn`](https://docs.rs/oxirush-sctp/latest/oxirush_sctp/driver/)
-gives a socket a task that sends what its `Writer` queued, in batches, the
-associations of an endpoint in turns, and one that receives. The queue is
-in overload when its messages wait: once the shortest wait of an interval
-of 100 ms is above 5 ms, as CoDel tells a queue that stands from a burst.
-A send then fails at once, or waits for the end of the overload, as
-`DriverConfig` says.
+gives a socket two tasks. One sends what its `Writer` queued, in batches,
+and serves the associations of an endpoint in turns. The other receives.
+The queue is in overload once every message of an interval of 100 ms waited
+more than 5 ms: this is the test of CoDel, which tells a standing queue
+from a burst. A send then fails at once or waits, as `DriverConfig` says.
 
 ```rust
 use oxirush_sctp::driver::{self, DriverConfig};
 use oxirush_sctp::{InitParams, NotificationOrData, SendOptions, Socket, SocketToAssociation};
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The AMF listens with four streams each way: NGAP has stream 0 for the
     // messages of no UE, and the others for those of the UEs
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    socket.bind("127.0.0.1:0".parse()?)?;
     socket.options().set_nodelay(true)?;
     socket
         .options()
@@ -138,8 +139,7 @@ async fn main() -> std::io::Result<()> {
         println!("gNB: {:?}", String::from_utf8_lossy(&message.payload));
     }
 
-    // The queue of a writer is in overload when its messages wait: a send
-    // then fails at once, or waits, as `DriverConfig` says
+    // What the writer sent and refused, and whether its queue is in overload
     let overload = gnb_writer.overload();
     println!(
         "gNB writer: {} sent, {} refused, in overload {}",
@@ -156,8 +156,9 @@ gNB: "NG SETUP RESPONSE"
 gNB writer: 1001 sent, 0 refused, in overload false
 ```
 
-`examples/` has these programs, which `cargo run --example <name>` runs,
-and `server`, which serves several associations in a task each.
+`cargo run --example driver` runs this program, and `examples/` has the
+others of this page that use no other crate. `examples/server.rs` serves
+several associations, each in a task of its own.
 
 ## NG SETUP over SCTP
 
@@ -231,10 +232,10 @@ use oxirush_sctp::{
 };
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Subscribe before listening: the accepted associations inherit it
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    socket.bind("127.0.0.1:0".parse()?)?;
     socket.options().subscribe_events(
         &[Event::Association, Event::Shutdown],
         SubscribeEventAssocId::All,
@@ -290,9 +291,9 @@ async fn connected(listener: &Listener) -> std::io::Result<(ConnectedSocket, Con
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    socket.bind("127.0.0.1:0".parse()?)?;
     let listener = socket.listen(5)?;
 
     // The peer closes its socket: `None`, at every call from then on
@@ -346,24 +347,22 @@ use oxirush_sctp::{BindxFlags, Socket, SocketToAssociation};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-fn addresses(first: &str, second: &str) -> [SocketAddr; 2] {
-    [first.parse().unwrap(), second.parse().unwrap()]
-}
-
 fn ips(addresses: &[SocketAddr]) -> Vec<IpAddr> {
     addresses.iter().map(SocketAddr::ip).collect()
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // With port 0 the kernel chooses one port for both addresses
     let server = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    server.bindx(&addresses("127.0.0.1:0", "127.0.0.2:0"), BindxFlags::Add)?;
+    let addresses: [SocketAddr; 2] = ["127.0.0.1:0".parse()?, "127.0.0.2:0".parse()?];
+    server.bindx(&addresses, BindxFlags::Add)?;
     let listener = server.listen(5)?;
     let server_addresses = listener.local_addrs()?;
 
     let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    client.bindx(&addresses("127.0.0.1:0", "127.0.0.3:0"), BindxFlags::Add)?;
+    let addresses: [SocketAddr; 2] = ["127.0.0.1:0".parse()?, "127.0.0.3:0".parse()?];
+    client.bindx(&addresses, BindxFlags::Add)?;
     let (client, id) = client.connectx(&server_addresses).await?;
     let (accepted, _) = listener.accept().await?;
 
@@ -410,11 +409,11 @@ Every socket type has `options()`. The sockets implement `AsFd` and
 use oxirush_sctp::{InitParams, Socket, SocketToAssociation};
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // What is set before `listen` or `connect` stays, and the accepted
     // associations inherit it
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    socket.bind("127.0.0.1:0".parse()?)?;
     let options = socket.options();
     options.set_nodelay(true)?; // send small messages at once
     options.set_init_params(InitParams::streams(4, 4))?; // four streams each way
@@ -451,9 +450,9 @@ nodelay true, messages of 65536 octets at most
 use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = Socket::new_v4(SocketToAssociation::OneToMany)?;
-    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    socket.bind("127.0.0.1:0".parse()?)?;
     let endpoint = socket.into_endpoint(5)?;
 
     let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
@@ -493,9 +492,9 @@ packets as it can. `recv_many` returns whole messages, as `recv` does.
 use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    socket.bind("127.0.0.1:0".parse()?)?;
     let listener = socket.listen(5)?;
     let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
     let (client, _) = client.connect(listener.local_addr()?).await?;
@@ -552,15 +551,15 @@ async fn main() -> std::io::Result<()> {
 ## Performance
 
 On an AMD Ryzen 7 5700G (16 threads) with Linux 7.0 and Rust 1.98.1, over the
-loopback interface, measured on a quiet machine on 2026-10-18:
+loopback interface, at ea7c778, measured on a quiet machine on 2026-10-18:
 
 | | `send` and `recv` | `send_many` and `recv_many` |
 |---|---|---|
 | A message of 200 octets sent and received, one at a time, on one thread | 8.0 µs | |
 | A message of 64 KiB, the same | 35 µs | |
-| Messages of 200 octets from one task to another, on two threads | 163 000 a second, 11 µs each | 377 000 a second, 4.2 µs each |
-| The same from 1000 connected sockets to one endpoint | 185 000 a second, 10 µs each | 349 000 a second, 4.5 µs each |
-| The same from one endpoint to 100 associations, held back by Linux ([Limits](#limits)) | 54 000 a second, 34 µs each | 56 000 a second, 33 µs each |
+| Messages of 200 octets from one task to another, on two threads | 163,000 a second, 11 µs each | 377,000 a second, 4.2 µs each |
+| The same from 1,000 connected sockets to one endpoint | 185,000 a second, 10 µs each | 349,000 a second, 4.5 µs each |
+| The same from one endpoint to 100 associations, held back by Linux ([Limits](#limits)) | 54,000 a second, 34 µs each | 56,000 a second, 33 µs each |
 
 The first row is the ping-pong of the comparison below, the second the
 lowest of five runs of the `messages` benchmark, and a rate the median of
@@ -577,31 +576,32 @@ benchmarks, `throughput.sh` for the rates, and how to profile.
 
 The same loops for the SCTP crates of crates.io that run here, at pinned
 versions, and for a program in C on the kernel's sockets, on cores 2 and 3
-of the same machine. The time is the fastest of five runs in turns, and each
-figure the median of three runs of the script; cycles and instructions are a
-message, user and kernel, from `perf stat`; the last column is the time
-against this crate's `send` and `recv`.
-With one message a call every crate is within 13 % of C, as the kernel
-takes most of the time; 64 messages a call take two fifths of the time of
-one, near C with `sendmmsg` and `recvmmsg`.
+of the same machine, at ea7c778. The time is the fastest of five runs in
+turns, and each figure the median of three runs of the script. Cycles and
+instructions are a message, user and kernel, from `perf stat`. The last
+column is the time of each implementation over this crate's `send` and
+`recv`, "about the same" where it is within the spread of the three runs of
+its loop, 6 % at most. With one message a call every crate is within 13 %
+of C: the kernel takes most of the time. 64 messages a call take two fifths
+of the time of one, near C with `sendmmsg` and `recvmmsg`.
 
-| Loop | Implementation | ns a message | Cycles | Instructions | Allocations | Octets allocated | Peak memory | Time ÷ oxirush-sctp |
+| Loop | Implementation | ns a message | Cycles | Instructions | Allocations | Octets allocated | Peak memory | Other / this crate |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| Ping-pong, 200 octets | C | 7 694 | 35 694 | 25 729 | 0.00 | 0 | 1.9 MiB | 0.96 |
-|  | oxirush-sctp | 7 999 | 37 624 | 27 981 | 1.00 | 200 | 3.8 MiB |  |
-|  | oxirush-sctp, `recv_into` | 7 846 | 36 770 | 27 505 | 0.00 | 0 | 3.8 MiB | 0.98 |
-|  | tokio-sctp 0.2.0 | 8 283 | 38 903 | 27 877 | 0.00 | 0 | 3.7 MiB | 1.04 |
-|  | async-sctp 1.0.0 | 8 698 | 40 881 | 31 430 | 1.00 | 65 536 | 3.7 MiB | 1.09 |
-|  | lksctp 0.1.0 | 8 137 | 38 262 | 27 373 | 0.00 | 0 | 3.7 MiB | 1.02 |
-|  | sctp-rs 0.3.1 | 7 998 | 37 587 | 28 428 | 5.00 | 4 648 | 3.7 MiB | 1.00 |
-| 200 octets, one association, two threads | C | 7 045 | 49 551 | 32 047 | 0.00 | 0 | 2.2 MiB | 0.99 |
-|  | C, `sendmmsg` and `recvmmsg` | 2 278 | 15 210 | 11 684 | 0.00 | 0 | 2.4 MiB | 0.32 |
-|  | oxirush-sctp | 7 118 | 51 647 | 36 053 | 1.00 | 200 | 4.3 MiB |  |
-|  | oxirush-sctp, `send_many` and `recv_many` | 2 713 | 18 869 | 14 927 | 1.00 | 201 | 4.3 MiB | 0.38 |
-|  | tokio-sctp 0.2.0 | 7 306 | 52 740 | 36 026 | 0.00 | 0 | 4.3 MiB | 1.03 |
-|  | async-sctp 1.0.0 | 7 301 | 53 070 | 39 312 | 1.00 | 65 536 | 4.2 MiB | 1.03 |
-|  | lksctp 0.1.0 | 7 232 | 51 586 | 35 473 | 0.00 | 0 | 4.3 MiB | 1.02 |
-|  | sctp-rs 0.3.1 | 7 283 | 53 084 | 36 727 | 5.00 | 4 648 | 4.1 MiB | 1.02 |
+| Ping-pong, 200 octets | C | 7,694 | 35,694 | 25,729 | 0 | 0 | 1.9 MiB | about the same |
+| | oxirush-sctp | 7,999 | 37,624 | 27,981 | 1 | 200 | 3.8 MiB | |
+| | oxirush-sctp, `recv_into` | 7,846 | 36,770 | 27,505 | 0 | 0 | 3.8 MiB | about the same |
+| | tokio-sctp 0.2.0 | 8,283 | 38,903 | 27,877 | 0 | 0 | 3.7 MiB | about the same |
+| | async-sctp 1.0.0 | 8,698 | 40,881 | 31,430 | 1 | 65,536 | 3.7 MiB | 1.09x |
+| | lksctp 0.1.0 | 8,137 | 38,262 | 27,373 | 0 | 0 | 3.7 MiB | about the same |
+| | sctp-rs 0.3.1 | 7,998 | 37,587 | 28,428 | 5 | 4,648 | 3.7 MiB | about the same |
+| 200 octets, one association, two threads | C | 7,045 | 49,551 | 32,047 | 0 | 0 | 2.2 MiB | about the same |
+| | C, `sendmmsg` and `recvmmsg` | 2,278 | 15,210 | 11,684 | 0 | 0 | 2.4 MiB | 0.32x |
+| | oxirush-sctp | 7,118 | 51,647 | 36,053 | 1 | 200 | 4.3 MiB | |
+| | oxirush-sctp, `send_many` and `recv_many` | 2,713 | 18,869 | 14,927 | 1 | 201 | 4.3 MiB | 0.38x |
+| | tokio-sctp 0.2.0 | 7,306 | 52,740 | 36,026 | 0 | 0 | 4.3 MiB | about the same |
+| | async-sctp 1.0.0 | 7,301 | 53,070 | 39,312 | 1 | 65,536 | 4.2 MiB | about the same |
+| | lksctp 0.1.0 | 7,232 | 51,586 | 35,473 | 0 | 0 | 4.3 MiB | about the same |
+| | sctp-rs 0.3.1 | 7,283 | 53,084 | 36,727 | 5 | 4,648 | 4.1 MiB | about the same |
 
 `benches/compare.sh` builds and runs them all; the rows for 16 KiB and for
 100 associations are in [`benches/`](benches/README.md).
@@ -623,6 +623,11 @@ those crates at the revisions that its manifest names.
 [The documentation](https://docs.rs/oxirush-sctp) has the terms, the
 sections of RFC 6458 that the crate covers, the socket types, and the rules
 of `send` and `recv`.
+
+A pull request comes with a test for what it changes. Sign off your commits
+(`git commit -s`): by contributing you agree to the [Developer Certificate
+of Origin](https://developercertificate.org/). [SECURITY.md](SECURITY.md)
+says how to report a vulnerability.
 
 ## The OxiRush family
 

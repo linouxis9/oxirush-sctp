@@ -250,6 +250,29 @@ impl ConnectedSocket {
     /// end of the association, every call returns at once: `BrokenPipe` for an association
     /// that was shut down, and the error of one that was aborted or lost, such as
     /// `ConnectionReset`.
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use oxirush_sctp::{InitParams, SendOptions, Socket, SocketToAssociation};
+    ///
+    /// let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// socket.bind("127.0.0.1:0".parse()?)?;
+    /// let listener = socket.listen(5)?;
+    /// let gnb = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// gnb.options().set_init_params(InitParams::streams(2, 2))?;
+    /// let (gnb, _) = gnb.connect(listener.local_addr()?).await?;
+    ///
+    /// // Stream 1 of the two, with the payload protocol identifier of NGAP
+    /// gnb.send(b"a message of a UE", SendOptions::new().stream(1).ppid(60)).await?;
+    ///
+    /// // The association has no stream 2
+    /// let refused = gnb.send(b"a message", SendOptions::new().stream(2)).await;
+    /// let kind = refused.err().map(|error| error.kind());
+    /// assert_eq!(kind, Some(std::io::ErrorKind::InvalidInput));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send(&self, payload: &[u8], options: SendOptions) -> std::io::Result<()> {
         if options.assoc_id() != 0 {
             return Err(Self::not_one_to_many());

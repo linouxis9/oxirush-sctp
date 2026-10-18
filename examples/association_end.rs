@@ -17,9 +17,9 @@ async fn connected(listener: &Listener) -> std::io::Result<(ConnectedSocket, Con
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    socket.bind("127.0.0.1:0".parse()?)?;
     let listener = socket.listen(5)?;
 
     // The peer closes its socket: `None`, at every call from then on

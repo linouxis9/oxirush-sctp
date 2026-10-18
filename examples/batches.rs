@@ -7,9 +7,9 @@
 use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    socket.bind("127.0.0.1:0".parse()?)?;
     let listener = socket.listen(5)?;
     let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
     let (client, _) = client.connect(listener.local_addr()?).await?;

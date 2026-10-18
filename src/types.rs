@@ -43,6 +43,37 @@ pub enum SocketToAssociation {
 /// The end of an association is neither:
 /// [`ConnectedSocket::recv`][crate::ConnectedSocket::recv] returns `None` for an association
 /// that was shut down, and an error for one that was aborted or lost.
+///
+/// ```
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use oxirush_sctp::{Event, Notification, NotificationOrData, SendOptions, Socket};
+/// use oxirush_sctp::{SocketToAssociation, SubscribeEventAssocId};
+///
+/// // A socket that subscribes to the changes of its associations
+/// let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+/// socket.bind("127.0.0.1:0".parse()?)?;
+/// socket.options().subscribe_events(&[Event::Association], SubscribeEventAssocId::All)?;
+/// let listener = socket.listen(5)?;
+///
+/// let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
+/// let (peer, _) = peer.connect(listener.local_addr()?).await?;
+/// peer.send(b"hello", SendOptions::new()).await?;
+/// let (association, _) = listener.accept().await?;
+///
+/// // The association comes up, then the message
+/// for _ in 0..2 {
+///     match association.recv().await? {
+///         Some(NotificationOrData::Notification(Notification::AssociationChange(change))) => {
+///             println!("{:?}", change.state)
+///         }
+///         Some(NotificationOrData::Data(message)) => println!("{} octets", message.payload.len()),
+///         other => println!("{other:?}"),
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NotificationOrData {
@@ -53,11 +84,31 @@ pub enum NotificationOrData {
     Data(ReceivedData),
 }
 
-/// Structure Representing SCTP Received Data.
+/// A message that `recv` returned: its payload, its sender and the ancillary data of the
+/// system call that received it. `Debug` prints the payload as its length and its octets in
+/// hexadecimal.
 ///
-/// This structure is returned by the `recv` API call. This contains in addition to 'received'
-/// data, any ancillary data that is received during the underlying system call. `Debug`
-/// prints the payload as its length and its octets in hexadecimal.
+/// ```
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
+///
+/// let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+/// socket.bind("127.0.0.1:0".parse()?)?;
+/// let listener = socket.listen(5)?;
+/// let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
+/// let (peer, _) = peer.connect(listener.local_addr()?).await?;
+/// let (association, _) = listener.accept().await?;
+///
+/// // A message on stream 0, with the payload protocol identifier of NGAP
+/// peer.send(b"NG SETUP REQUEST", SendOptions::new().stream(0).ppid(60)).await?;
+/// if let Some(NotificationOrData::Data(message)) = association.recv().await? {
+///     assert_eq!(message.payload, b"NG SETUP REQUEST");
+///     assert_eq!((message.stream_id(), message.ppid()), (Some(0), Some(60)));
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReceivedData {

@@ -47,12 +47,12 @@ fn block_1() {
     use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
 
     #[tokio::main(flavor = "current_thread")]
-    async fn main() -> std::io::Result<()> {
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Stream 1, and the payload protocol identifier of NGAP
         let options = SendOptions::new().stream(1).ppid(60);
 
         let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-        socket.bind("127.0.0.1:0".parse().unwrap())?;
+        socket.bind("127.0.0.1:0".parse()?)?;
         let listener = socket.listen(5)?;
         let address = listener.local_addr()?;
 
@@ -76,7 +76,7 @@ fn block_1() {
             std::io::Result::Ok(())
         };
         let (server, client) = tokio::join!(server, client);
-        server.and(client)
+        Ok(server.and(client)?)
     }
     main().unwrap();
 }
@@ -87,11 +87,11 @@ fn block_2() {
     use oxirush_sctp::{InitParams, NotificationOrData, SendOptions, Socket, SocketToAssociation};
 
     #[tokio::main(flavor = "current_thread")]
-    async fn main() -> std::io::Result<()> {
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The AMF listens with four streams each way: NGAP has stream 0 for the
         // messages of no UE, and the others for those of the UEs
         let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-        socket.bind("127.0.0.1:0".parse().unwrap())?;
+        socket.bind("127.0.0.1:0".parse()?)?;
         socket.options().set_nodelay(true)?;
         socket
             .options()
@@ -136,8 +136,7 @@ fn block_2() {
             println!("gNB: {:?}", String::from_utf8_lossy(&message.payload));
         }
 
-        // The queue of a writer is in overload when its messages wait: a send
-        // then fails at once, or waits, as `DriverConfig` says
+        // What the writer sent and refused, and whether its queue is in overload
         let overload = gnb_writer.overload();
         println!(
             "gNB writer: {} sent, {} refused, in overload {}",
@@ -156,10 +155,10 @@ fn block_3() {
     };
 
     #[tokio::main(flavor = "current_thread")]
-    async fn main() -> std::io::Result<()> {
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Subscribe before listening: the accepted associations inherit it
         let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-        socket.bind("127.0.0.1:0".parse().unwrap())?;
+        socket.bind("127.0.0.1:0".parse()?)?;
         socket.options().subscribe_events(
             &[Event::Association, Event::Shutdown],
             SubscribeEventAssocId::All,
@@ -205,9 +204,9 @@ fn block_4() {
     }
 
     #[tokio::main(flavor = "current_thread")]
-    async fn main() -> std::io::Result<()> {
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-        socket.bind("127.0.0.1:0".parse().unwrap())?;
+        socket.bind("127.0.0.1:0".parse()?)?;
         let listener = socket.listen(5)?;
 
         // The peer closes its socket: `None`, at every call from then on
@@ -235,24 +234,22 @@ fn block_5() {
     use std::net::{IpAddr, SocketAddr};
     use std::time::Duration;
 
-    fn addresses(first: &str, second: &str) -> [SocketAddr; 2] {
-        [first.parse().unwrap(), second.parse().unwrap()]
-    }
-
     fn ips(addresses: &[SocketAddr]) -> Vec<IpAddr> {
         addresses.iter().map(SocketAddr::ip).collect()
     }
 
     #[tokio::main(flavor = "current_thread")]
-    async fn main() -> std::io::Result<()> {
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // With port 0 the kernel chooses one port for both addresses
         let server = Socket::new_v4(SocketToAssociation::OneToOne)?;
-        server.bindx(&addresses("127.0.0.1:0", "127.0.0.2:0"), BindxFlags::Add)?;
+        let addresses: [SocketAddr; 2] = ["127.0.0.1:0".parse()?, "127.0.0.2:0".parse()?];
+        server.bindx(&addresses, BindxFlags::Add)?;
         let listener = server.listen(5)?;
         let server_addresses = listener.local_addrs()?;
 
         let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-        client.bindx(&addresses("127.0.0.1:0", "127.0.0.3:0"), BindxFlags::Add)?;
+        let addresses: [SocketAddr; 2] = ["127.0.0.1:0".parse()?, "127.0.0.3:0".parse()?];
+        client.bindx(&addresses, BindxFlags::Add)?;
         let (client, id) = client.connectx(&server_addresses).await?;
         let (accepted, _) = listener.accept().await?;
 
@@ -287,11 +284,11 @@ fn block_6() {
     use oxirush_sctp::{InitParams, Socket, SocketToAssociation};
 
     #[tokio::main(flavor = "current_thread")]
-    async fn main() -> std::io::Result<()> {
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // What is set before `listen` or `connect` stays, and the accepted
         // associations inherit it
         let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-        socket.bind("127.0.0.1:0".parse().unwrap())?;
+        socket.bind("127.0.0.1:0".parse()?)?;
         let options = socket.options();
         options.set_nodelay(true)?; // send small messages at once
         options.set_init_params(InitParams::streams(4, 4))?; // four streams each way
@@ -323,9 +320,9 @@ fn block_7() {
     use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
 
     #[tokio::main(flavor = "current_thread")]
-    async fn main() -> std::io::Result<()> {
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let socket = Socket::new_v4(SocketToAssociation::OneToMany)?;
-        socket.bind("127.0.0.1:0".parse().unwrap())?;
+        socket.bind("127.0.0.1:0".parse()?)?;
         let endpoint = socket.into_endpoint(5)?;
 
         let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
@@ -351,9 +348,9 @@ fn block_8() {
     use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
 
     #[tokio::main(flavor = "current_thread")]
-    async fn main() -> std::io::Result<()> {
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-        socket.bind("127.0.0.1:0".parse().unwrap())?;
+        socket.bind("127.0.0.1:0".parse()?)?;
         let listener = socket.listen(5)?;
         let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
         let (client, _) = client.connect(listener.local_addr()?).await?;
@@ -391,12 +388,12 @@ fn block_9() {
     use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
 
     #[tokio::main(flavor = "current_thread")]
-    async fn main() -> std::io::Result<()> {
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Stream 1, and the payload protocol identifier of NGAP
         let options = SendOptions::new().stream(1).ppid(60);
 
         let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-        socket.bind("127.0.0.1:0".parse().unwrap())?;
+        socket.bind("127.0.0.1:0".parse()?)?;
         let listener = socket.listen(5)?;
         let address = listener.local_addr()?;
 
@@ -420,7 +417,7 @@ fn block_9() {
             std::io::Result::Ok(())
         };
         let (server, client) = tokio::join!(server, client);
-        server.and(client)
+        Ok(server.and(client)?)
     }
     main().unwrap();
 }

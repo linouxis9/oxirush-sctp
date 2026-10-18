@@ -78,9 +78,9 @@ async fn peers(server: SocketAddr) -> std::io::Result<()> {
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    socket.bind("127.0.0.1:0".parse()?)?;
     // The associations accepted later inherit these options.
     let options = socket.options();
     options.set_nodelay(true)?; // send small messages at once
@@ -92,5 +92,5 @@ async fn main() -> std::io::Result<()> {
     let listener = socket.listen(5)?;
     let address = listener.local_addr()?;
     let (server, peers) = tokio::join!(server(listener), peers(address));
-    server.and(peers)
+    Ok(server.and(peers)?)
 }

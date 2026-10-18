@@ -8,24 +8,22 @@ use oxirush_sctp::{BindxFlags, Socket, SocketToAssociation};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-fn addresses(first: &str, second: &str) -> [SocketAddr; 2] {
-    [first.parse().unwrap(), second.parse().unwrap()]
-}
-
 fn ips(addresses: &[SocketAddr]) -> Vec<IpAddr> {
     addresses.iter().map(SocketAddr::ip).collect()
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // With port 0 the kernel chooses one port for both addresses
     let server = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    server.bindx(&addresses("127.0.0.1:0", "127.0.0.2:0"), BindxFlags::Add)?;
+    let addresses: [SocketAddr; 2] = ["127.0.0.1:0".parse()?, "127.0.0.2:0".parse()?];
+    server.bindx(&addresses, BindxFlags::Add)?;
     let listener = server.listen(5)?;
     let server_addresses = listener.local_addrs()?;
 
     let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    client.bindx(&addresses("127.0.0.1:0", "127.0.0.3:0"), BindxFlags::Add)?;
+    let addresses: [SocketAddr; 2] = ["127.0.0.1:0".parse()?, "127.0.0.3:0".parse()?];
+    client.bindx(&addresses, BindxFlags::Add)?;
     let (client, id) = client.connectx(&server_addresses).await?;
     let (accepted, _) = listener.accept().await?;
 

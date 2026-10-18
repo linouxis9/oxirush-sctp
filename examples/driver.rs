@@ -9,11 +9,11 @@ use oxirush_sctp::driver::{self, DriverConfig};
 use oxirush_sctp::{InitParams, NotificationOrData, SendOptions, Socket, SocketToAssociation};
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The AMF listens with four streams each way: NGAP has stream 0 for the
     // messages of no UE, and the others for those of the UEs
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    socket.bind("127.0.0.1:0".parse()?)?;
     socket.options().set_nodelay(true)?;
     socket
         .options()
@@ -58,8 +58,7 @@ async fn main() -> std::io::Result<()> {
         println!("gNB: {:?}", String::from_utf8_lossy(&message.payload));
     }
 
-    // The queue of a writer is in overload when its messages wait: a send
-    // then fails at once, or waits, as `DriverConfig` says
+    // What the writer sent and refused, and whether its queue is in overload
     let overload = gnb_writer.overload();
     println!(
         "gNB writer: {} sent, {} refused, in overload {}",

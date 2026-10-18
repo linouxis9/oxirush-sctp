@@ -11,10 +11,10 @@ use oxirush_sctp::{
 };
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Subscribe before listening: the accepted associations inherit it
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    socket.bind("127.0.0.1:0".parse()?)?;
     socket.options().subscribe_events(
         &[Event::Association, Event::Shutdown],
         SubscribeEventAssocId::All,

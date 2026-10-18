@@ -562,6 +562,32 @@ pub struct Reader {
 
 impl Reader {
     /// The next message, notification or error.
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// use oxirush_sctp::driver::{self, DriverConfig};
+    /// use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
+    ///
+    /// let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// socket.bind("127.0.0.1:0".parse()?)?;
+    /// let listener = socket.listen(5)?;
+    /// let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// let (client, _) = client.connect(listener.local_addr()?).await?;
+    /// let (server, _) = listener.accept().await?;
+    /// let (_writer, mut reader) = driver::spawn(server, DriverConfig::default())?;
+    ///
+    /// // A message, then `None` once the peer has closed the association
+    /// client.send(b"hello", SendOptions::new()).await?;
+    /// drop(client);
+    /// let Some(Ok(NotificationOrData::Data(message))) = reader.recv().await else {
+    ///     unreachable!()
+    /// };
+    /// assert_eq!(message.payload, b"hello");
+    /// assert!(reader.recv().await.is_none());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn recv(&mut self) -> Option<std::io::Result<NotificationOrData>> {
         self.received.recv().await
     }

@@ -3,7 +3,7 @@ name = "oxirush-sctp"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Async SCTP sockets for Tokio on the Linux kernel SCTP stack"
+description = "Async SCTP for Tokio on the Linux kernel stack (RFC 6458): one-to-one and one-to-many sockets, multihoming, notifications, and batched sends and receives."
 categories = ["network-programming", "asynchronous"]
 keywords = ["sctp", "tokio", "linux", "ngap", "s1ap"]
 readme = "README.md"
@@ -27,3 +27,7 @@ tokio = { version = "1.34", features = ["macros", "rt", "rt-multi-thread", "time
 # targets the module `fuzzing`.
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
+[package.metadata.docs.rs]
+# The crate is for Linux: docs.rs builds it for this target alone.
+targets = ["x86_64-unknown-linux-gnu"]
