@@ -563,6 +563,33 @@ pub struct NxtInfo {
 #[non_exhaustive]
 /// An `enum` representing the notifications received on the SCTP Sockets. `Debug` prints
 /// octets as their length and each in hexadecimal.
+///
+/// ```
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> std::io::Result<()> {
+/// # let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+/// # socket.bind("127.0.0.1:0".parse().unwrap())?;
+/// # let listener = socket.listen(5)?;
+/// use oxirush_sctp::{AssocChangeState, Event, Notification, NotificationOrData};
+/// use oxirush_sctp::{Socket, SocketToAssociation, SubscribeEventAssocId};
+///
+/// // A client that subscribes to the changes of its association before connecting
+/// let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+/// let events = [Event::Association];
+/// client.options().subscribe_events(&events, SubscribeEventAssocId::All)?;
+/// let (client, _) = client.connect(listener.local_addr()?).await?;
+///
+/// // The first that it receives: the association is up, with its streams
+/// let received = client.recv().await?;
+/// let Some(NotificationOrData::Notification(Notification::AssociationChange(change))) = received
+/// else {
+///     unreachable!()
+/// };
+/// assert_eq!(change.state, AssocChangeState::CommUp);
+/// assert!(change.outbound_streams > 0);
+/// # Ok(())
+/// # }
+/// ```
 pub enum Notification {
     /// Association Change Notification. See Section 6.1.1 of RFC 6458.
     AssociationChange(AssociationChange),

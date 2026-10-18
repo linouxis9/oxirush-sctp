@@ -46,10 +46,20 @@
 //! client: "pong"
 //! ```
 //!
+//! # Tasks
+//!
 //! The [README](https://github.com/linouxis9/oxirush-sctp#readme) has a
-//! program for each task: notifications, the end of an association,
-//! multihoming, options and status, a one-to-many socket, many messages a
-//! call, and a writer and a reader for a socket ([`driver`]).
+//! program for each, with what it prints.
+//!
+//! | Task | Items |
+//! |------|-------|
+//! | An NGAP association, with a writer and a reader | [`driver::spawn`], [`driver::DriverConfig`], [`driver::Writer::overload`], [`InitParams`] |
+//! | Notifications | [`SocketOptions::subscribe_events`], [`Event`], [`Notification`] |
+//! | The end of an association | [`ConnectedSocket::recv`], [`ConnectedSocket::close`] |
+//! | Multihoming | [`Socket::bindx`], [`Socket::connectx`], [`SocketOptions::set_peer_address_params`] |
+//! | Options and status | [`SocketOptions`], [`ConnectedSocket::status`] |
+//! | One socket for many associations | [`Socket::into_endpoint`], [`OneToManyEndpoint`], [`OneToManyEndpoint::peeloff`] |
+//! | Many messages a call | [`ConnectedSocket::send_many`], [`ConnectedSocket::recv_many`] |
 //!
 //! # Requirements
 //!
@@ -280,6 +290,17 @@
 //! CI runs for a minute each: a notification of any octets, the control
 //! messages of a `recvmsg`, and the assembly of messages from any sequence of
 //! parts.
+//!
+//! # The OxiRush family
+//!
+//! - [oxirush-utils](https://docs.rs/oxirush-utils): the 3GPP identities, and the JSON tree with its paths that the others share.
+//! - [oxirush-aper](https://docs.rs/oxirush-aper): aligned PER, the runtime of the NGAP and S1AP codecs.
+//! - [oxirush-nas](https://docs.rs/oxirush-nas): the NAS messages of 5GS and EPS.
+//! - [oxirush-security](https://docs.rs/oxirush-security): NAS security, AKA and the derivation of keys.
+//! - [oxirush-ngap](https://docs.rs/oxirush-ngap): NGAP, between a gNB and an AMF.
+//! - [oxirush-s1ap](https://docs.rs/oxirush-s1ap): S1AP, between an eNB and an MME.
+//! - [oxirush-gtp-u](https://docs.rs/oxirush-gtp-u): GTP-U tunnels, with a test UPF.
+//! - [oxirush-sctp](https://docs.rs/oxirush-sctp): SCTP sockets, which carry NGAP and S1AP.
 #![warn(missing_docs)]
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]

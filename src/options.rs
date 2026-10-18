@@ -39,6 +39,19 @@ impl SocketOptions<'_> {
     /// Subscribe to events. Every event is attempted; errors retain all failed events and errno
     /// values in [`EventSubscriptionError`][crate::EventSubscriptionError]. Associations
     /// accepted from a listener inherit its subscriptions.
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// use oxirush_sctp::{Event, Socket, SocketToAssociation, SubscribeEventAssocId};
+    ///
+    /// // Before listening: the accepted associations inherit it
+    /// let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// let events = [Event::Association, Event::Shutdown];
+    /// socket.options().subscribe_events(&events, SubscribeEventAssocId::All)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn subscribe_events(
         &self,
         events: &[Event],
@@ -59,6 +72,18 @@ impl SocketOptions<'_> {
     /// Set the streams, the attempts and the timeout of the INIT of the associations that
     /// start after this call (`SCTP_INITMSG`). A zero leaves that value unchanged; by default
     /// Linux opens ten outgoing streams.
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// use oxirush_sctp::{InitParams, Socket, SocketToAssociation};
+    ///
+    /// // Four streams each way, as an NGAP node with three streams for its UEs asks
+    /// let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// socket.options().set_init_params(InitParams::streams(4, 4))?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn set_init_params(&self, params: InitParams) -> std::io::Result<()> {
         sys::sctp_setup_init_params_internal(self.core.as_fd(), params)
     }
@@ -136,6 +161,28 @@ impl SocketOptions<'_> {
     }
 
     /// Change heartbeat and retransmission settings, preserving unrelated path settings.
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// # use oxirush_sctp::{Socket, SocketToAssociation};
+    /// # let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
+    /// # let listener = socket.listen(5)?;
+    /// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// # let (client, id) = client.connect(listener.local_addr()?).await?;
+    /// use std::time::Duration;
+    ///
+    /// // A heartbeat on the path to the peer each second, where Linux sends one each 30
+    /// let address = client.peer_addrs()?[0];
+    /// let mut path = client.options().peer_address_params(id, address)?;
+    /// path.heartbeat_interval = Duration::from_secs(1);
+    /// client.options().set_peer_address_params(path)?;
+    /// let path = client.options().peer_address_params(id, address)?;
+    /// assert_eq!(path.heartbeat_interval, Duration::from_secs(1));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn set_peer_address_params(&self, params: PeerAddressParams) -> std::io::Result<()> {
         sys::set_peer_address_params_internal(self.core.as_fd(), params)
     }

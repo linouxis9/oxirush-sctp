@@ -10,7 +10,7 @@ readme = "README.md"
 repository = "https://github.com/linouxis9/oxirush-sctp"
 documentation = "https://docs.rs/oxirush-sctp"
 license = "Apache-2.0 OR MIT"
-exclude = [".github/", ".gitignore", "benches/", "fuzz/"]
+exclude = [".github/", ".gitignore", "benches/", "family/", "fuzz/"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

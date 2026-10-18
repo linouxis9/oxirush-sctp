@@ -121,6 +121,25 @@ impl ConnectedSocket {
     }
 
     /// The status of the association.
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// use oxirush_sctp::{ConnState, InitParams, Socket, SocketToAssociation};
+    /// # let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
+    /// # let listener = socket.listen(5)?;
+    ///
+    /// // Four streams each way, as an NGAP node with three streams for its UEs asks
+    /// let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// client.options().set_init_params(InitParams::streams(4, 4))?;
+    /// let (client, _) = client.connect(listener.local_addr()?).await?;
+    /// let status = client.status()?;
+    /// assert_eq!(status.state, ConnState::Established);
+    /// assert_eq!(status.outstreams, 4);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn status(&self) -> std::io::Result<ConnStatus> {
         sys::sctp_get_status_internal(self.as_fd(), 0)
     }
@@ -147,6 +166,32 @@ impl ConnectedSocket {
     /// partial record for the next call; concurrent readers share one assembler. Records over
     /// `options().max_message_size()` are drained and reported as `InvalidData`, leaving the
     /// next record intact; a notification is never discarded.
+    ///
+    /// ```
+    /// # use oxirush_sctp::{Socket, SocketToAssociation};
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// # let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
+    /// # let listener = socket.listen(5)?;
+    /// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// # let (client, _) = client.connect(listener.local_addr()?).await?;
+    /// # let (server, _) = listener.accept().await?;
+    /// use oxirush_sctp::{NotificationOrData, SendOptions};
+    ///
+    /// // A message of NGAP on stream 1, then the end of the association
+    /// client.send(b"ping", SendOptions::new().stream(1).ppid(60)).await?;
+    /// drop(client);
+    /// let mut messages = Vec::new();
+    /// while let Some(received) = server.recv().await? {
+    ///     if let NotificationOrData::Data(message) = received {
+    ///         messages.push((message.stream_id(), message.ppid(), message.payload));
+    ///     }
+    /// }
+    /// assert_eq!(messages, [(Some(1), Some(60), b"ping".to_vec())]);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn recv(&self) -> std::io::Result<Option<NotificationOrData>> {
         self.core.recv().await
     }
@@ -228,6 +273,33 @@ impl ConnectedSocket {
     /// the system runs out of memory for SCTP in the middle of a batch, the last message
     /// that the kernel took waits for the next send. The errors are those of `send`, for the
     /// first message that is not sent.
+    ///
+    /// ```
+    /// # use oxirush_sctp::{Socket, SocketToAssociation};
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// # let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
+    /// # let listener = socket.listen(5)?;
+    /// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// # let (client, _) = client.connect(listener.local_addr()?).await?;
+    /// # let (server, _) = listener.accept().await?;
+    /// use oxirush_sctp::SendOptions;
+    ///
+    /// // Three messages of NGAP in one system call: how many the socket took
+    /// let ngap = SendOptions::new().ppid(60);
+    /// let messages = [(&b"one"[..], ngap), (b"two", ngap), (b"three", ngap)];
+    /// let mut sent = 0;
+    /// while sent < messages.len() {
+    ///     sent += client.send_many(&messages[sent..]).await?;
+    /// }
+    /// let mut received = Vec::new();
+    /// while received.len() < 3 {
+    ///     server.recv_many(&mut received, 64).await?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_many(&self, messages: &[(&[u8], SendOptions)]) -> std::io::Result<usize> {
         Self::one_association(messages)?;
         self.core.send_many(messages).await
@@ -304,6 +376,27 @@ impl ConnectedSocket {
     ///
     /// The deadline needs the time driver of the runtime (`enable_time`, or
     /// `#[tokio::main]`).
+    ///
+    /// ```
+    /// # use oxirush_sctp::{Socket, SocketToAssociation};
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// # let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
+    /// # let listener = socket.listen(5)?;
+    /// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// # let (client, _) = client.connect(listener.local_addr()?).await?;
+    /// # let (server, _) = listener.accept().await?;
+    /// use oxirush_sctp::SendOptions;
+    /// use std::time::Duration;
+    ///
+    /// // The server sends a last message, then the client closes: what came is not lost
+    /// server.send(b"bye", SendOptions::new()).await?;
+    /// let last = client.close(Duration::from_secs(1)).await?;
+    /// assert_eq!(last.len(), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn close(self, deadline: std::time::Duration) -> std::io::Result<Vec<ReceivedData>> {
         match self.core.shutdown(std::net::Shutdown::Write) {
             // An association that has ended already: `recv` says how

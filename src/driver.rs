@@ -152,6 +152,17 @@ impl Batched for OneToManyEndpoint {
 }
 
 /// How a driver batches and when its writer's queue is in overload.
+///
+/// ```
+/// use oxirush_sctp::driver::{DriverConfig, OnOverload};
+/// use std::time::Duration;
+///
+/// // A writer that waits in overload, with a queue that stands from 10 ms
+/// let mut config = DriverConfig::default();
+/// config.on_overload = OnOverload::Wait;
+/// config.target = Duration::from_millis(10);
+/// assert_eq!(config.batch, 64);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DriverConfig {
@@ -351,6 +362,33 @@ impl Writer {
     /// Queue a message: at once, unless the queue is in overload, where it fails with
     /// [`SendError::Overloaded`] or waits, as [`DriverConfig::on_overload`] says, or full,
     /// where it waits for room. On an endpoint, `options` names the association.
+    ///
+    /// ```
+    /// # use oxirush_sctp::{Socket, SocketToAssociation};
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// # let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
+    /// # let listener = socket.listen(5)?;
+    /// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// # let (client, _) = client.connect(listener.local_addr()?).await?;
+    /// # let (server, _) = listener.accept().await?;
+    /// use oxirush_sctp::driver::{self, DriverConfig, SendError};
+    /// use oxirush_sctp::SendOptions;
+    ///
+    /// // Every task that sends has a clone of the writer
+    /// let (writer, _) = driver::spawn(client, DriverConfig::default())?;
+    /// let (_, _reader) = driver::spawn(server, DriverConfig::default())?;
+    /// let other = writer.clone();
+    /// tokio::spawn(async move { other.send(vec![1], SendOptions::new()).await });
+    /// writer.send(vec![2], SendOptions::new().stream(1)).await?;
+    ///
+    /// // SCTP has no empty message
+    /// let empty = writer.send(Vec::new(), SendOptions::new()).await;
+    /// assert!(matches!(empty, Err(SendError::Empty)));
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send(&self, payload: Vec<u8>, options: SendOptions) -> Result<(), SendError> {
         if payload.is_empty() {
             return Err(SendError::Empty);
@@ -405,6 +443,29 @@ impl Writer {
     }
 
     /// The state of the queue and its counters.
+    ///
+    /// ```
+    /// # use oxirush_sctp::{Socket, SocketToAssociation};
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// # let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
+    /// # let listener = socket.listen(5)?;
+    /// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// # let (client, _) = client.connect(listener.local_addr()?).await?;
+    /// # let (server, _) = listener.accept().await?;
+    /// use oxirush_sctp::driver::{self, DriverConfig};
+    /// use oxirush_sctp::SendOptions;
+    ///
+    /// let (writer, _) = driver::spawn(client, DriverConfig::default())?;
+    /// let (_, _reader) = driver::spawn(server, DriverConfig::default())?;
+    /// writer.send(vec![1, 2, 3], SendOptions::new()).await?;
+    /// let overload = writer.overload();
+    /// assert!(!overload.overloaded);
+    /// assert_eq!(overload.refused, 0);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn overload(&self) -> Overload {
         let shared = &self.shared;
         let window = *shared.window.lock().unwrap_or_else(PoisonError::into_inner);
@@ -506,6 +567,33 @@ impl Reader {
     }
 
     /// Up to `limit` of them, appended to `out`, waiting for the first: how many.
+    ///
+    /// ```
+    /// # use oxirush_sctp::{Socket, SocketToAssociation};
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// # let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
+    /// # let listener = socket.listen(5)?;
+    /// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// # let (client, _) = client.connect(listener.local_addr()?).await?;
+    /// # let (server, _) = listener.accept().await?;
+    /// use oxirush_sctp::driver::{self, DriverConfig};
+    /// use oxirush_sctp::SendOptions;
+    ///
+    /// let (writer, _) = driver::spawn(client, DriverConfig::default())?;
+    /// let (_, mut reader) = driver::spawn(server, DriverConfig::default())?;
+    /// for index in 0..10_u8 {
+    ///     writer.send(vec![index], SendOptions::new()).await?;
+    /// }
+    /// // What has come, 64 messages a call at most
+    /// let mut received = Vec::new();
+    /// while received.len() < 10 {
+    ///     reader.recv_many(&mut received, 64).await;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn recv_many(
         &mut self,
         out: &mut Vec<std::io::Result<NotificationOrData>>,
@@ -534,6 +622,31 @@ impl Reader {
 /// # Panics
 ///
 /// Outside a Tokio runtime, and for a [`DriverConfig::batch`] of 0.
+///
+/// ```
+/// # use oxirush_sctp::{Socket, SocketToAssociation};
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() -> std::io::Result<()> {
+/// # let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+/// # socket.bind("127.0.0.1:0".parse().unwrap())?;
+/// # let listener = socket.listen(5)?;
+/// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+/// # let (client, _) = client.connect(listener.local_addr()?).await?;
+/// # let (server, _) = listener.accept().await?;
+/// use oxirush_sctp::driver::{self, DriverConfig};
+/// use oxirush_sctp::{NotificationOrData, SendOptions};
+///
+/// // A writer for the client, a reader for the server
+/// let (writer, _) = driver::spawn(client, DriverConfig::default())?;
+/// let (_, mut reader) = driver::spawn(server, DriverConfig::default())?;
+/// writer.send(b"NG SETUP REQUEST".to_vec(), SendOptions::new().ppid(60)).await?;
+/// let Some(Ok(NotificationOrData::Data(message))) = reader.recv().await else {
+///     unreachable!()
+/// };
+/// assert_eq!(message.ppid(), Some(60));
+/// # Ok(())
+/// # }
+/// ```
 pub fn spawn<S: Batched>(socket: S, config: DriverConfig) -> std::io::Result<(Writer, Reader)> {
     assert!(config.batch > 0, "a batch of 0 messages");
     socket.options().set_nodelay(true)?;

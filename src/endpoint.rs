@@ -231,6 +231,28 @@ impl OneToManyEndpoint {
     /// A partially delivered record already belongs to this endpoint, not to the kernel.
     /// Peeling that association during partial delivery returns `InvalidInput`; finish or drain
     /// its record first. The returned association inherits this endpoint's receive limit.
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
+    ///
+    /// let socket = Socket::new_v4(SocketToAssociation::OneToMany)?;
+    /// socket.bind("127.0.0.1:0".parse().unwrap())?;
+    /// let endpoint = socket.into_endpoint(16)?;
+    /// let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// let (peer, _) = peer.connect(endpoint.local_addr()?).await?;
+    /// peer.send(b"ping", SendOptions::new()).await?;
+    ///
+    /// // The association of the first message gets a socket of its own
+    /// let NotificationOrData::Data(message) = endpoint.recv().await? else { unreachable!() };
+    /// let association = endpoint.peeloff(message.assoc_id().unwrap())?;
+    /// association.send(b"pong", SendOptions::new()).await?;
+    /// let Some(NotificationOrData::Data(answer)) = peer.recv().await? else { unreachable!() };
+    /// assert_eq!(answer.payload, b"pong");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn peeloff(&self, assoc_id: AssociationId) -> std::io::Result<ConnectedSocket> {
         Ok(ConnectedSocket::from_core(self.core.peeloff(assoc_id)?))
     }

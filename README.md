@@ -51,6 +51,8 @@ server: "ping" on stream Some(1) with PPID Some(60)
 client: "pong"
 ```
 
+The text under a block is what the block prints.
+
 ## Installation
 
 ```toml
@@ -71,6 +73,151 @@ oxirush-sctp = { git = "https://github.com/linouxis9/oxirush-sctp" }
 ```
 
 The minimum supported Rust version is 1.88.
+
+## An NGAP association, with a writer and a reader
+
+[`driver::spawn`](https://docs.rs/oxirush-sctp/latest/oxirush_sctp/driver/)
+gives a socket a task that sends what its `Writer` queued, in batches, the
+associations of an endpoint in turns, and one that receives. The queue is
+in overload when its messages wait: once the shortest wait of an interval
+of 100 ms is above 5 ms, as CoDel tells a queue that stands from a burst.
+A send then fails at once, or waits for the end of the overload, as
+`DriverConfig` says.
+
+```rust
+use oxirush_sctp::driver::{self, DriverConfig};
+use oxirush_sctp::{InitParams, NotificationOrData, SendOptions, Socket, SocketToAssociation};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::io::Result<()> {
+    // The AMF listens with four streams each way: NGAP has stream 0 for the
+    // messages of no UE, and the others for those of the UEs
+    let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    socket.bind("127.0.0.1:0".parse().unwrap())?;
+    socket.options().set_nodelay(true)?;
+    socket
+        .options()
+        .set_init_params(InitParams::streams(4, 4))?;
+    let listener = socket.listen(5)?;
+
+    // The gNB connects
+    let gnb = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    gnb.options().set_nodelay(true)?;
+    gnb.options().set_init_params(InitParams::streams(4, 4))?;
+    let (gnb, _) = gnb.connect(listener.local_addr()?).await?;
+    let (amf, _) = listener.accept().await?;
+    let status = amf.status()?;
+    println!("{:?}, {} streams each way", status.state, status.outstreams);
+
+    // A writer, which every task that sends can clone, and a reader, for
+    // each side. A writer sends what was queued in batches of 64 at most
+    let (gnb_writer, mut gnb_reader) = driver::spawn(gnb, DriverConfig::default())?;
+    let (amf_writer, mut amf_reader) = driver::spawn(amf, DriverConfig::default())?;
+
+    // The gNB: a message of no UE on stream 0, then a thousand messages of
+    // UEs on streams 1 to 3, each with the payload protocol identifier of NGAP
+    let setup = SendOptions::new().stream(0).ppid(60);
+    gnb_writer.send(b"NG SETUP REQUEST".to_vec(), setup).await?;
+    for ue in 0..1000_u16 {
+        let options = SendOptions::new().stream(1 + ue % 3).ppid(60);
+        gnb_writer.send(ue.to_be_bytes().to_vec(), options).await?;
+    }
+
+    // The AMF: each message with its stream, then an answer on stream 0
+    let mut streams = [0; 4];
+    for _ in 0..1001 {
+        if let Some(Ok(NotificationOrData::Data(message))) = amf_reader.recv().await {
+            streams[usize::from(message.stream_id().unwrap())] += 1;
+        }
+    }
+    println!("AMF: {streams:?} messages on streams 0 to 3");
+    amf_writer
+        .send(b"NG SETUP RESPONSE".to_vec(), setup)
+        .await?;
+    if let Some(Ok(NotificationOrData::Data(message))) = gnb_reader.recv().await {
+        println!("gNB: {:?}", String::from_utf8_lossy(&message.payload));
+    }
+
+    // The queue of a writer is in overload when its messages wait: a send
+    // then fails at once, or waits, as `DriverConfig` says
+    let overload = gnb_writer.overload();
+    println!(
+        "gNB writer: {} sent, {} refused, in overload {}",
+        overload.sent, overload.refused, overload.overloaded
+    );
+    Ok(())
+}
+```
+
+```text
+Established, 4 streams each way
+AMF: [1, 334, 333, 333] messages on streams 0 to 3
+gNB: "NG SETUP RESPONSE"
+gNB writer: 1001 sent, 0 refused, in overload false
+```
+
+`examples/` has these programs, which `cargo run --example <name>` runs,
+and `server`, which serves several associations in a task each.
+
+## NG SETUP over SCTP
+
+The messages of an association are those of its protocol: here the NG
+SETUP of [oxirush-ngap](https://github.com/linouxis9/oxirush-ngap), on
+stream 0 and with the payload protocol identifier of NGAP, 60
+(TS 38.412).
+
+```rust,ignore
+use oxirush_ngap::helpers::{global_gnb_id, guami, plmn, s_nssai};
+use oxirush_ngap::{build_ngap, ngap::*};
+use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ngap = SendOptions::new().stream(0).ppid(60);
+    let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    socket.bind("127.0.0.1:0".parse()?)?;
+    let listener = socket.listen(5)?;
+    let gnb = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    let (gnb, _) = gnb.connect(listener.local_addr()?).await?;
+    let (amf, _) = listener.accept().await?;
+
+    // The gNB: NG SETUP REQUEST, its identity and the slices of its tracking area
+    let network = plmn("208", "93")?;
+    let slices = || SliceSupportList(vec![SliceSupportItem::new(s_nssai(1, None), None)]);
+    let plmns = BroadcastPLMNList(vec![BroadcastPLMNItem::new(network, slices(), None)]);
+    let area = SupportedTAItem::new(TAC([0, 0, 1]), plmns, None);
+    let request = build_ngap!(InitiatingMessage, NGSetup, NGSetupRequest,
+        GlobalRANNodeID(GlobalRANNodeID::globalGNB_ID(global_gnb_id(network, 0x123456, 24)?)),
+        SupportedTAList(SupportedTAList(vec![area])),
+        DefaultPagingDRX(PagingDRX::v128),
+    )?;
+    gnb.send(&request.encode()?, ngap).await?;
+
+    // The AMF: the PDU of each message, and an answer on the same stream
+    if let Some(NotificationOrData::Data(message)) = amf.recv().await? {
+        let pdu = NGAP_PDU::decode(&message.payload)?;
+        let (stream, ppid) = (message.stream_id(), message.ppid());
+        println!("AMF: {:?} on stream {stream:?}, PPID {ppid:?}", pdu.kind());
+        let served = ServedGUAMIItem::new(guami(network, 1, 1, 0)?, None, None);
+        let response = build_ngap!(SuccessfulOutcome, NGSetup, NGSetupResponse,
+            AMFName("amf-1"),
+            ServedGUAMIList(ServedGUAMIList(vec![served])),
+            RelativeAMFCapacity(RelativeAMFCapacity(255)),
+            PLMNSupportList(PLMNSupportList(vec![PLMNSupportItem::new(network, slices(), None)])),
+        )?;
+        amf.send(&response.encode()?, ngap).await?;
+    }
+    if let Some(NotificationOrData::Data(message)) = gnb.recv().await? {
+        println!("gNB: {:?}", NGAP_PDU::decode(&message.payload)?.kind());
+    }
+    Ok(())
+}
+```
+
+```text
+AMF: Initiating_NGSetup on stream Some(0), PPID Some(60)
+gNB: Successful_NGSetup
+```
 
 ## Notifications
 
@@ -386,58 +533,6 @@ async fn main() -> std::io::Result<()> {
 "three" on stream Some(1)
 ```
 
-## A writer and a reader for a socket
-
-[`driver::spawn`](https://docs.rs/oxirush-sctp/latest/oxirush_sctp/driver/)
-gives a socket a task that sends what its `Writer` queued, in batches, the
-associations of an endpoint in turns, and one that receives. The queue is
-in overload when its messages wait: once the shortest wait of an interval
-of 100 ms is above 5 ms, as CoDel tells a queue that stands from a burst.
-A send then fails at once, or waits for the end of the overload, as
-`DriverConfig` says.
-
-```rust
-use oxirush_sctp::driver::{self, DriverConfig};
-use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> std::io::Result<()> {
-    let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.bind("127.0.0.1:0".parse().unwrap())?;
-    let listener = socket.listen(5)?;
-    let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    let (client, _) = client.connect(listener.local_addr()?).await?;
-    let (server, _) = listener.accept().await?;
-
-    // A writer, which every task that sends can clone, and a reader
-    let (writer, _) = driver::spawn(client, DriverConfig::default())?;
-    let (_, mut reader) = driver::spawn(server, DriverConfig::default())?;
-    for index in 0..1000_u32 {
-        let options = SendOptions::new().ppid(60);
-        writer.send(index.to_be_bytes().to_vec(), options).await?;
-    }
-    let mut last = 0;
-    for _ in 0..1000 {
-        if let Some(Ok(NotificationOrData::Data(message))) = reader.recv().await {
-            last = u32::from_be_bytes(message.payload[..4].try_into().unwrap());
-        }
-    }
-    let overload = writer.overload();
-    println!(
-        "last {last}, refused {}, in overload {}",
-        overload.refused, overload.overloaded
-    );
-    Ok(())
-}
-```
-
-```text
-last 999, refused 0, in overload false
-```
-
-`examples/` has these programs, which `cargo run --example <name>` runs,
-and `server`, which serves several associations in a task each.
-
 ## Limits
 
 - SCTP itself: the protocol runs in the Linux kernel.
@@ -520,7 +615,10 @@ cargo test
 
 The tests open associations over the loopback interface. CI fuzzes three
 `cargo fuzz` targets for a minute each: what the kernel hands over is read
-without a panic.
+without a panic. The Rust blocks of this page are checked with what they
+print ([`tests/readme.rs`](tests/readme.rs)). The blocks that use other
+crates of the family run in the package of [`family/`](family/), which takes
+those crates at the revisions that its manifest names.
 
 [The documentation](https://docs.rs/oxirush-sctp) has the terms, the
 sections of RFC 6458 that the crate covers, the socket types, and the rules

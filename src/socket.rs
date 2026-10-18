@@ -81,6 +81,22 @@ impl Socket {
     }
 
     /// Add or remove local addresses (`sctp_bindx`, RFC 6458 section 9.1).
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// use oxirush_sctp::{BindxFlags, Socket, SocketToAssociation};
+    ///
+    /// // Two addresses of the host, on the one port that the kernel chooses
+    /// let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// let addresses = ["127.0.0.1:0".parse().unwrap(), "127.0.0.2:0".parse().unwrap()];
+    /// socket.bindx(&addresses, BindxFlags::Add)?;
+    /// let bound = socket.local_addrs()?;
+    /// assert_eq!(bound.len(), 2);
+    /// assert_eq!(bound[0].port(), bound[1].port());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn bindx(&self, addrs: &[SocketAddr], flags: BindxFlags) -> std::io::Result<()> {
         sys::sctp_bindx_internal(self.as_fd(), addrs, flags)
     }
@@ -104,6 +120,28 @@ impl Socket {
     /// A one-to-one socket returns `InvalidInput`. This listens with the supplied backlog. The
     /// endpoint keeps this socket's registered descriptor and receive limit. A failure closes
     /// it.
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// use oxirush_sctp::{Socket, SocketToAssociation};
+    ///
+    /// // One socket for every association, as an AMF may have for its gNBs
+    /// let socket = Socket::new_v4(SocketToAssociation::OneToMany)?;
+    /// socket.bind("127.0.0.1:0".parse().unwrap())?;
+    /// let endpoint = socket.into_endpoint(16)?;
+    ///
+    /// // A peer of one association connects to it as to a listener
+    /// let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// let (peer, _) = peer.connect(endpoint.local_addr()?).await?;
+    /// assert_eq!(peer.peer_addrs()?, [endpoint.local_addr()?]);
+    ///
+    /// // A one-to-one socket has no endpoint
+    /// let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// assert_eq!(socket.into_endpoint(16).unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn into_endpoint(self, backlog: i32) -> std::io::Result<OneToManyEndpoint> {
         self.core
             .require_style(SocketToAssociation::OneToMany, "into_endpoint")?;
@@ -123,6 +161,26 @@ impl Socket {
     /// Establish one multihomed association. Completes only once established, or returns the
     /// kernel failure reason. One-to-many sockets return `InvalidInput`; their endpoint's
     /// [`connect`][OneToManyEndpoint::connect] initiates associations without consuming it.
+    ///
+    /// ```
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> std::io::Result<()> {
+    /// use oxirush_sctp::{BindxFlags, Socket, SocketToAssociation};
+    ///
+    /// // A server on two addresses
+    /// let server = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// let addresses = ["127.0.0.1:0".parse().unwrap(), "127.0.0.2:0".parse().unwrap()];
+    /// server.bindx(&addresses, BindxFlags::Add)?;
+    /// let listener = server.listen(5)?;
+    ///
+    /// // A client bound to one address, which gives both of the server: two paths
+    /// let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
+    /// client.bind("127.0.0.1:0".parse().unwrap())?;
+    /// let (client, _) = client.connectx(&listener.local_addrs()?).await?;
+    /// assert_eq!(client.peer_addrs()?.len(), 2);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn connectx(
         self,
         addrs: &[SocketAddr],
