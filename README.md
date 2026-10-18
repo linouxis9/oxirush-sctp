@@ -451,24 +451,27 @@ and `server`, which serves several associations in a task each.
   a socket of its own.
 - A send buffer for each: unless `net.sctp.sndbuf_policy` is 1, Linux
   wakes the endpoint once for each of its associations when one of them has
-  data acknowledged. To 100 associations a message took 40 µs of CPU
-  on loopback, and to one 14 µs.
+  data acknowledged. To 100 associations a message took 34 µs of CPU
+  on loopback, and to one 11 µs.
 
 ## Performance
 
-On an AMD Ryzen 7 5700G with Linux 7.0 and Rust 1.98.1, over the loopback
-interface, with a load of 7 to 11 from other work:
+On an AMD Ryzen 7 5700G (16 threads) with Linux 7.0 and Rust 1.98.1, over the
+loopback interface, measured on a quiet machine on 2026-10-18:
 
 | | `send` and `recv` | `send_many` and `recv_many` |
 |---|---|---|
-| A message of 200 octets sent and received, one at a time, on one thread | 9.0 µs | |
-| A message of 64 KiB, the same | 47 µs | |
-| Messages of 200 octets from one task to another, on two threads | 117 000 a second, 14 µs each | 343 000 a second, 4.6 µs each |
-| The same from 1000 connected sockets to one endpoint | 93 000 a second, 17 µs each | 317 000 a second, 4.9 µs each |
-| The same from one endpoint to 100 associations, held back by Linux ([Limits](#limits)) | 45 000 a second, 40 µs each | 47 000 a second, 38 µs each |
+| A message of 200 octets sent and received, one at a time, on one thread | 8.0 µs | |
+| A message of 64 KiB, the same | 35 µs | |
+| Messages of 200 octets from one task to another, on two threads | 163 000 a second, 11 µs each | 377 000 a second, 4.2 µs each |
+| The same from 1000 connected sockets to one endpoint | 185 000 a second, 10 µs each | 349 000 a second, 4.5 µs each |
+| The same from one endpoint to 100 associations, held back by Linux ([Limits](#limits)) | 54 000 a second, 34 µs each | 56 000 a second, 33 µs each |
 
-A rate is in messages a second, with the CPU time of the process a message,
-the kernel's work for the loopback interface included. Without
+The first row is the ping-pong of the comparison below, the second the
+lowest of five runs of the `messages` benchmark, and a rate the median of
+three runs of `throughput.sh` on cores 2 and 3, each the median of three
+rounds. A rate is in messages a second, with the CPU time of the process a
+message, the kernel's work for the loopback interface included. Without
 `options().set_nodelay(true)` a small message can wait 200 ms for the
 acknowledgement of the one before it. The
 [driver](https://docs.rs/oxirush-sctp/latest/oxirush_sctp/driver/) carries
@@ -478,31 +481,32 @@ benchmarks, `throughput.sh` for the rates, and how to profile.
 ### Against other implementations
 
 The same loops for the SCTP crates of crates.io that run here, at pinned
-versions, and for a program in C on the kernel's sockets, on two cores of
-the same machine, a load of 7 to 8. The time is the fastest of five runs in
-turns; cycles and instructions are a message, user and kernel, from `perf
-stat`; the last column is the time against this crate's `send` and `recv`.
+versions, and for a program in C on the kernel's sockets, on cores 2 and 3
+of the same machine. The time is the fastest of five runs in turns, and each
+figure the median of three runs of the script; cycles and instructions are a
+message, user and kernel, from `perf stat`; the last column is the time
+against this crate's `send` and `recv`.
 With one message a call every crate is within 13 % of C, as the kernel
 takes most of the time; 64 messages a call take two fifths of the time of
 one, near C with `sendmmsg` and `recvmmsg`.
 
 | Loop | Implementation | ns a message | Cycles | Instructions | Allocations | Octets allocated | Peak memory | Time ÷ oxirush-sctp |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| Ping-pong, 200 octets | C | 8 256 | 36 520 | 25 850 | 0.00 | 0 | 1.9 MiB | 0.92 |
-|  | oxirush-sctp | 8 973 | 39 229 | 27 944 | 1.00 | 200 | 3.9 MiB |  |
-|  | oxirush-sctp, `recv_into` | 8 818 | 38 779 | 27 569 | 0.00 | 0 | 3.7 MiB | 0.98 |
-|  | tokio-sctp 0.2.0 | 8 927 | 39 249 | 28 041 | 0.00 | 0 | 3.8 MiB | 0.99 |
-|  | async-sctp 1.0.0 | 9 331 | 41 349 | 31 501 | 1.00 | 65 536 | 3.9 MiB | 1.04 |
-|  | lksctp 0.1.0 | 8 630 | 38 425 | 27 632 | 0.00 | 0 | 3.7 MiB | 0.96 |
-|  | sctp-rs 0.3.1 | 8 794 | 38 517 | 28 726 | 5.00 | 4 648 | 3.7 MiB | 0.98 |
-| 200 octets, one association, two threads | C | 7 325 | 50 084 | 31 741 | 0.00 | 0 | 2.2 MiB | 1.06 |
-|  | C, `sendmmsg` and `recvmmsg` | 2 423 | 15 364 | 11 714 | 0.00 | 0 | 2.4 MiB | 0.35 |
-|  | oxirush-sctp | 6 898 | 51 905 | 32 381 | 1.00 | 200 | 4.2 MiB |  |
-|  | oxirush-sctp, `send_many` and `recv_many` | 2 800 | 19 498 | 14 652 | 1.00 | 201 | 4.2 MiB | 0.41 |
-|  | tokio-sctp 0.2.0 | 7 124 | 54 008 | 31 639 | 0.00 | 0 | 4.2 MiB | 1.03 |
-|  | async-sctp 1.0.0 | 6 787 | 53 834 | 33 978 | 1.00 | 65 536 | 4.1 MiB | 0.98 |
-|  | lksctp 0.1.0 | 7 153 | 51 771 | 33 958 | 0.00 | 0 | 4.3 MiB | 1.04 |
-|  | sctp-rs 0.3.1 | 7 279 | 52 953 | 34 898 | 5.00 | 4 648 | 4.0 MiB | 1.06 |
+| Ping-pong, 200 octets | C | 7 694 | 35 694 | 25 729 | 0.00 | 0 | 1.9 MiB | 0.96 |
+|  | oxirush-sctp | 7 999 | 37 624 | 27 981 | 1.00 | 200 | 3.8 MiB |  |
+|  | oxirush-sctp, `recv_into` | 7 846 | 36 770 | 27 505 | 0.00 | 0 | 3.8 MiB | 0.98 |
+|  | tokio-sctp 0.2.0 | 8 283 | 38 903 | 27 877 | 0.00 | 0 | 3.7 MiB | 1.04 |
+|  | async-sctp 1.0.0 | 8 698 | 40 881 | 31 430 | 1.00 | 65 536 | 3.7 MiB | 1.09 |
+|  | lksctp 0.1.0 | 8 137 | 38 262 | 27 373 | 0.00 | 0 | 3.7 MiB | 1.02 |
+|  | sctp-rs 0.3.1 | 7 998 | 37 587 | 28 428 | 5.00 | 4 648 | 3.7 MiB | 1.00 |
+| 200 octets, one association, two threads | C | 7 045 | 49 551 | 32 047 | 0.00 | 0 | 2.2 MiB | 0.99 |
+|  | C, `sendmmsg` and `recvmmsg` | 2 278 | 15 210 | 11 684 | 0.00 | 0 | 2.4 MiB | 0.32 |
+|  | oxirush-sctp | 7 118 | 51 647 | 36 053 | 1.00 | 200 | 4.3 MiB |  |
+|  | oxirush-sctp, `send_many` and `recv_many` | 2 713 | 18 869 | 14 927 | 1.00 | 201 | 4.3 MiB | 0.38 |
+|  | tokio-sctp 0.2.0 | 7 306 | 52 740 | 36 026 | 0.00 | 0 | 4.3 MiB | 1.03 |
+|  | async-sctp 1.0.0 | 7 301 | 53 070 | 39 312 | 1.00 | 65 536 | 4.2 MiB | 1.03 |
+|  | lksctp 0.1.0 | 7 232 | 51 586 | 35 473 | 0.00 | 0 | 4.3 MiB | 1.02 |
+|  | sctp-rs 0.3.1 | 7 283 | 53 084 | 36 727 | 5.00 | 4 648 | 4.1 MiB | 1.02 |
 
 `benches/compare.sh` builds and runs them all; the rows for 16 KiB and for
 100 associations are in [`benches/`](benches/README.md).
