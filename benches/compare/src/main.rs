@@ -1,7 +1,7 @@
 //! One loop for oxirush-sctp and for each SCTP crate of crates.io that runs here, over
 //! loopback: what `../compare.sh` times.
 //!
-//! ```bash
+//! ```sh
 //! compare <implementation> pingpong <octets> <messages>
 //! compare <implementation> stream <octets> <messages> <associations>
 //! ```

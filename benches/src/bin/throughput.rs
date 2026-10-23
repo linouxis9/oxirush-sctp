@@ -1,7 +1,7 @@
 //! Messages a second through SCTP associations over loopback: many small messages, as NGAP
 //! has, sent by one thread and received by another, each with a runtime of its own.
 //!
-//! ```bash
+//! ```sh
 //! cargo run --release --bin throughput -- pair 200 1000000 1 64
 //! ```
 //!

@@ -2,7 +2,7 @@
 //! interface, and its CPU profile. It needs the `sctp` module of the
 //! kernel, as the tests do.
 //!
-//! ```bash
+//! ```sh
 //! cargo bench --bench messages                   # every case
 //! cargo bench --bench messages -- 1400           # those whose name has it
 //! cargo bench --bench messages -- --profile-time 10 send-recv/65536
