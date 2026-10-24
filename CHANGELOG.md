@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (0.1.0)
+## 0.1.0 - 2026-10-24
 
 First release. The crate started as a fork of sctp-rs 0.3.1 and does not
 keep its API. What follows is what differs, for a program that moves from

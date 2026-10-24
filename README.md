@@ -53,8 +53,6 @@ client: "pong"
 
 Each example is followed by its output.
 
-This page describes oxirush-sctp 0.1.0, which is not on crates.io yet.
-
 ## Installation
 
 ```toml
@@ -66,13 +64,6 @@ tokio = { version = "1", features = ["macros", "rt"] }
 The crate has no Cargo feature. It needs Linux 5.0 or later with SCTP,
 which `sudo modprobe sctp` loads, and a Tokio runtime with the I/O driver.
 Its diagnostics go through [`tracing`](https://crates.io/crates/tracing).
-
-Until 0.1.0 is on crates.io, a program takes the crate from its repository:
-
-```toml
-[dependencies]
-oxirush-sctp = { git = "https://github.com/linouxis9/oxirush-sctp" }
-```
 
 The minimum supported Rust version is 1.88.
 
@@ -603,7 +594,7 @@ The tests open associations over the loopback interface. CI runs three
 without a panic. Each Rust block of this page is checked with what it prints
 ([`tests/readme.rs`](tests/readme.rs)). The block that uses another crate of
 the family runs in the package of [`family/`](family/), which takes that
-crate at the revision that its manifest names.
+crate at the version that its manifest names.
 
 [The documentation](https://docs.rs/oxirush-sctp) has the terms, the
 sections of RFC 6458 that the crate covers, the socket types, and the rules
