@@ -4,10 +4,10 @@
 [![Documentation](https://docs.rs/oxirush-sctp/badge.svg)](https://docs.rs/oxirush-sctp)
 [![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg)](COPYRIGHT)
 
-Async SCTP sockets for [Tokio](https://tokio.rs) on Linux, over the SCTP of
-the kernel and its sockets API
-([RFC 6458](https://www.rfc-editor.org/rfc/rfc6458.html)). `send` and `recv`
-move one whole message, with its stream and its payload protocol identifier.
+Async SCTP sockets for [Tokio](https://tokio.rs) on Linux, on the kernel's
+SCTP and its sockets API ([RFC 6458](https://www.rfc-editor.org/rfc/rfc6458.html)):
+`send` and `recv` move one whole message, with its stream and its payload
+protocol identifier.
 
 ```rust
 use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
@@ -51,7 +51,7 @@ server: "ping" on stream Some(1) with PPID Some(60)
 client: "pong"
 ```
 
-The text under a block is what the block prints.
+Each example is followed by its output.
 
 This page describes oxirush-sctp 0.1.0, which is not on crates.io yet.
 
@@ -79,11 +79,11 @@ The minimum supported Rust version is 1.88.
 ## An NGAP association, with a writer and a reader
 
 [`driver::spawn`](https://docs.rs/oxirush-sctp/latest/oxirush_sctp/driver/)
-gives a socket two tasks. One sends what its `Writer` queued, in batches,
-and serves the associations of an endpoint in turns. The other receives.
-The queue is in overload once every message of an interval of 100 ms waited
-more than 5 ms: this is the test of CoDel, which tells a standing queue
-from a burst. A send then fails at once or waits, as `DriverConfig` says.
+gives a socket two tasks. One sends what its `Writer` queues, in batches,
+and serves the associations of an endpoint in turn; the other receives.
+When messages keep waiting in the queue for more than 5 ms, `overload()`
+says that the queue is in overload, and a send then fails at once or waits,
+as `DriverConfig` says.
 
 ```rust
 use oxirush_sctp::driver::{self, DriverConfig};
@@ -128,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut streams = [0; 4];
     for _ in 0..1001 {
         if let Some(Ok(NotificationOrData::Data(message))) = amf_reader.recv().await {
-            streams[usize::from(message.stream_id().unwrap())] += 1;
+            streams[usize::from(message.stream_id().ok_or("no stream")?)] += 1;
         }
     }
     println!("AMF: {streams:?} messages on streams 0 to 3");
@@ -157,15 +157,14 @@ gNB writer: 1001 sent, 0 refused, in overload false
 ```
 
 `cargo run --example driver` runs this program, and `examples/` has the
-others of this page that use no other crate. `examples/server.rs` serves
+other programs of this page, except the next one. `examples/server.rs` serves
 several associations, each in a task of its own.
 
 ## NG SETUP over SCTP
 
-The messages of an association are those of its protocol: here the NG
-SETUP of [oxirush-ngap](https://github.com/linouxis9/oxirush-ngap), on
-stream 0 and with the payload protocol identifier of NGAP, 60
-(TS 38.412).
+An association carries the messages of its protocol: here the NG SETUP of
+[oxirush-ngap](https://github.com/linouxis9/oxirush-ngap), on stream 0,
+with the payload protocol identifier of NGAP, 60 (TS 38.412).
 
 ```rust,ignore
 use oxirush_ngap::helpers::{global_gnb_id, guami, plmn, s_nssai};
@@ -223,7 +222,7 @@ gNB: Successful_NGSetup
 ## Notifications
 
 `recv` returns the notifications of the events that a socket subscribed
-to, in the place of data.
+to, in place of data.
 
 ```rust
 use oxirush_sctp::{
@@ -320,27 +319,25 @@ closed: None
 aborted: Err(ConnectionReset)
 ```
 
-`recv` returns `None` once an association was shut down, and the error of
-one that was aborted or lost, at every call and whichever call learned of
-the end first: `while let Some(received) = association.recv().await?` ends
-with the association. The documentation has the table of every way an
-association ends.
+Once an association has ended, every call of `recv` returns `None` if it
+was shut down, or the error if it was aborted or lost. So
+`while let Some(received) = association.recv().await?` ends with the
+association. The documentation lists every way an association ends.
 
 To close without loss, `association.close(deadline).await?` shuts the
-association down, reads until the peer has answered and returns what the
-peer had still sent. A socket that is dropped is closed by Linux: with a
-message or a notification that was not read, the association is aborted,
-and what this side had sent and the peer had not acknowledged is lost. A
-`OneToManyEndpoint` learns of the end of an association from the
-notifications only.
+association down, reads until the peer answers, and returns what the peer
+still sent. Linux closes a socket that is dropped, and aborts its
+association when a message or a notification was left unread: what the peer
+had not acknowledged is then lost. A `OneToManyEndpoint` learns that an
+association ended from the notifications only.
 
 ## Multihoming
 
-`bindx` binds several local addresses and `connectx` gives several
-addresses of the peer. The addresses of one call share a port. A socket
-that connects without being bound offers the peer every address of the
-host, loopback and the others: bind the client first, as here, to offer
-the addresses that were chosen.
+`bindx` binds several local addresses, and `connectx` gives several
+addresses of the peer. The addresses of one call share a port. A socket that
+connects without being bound offers the peer every address of the host,
+loopback included: bind the client first, as here, to offer only the
+addresses you chose.
 
 ```rust
 use oxirush_sctp::{BindxFlags, Socket, SocketToAssociation};
@@ -403,7 +400,7 @@ primary path: 127.0.0.1
 ## Options and status
 
 Every socket type has `options()`. The sockets implement `AsFd` and
-`AsRawFd` for an option that the crate does not wrap.
+`AsRawFd`, for an option that the crate does not wrap.
 
 ```rust
 use oxirush_sctp::{InitParams, Socket, SocketToAssociation};
@@ -462,7 +459,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A message comes with its association, which the answer names
     if let NotificationOrData::Data(message) = endpoint.recv().await? {
         println!("endpoint: {:?}", String::from_utf8_lossy(&message.payload));
-        let options = SendOptions::new().association(message.assoc_id().unwrap());
+        let options = SendOptions::new().association(message.assoc_id().ok_or("no association")?);
         endpoint.send(b"pong", options).await?;
     }
     if let Some(NotificationOrData::Data(message)) = peer.recv().await? {
@@ -484,9 +481,9 @@ its own.
 ## Many messages a call
 
 `send_many` sends a batch, each message with its options, and returns how
-many the socket took: all of them unless its buffer filled. The kernel
-puts the messages of an association that follow one another in as few
-packets as it can. `recv_many` returns whole messages, as `recv` does.
+many the socket took: all of them, unless its buffer filled. The kernel puts
+consecutive messages of an association in as few packets as it can.
+`recv_many` returns whole messages, as `recv` does.
 
 ```rust
 use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
@@ -534,24 +531,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Limits
 
-- SCTP itself: the protocol runs in the Linux kernel.
-- Other systems than Linux.
-- SCTP over DTLS, the data channels of WebRTC.
-- The rest of RFC 6458: among others authentication, partial reliability
-  and stream reconfiguration.
-- A receive buffer for each association of a `OneToManyEndpoint`: they
-  share that of the socket, unless `net.sctp.rcvbuf_policy` is 1, and one
-  that fills it makes the others wait. A `Listener` gives each association
-  a socket of its own.
-- A send buffer for each: unless `net.sctp.sndbuf_policy` is 1, Linux
-  wakes the endpoint once for each of its associations when one of them has
-  data acknowledged. To 100 associations a message took 34 µs of CPU
-  on loopback, and to one 11 µs.
+- It does not implement SCTP: the protocol runs in the Linux kernel.
+- It runs on Linux alone.
+- It has no SCTP over DTLS, which the data channels of WebRTC use.
+- It does not cover the rest of RFC 6458: among others authentication,
+  partial reliability and stream reconfiguration.
+- The associations of a `OneToManyEndpoint` share the receive buffer of the
+  socket, unless `net.sctp.rcvbuf_policy` is 1: one that fills it makes the
+  others wait. A `Listener` gives each association a socket of its own.
+- They share its send buffer too: unless `net.sctp.sndbuf_policy` is 1,
+  Linux wakes the endpoint once for each of its associations when one of
+  them has data acknowledged. To 100 associations, a message took 34 µs of
+  CPU on loopback, and to one, 11 µs.
 
 ## Performance
 
-On an AMD Ryzen 7 5700G (16 threads) with Linux 7.0 and Rust 1.98.1, over the
-loopback interface, at ea7c778, measured on a quiet machine on 2026-10-18:
+On an AMD Ryzen 7 5700G with Linux 7.0 and Rust 1.98.1, over the loopback
+interface, at ea7c778 on 2026-10-18:
 
 | | `send` and `recv` | `send_many` and `recv_many` |
 |---|---|---|
@@ -561,51 +557,36 @@ loopback interface, at ea7c778, measured on a quiet machine on 2026-10-18:
 | The same from 1,000 connected sockets to one endpoint | 185,000 a second, 10 µs each | 349,000 a second, 4.5 µs each |
 | The same from one endpoint to 100 associations, held back by Linux ([Limits](#limits)) | 54,000 a second, 34 µs each | 56,000 a second, 33 µs each |
 
-The first row is the ping-pong of the comparison below, the second the
-lowest of five runs of the `messages` benchmark, and a rate the median of
-three runs of `throughput.sh` on cores 2 and 3, each the median of three
-rounds. A rate is in messages a second, with the CPU time of the process a
-message, the kernel's work for the loopback interface included. Without
-`options().set_nodelay(true)` a small message can wait 200 ms for the
-acknowledgement of the one before it. The
+A time per message is the CPU time of the process, the kernel's work for the
+loopback interface included. Without `options().set_nodelay(true)` a small
+message can wait 200 ms for the acknowledgement of the one before it. The
 [driver](https://docs.rs/oxirush-sctp/latest/oxirush_sctp/driver/) carries
 what `send_many` carries. [`benches/`](benches/README.md) has the
-benchmarks, `throughput.sh` for the rates, and how to profile.
+benchmarks, the method and how to profile.
 
 ### Against other implementations
 
-The same loops for the SCTP crates of crates.io that run here, at pinned
-versions, and for a program in C on the kernel's sockets, on cores 2 and 3
-of the same machine, at ea7c778. The time is the fastest of five runs in
-turns, and each figure the median of three runs of the script. Cycles and
-instructions are a message, user and kernel, from `perf stat`. The last
-column is the time of each implementation over this crate's `send` and
-`recv`, "about the same" within 10 %, which two builds of the same code can
-differ by. The three runs of a loop differed by 6 % at most. With one
-message a call every crate is within 13 % of C: the kernel takes most of
-the time. 64 messages a call take two fifths of the time of one, near C
-with `sendmmsg` and `recvmmsg`.
+The same loops, at ea7c778 on cores 2 and 3 of the same machine, for a
+program in C on the kernel's sockets and the SCTP crates of crates.io that
+run here: tokio-sctp 0.2.0, async-sctp 1.0.0, lksctp 0.1.0 and sctp-rs
+0.3.1. A ratio is the time of the other implementation over this crate's,
+and "about the same" is within 10 %:
 
-| Loop | Implementation | ns a message | Cycles | Instructions | Allocations | Octets allocated | Peak memory | Other / this crate |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| Ping-pong, 200 octets | C | 7,694 | 35,694 | 25,729 | 0 | 0 | 1.9 MiB | about the same |
-| | oxirush-sctp | 7,999 | 37,624 | 27,981 | 1 | 200 | 3.8 MiB | |
-| | oxirush-sctp, `recv_into` | 7,846 | 36,770 | 27,505 | 0 | 0 | 3.8 MiB | about the same |
-| | tokio-sctp 0.2.0 | 8,283 | 38,903 | 27,877 | 0 | 0 | 3.7 MiB | about the same |
-| | async-sctp 1.0.0 | 8,698 | 40,881 | 31,430 | 1 | 65,536 | 3.7 MiB | about the same |
-| | lksctp 0.1.0 | 8,137 | 38,262 | 27,373 | 0 | 0 | 3.7 MiB | about the same |
-| | sctp-rs 0.3.1 | 7,998 | 37,587 | 28,428 | 5 | 4,648 | 3.7 MiB | about the same |
-| 200 octets, one association, two threads | C | 7,045 | 49,551 | 32,047 | 0 | 0 | 2.2 MiB | about the same |
-| | C, `sendmmsg` and `recvmmsg` | 2,278 | 15,210 | 11,684 | 0 | 0 | 2.4 MiB | 0.32x |
-| | oxirush-sctp | 7,118 | 51,647 | 36,053 | 1 | 200 | 4.3 MiB | |
-| | oxirush-sctp, `send_many` and `recv_many` | 2,713 | 18,869 | 14,927 | 1 | 201 | 4.3 MiB | 0.38x |
-| | tokio-sctp 0.2.0 | 7,306 | 52,740 | 36,026 | 0 | 0 | 4.3 MiB | about the same |
-| | async-sctp 1.0.0 | 7,301 | 53,070 | 39,312 | 1 | 65,536 | 4.2 MiB | about the same |
-| | lksctp 0.1.0 | 7,232 | 51,586 | 35,473 | 0 | 0 | 4.3 MiB | about the same |
-| | sctp-rs 0.3.1 | 7,283 | 53,084 | 36,727 | 5 | 4,648 | 4.1 MiB | about the same |
+| Loop, 200 octets | This crate | Other / this crate |
+|---|---|---|
+| Ping-pong | 7,999 ns | C and the four crates: about the same |
+| One association, two threads | 7,118 ns | C and the four crates: about the same |
+| The same, 64 messages a call (`send_many`, `recv_many`) | 2,713 ns | C with `sendmmsg` and `recvmmsg`: 0.84x |
 
-`benches/compare.sh` builds and runs them all; the rows for 16 KiB and for
-100 associations are in [`benches/`](benches/README.md).
+With one message a call, the kernel takes most of the time.
+[`benches/`](benches/README.md#against-other-implementations) has every
+figure, with cycles, instructions, allocations and peak memory, and the rows
+for 16 KiB and 100 associations. `benches/compare.sh` builds and runs them
+all:
+
+```sh
+CPUS=2,3 ROUNDS=3 benches/compare.sh
+```
 
 ## Tests and fuzzing
 
@@ -614,12 +595,12 @@ sudo modprobe sctp
 cargo test
 ```
 
-The tests open associations over the loopback interface. CI fuzzes three
+The tests open associations over the loopback interface. CI runs three
 `cargo fuzz` targets for a minute each: what the kernel hands over is read
-without a panic. The Rust blocks of this page are checked with what they
-print ([`tests/readme.rs`](tests/readme.rs)). The blocks that use other
-crates of the family run in the package of [`family/`](family/), which takes
-those crates at the revisions that its manifest names.
+without a panic. Each Rust block of this page is checked with what it prints
+([`tests/readme.rs`](tests/readme.rs)). The block that uses another crate of
+the family runs in the package of [`family/`](family/), which takes that
+crate at the revision that its manifest names.
 
 [The documentation](https://docs.rs/oxirush-sctp) has the terms, the
 sections of RFC 6458 that the crate covers, the socket types, and the rules

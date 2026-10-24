@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut streams = [0; 4];
     for _ in 0..1001 {
         if let Some(Ok(NotificationOrData::Data(message))) = amf_reader.recv().await {
-            streams[usize::from(message.stream_id().unwrap())] += 1;
+            streams[usize::from(message.stream_id().ok_or("no stream")?)] += 1;
         }
     }
     println!("AMF: {streams:?} messages on streams 0 to 3");

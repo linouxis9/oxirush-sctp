@@ -125,7 +125,7 @@ fn block_2() {
         let mut streams = [0; 4];
         for _ in 0..1001 {
             if let Some(Ok(NotificationOrData::Data(message))) = amf_reader.recv().await {
-                streams[usize::from(message.stream_id().unwrap())] += 1;
+                streams[usize::from(message.stream_id().ok_or("no stream")?)] += 1;
             }
         }
         println!("AMF: {streams:?} messages on streams 0 to 3");
@@ -332,7 +332,7 @@ fn block_7() {
         // A message comes with its association, which the answer names
         if let NotificationOrData::Data(message) = endpoint.recv().await? {
             println!("endpoint: {:?}", String::from_utf8_lossy(&message.payload));
-            let options = SendOptions::new().association(message.assoc_id().unwrap());
+            let options = SendOptions::new().association(message.assoc_id().ok_or("no association")?);
             endpoint.send(b"pong", options).await?;
         }
         if let Some(NotificationOrData::Data(message)) = peer.recv().await? {
