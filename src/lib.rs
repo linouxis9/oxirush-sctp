@@ -133,8 +133,10 @@
 //! - A received message holds the memory of its octets and no more.
 //! - A message longer than the receive buffer of its receiver (`SO_RCVBUF`)
 //!   takes seconds: Linux carried 1 MB in 2.7 s with the default buffers, as
-//!   a program in C does. `options().set_recv_buffer_size` to the longest
-//!   message avoids it.
+//!   a program in C does, and now and then stops delivering one that is many
+//!   times longer, nothing more of it readable while the sender sends its
+//!   parts again. `options().set_recv_buffer_size` to the longest message
+//!   avoids both.
 //! - A sent message must fit in the send buffer (`SO_SNDBUF`): a longer one
 //!   is `InvalidInput`, as are an empty one and a stream that the
 //!   association does not have: the error says which.

@@ -572,60 +572,133 @@ async fn recv_returns_long_messages_whole() {
     }
 }
 
+/// How long a message of 300,000 octets may take to come, where it takes less than a
+/// second.
+const STALL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What Linux says of a socket whose message did not come: the octets that a read would
+/// give, whether `poll` has it readable, and the line of its association in
+/// `/proc/net/sctp/assocs`, whose `RX_QUEUE` counts what the kernel holds of it.
+fn stalled(socket: &ConnectedSocket) -> String {
+    use std::os::unix::io::AsRawFd;
+    let fd = socket.as_raw_fd();
+    let mut readable: libc::c_int = 0;
+    // Safety: `readable` outlives the call, which writes one int to it.
+    unsafe { libc::ioctl(fd, libc::FIONREAD, &mut readable) };
+    let mut polled = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // Safety: `polled` outlives the call, which reads and writes one `pollfd`.
+    unsafe { libc::poll(&mut polled, 1, 0) };
+    let port = socket
+        .local_addr()
+        .map(|address| address.port().to_string());
+    let assocs = std::fs::read_to_string("/proc/net/sctp/assocs").unwrap_or_default();
+    let mut lines = assocs.lines();
+    let head = lines.next().unwrap_or_default();
+    let of_socket = lines.filter(|line| {
+        let port = port.as_deref().unwrap_or_default();
+        line.split_whitespace().any(|word| word == port)
+    });
+    let of_socket: Vec<&str> = of_socket.collect();
+    format!(
+        "{readable} octets readable, poll revents {:#x}; /proc/net/sctp/assocs:\n{head}\n{}",
+        polled.revents,
+        of_socket.join("\n")
+    )
+}
+
+// Twice in gate runs, Linux stopped delivering the message of the two tests below: the
+// receiver's queue held 65,716 octets in a buffer of 16 KiB, nothing was readable, and the
+// sender retransmitted each 10 ms. The crate reads until a read would block, and waits for
+// the kernel to say that the socket is readable again: the stall is Linux's. A test tries
+// again once on a new pair, then fails with what Linux says of the socket.
+
 #[tokio::test]
 async fn recv_returns_partially_delivered_messages_whole() {
     let len = 300_000;
-    let Some((sending, receiving)) = pair_for_long_messages(len, true).await else {
-        return;
-    };
     let payload = long_payload(len);
-    let send = sending.send_data(SendData::new(payload.clone()));
-    // Once in a gate run of the fourth round, Linux stopped here for half an hour: the
-    // receiver's queue held 65 716 octets in a buffer of 16 KiB, nothing readable, and the
-    // sender retransmitted each 10 ms. A stall fails the test instead of hanging it.
-    let (sent, received) = tokio::time::timeout(std::time::Duration::from_secs(60), async {
-        tokio::join!(send, receiving.recv())
-    })
-    .await
-    .expect("Linux delivered no part of the message in 60 s");
-    sent.unwrap();
-    let received = data_payload(received.unwrap().unwrap());
-    assert_eq!(received.len(), payload.len());
-    assert!(received == payload);
+    for attempt in 1..=2 {
+        let Some((sending, receiving)) = pair_for_long_messages(len, true).await else {
+            return;
+        };
+        let send = sending.send_data(SendData::new(payload.clone()));
+        let delivered =
+            tokio::time::timeout(STALL, async { tokio::join!(send, receiving.recv()) }).await;
+        let Ok((sent, received)) = delivered else {
+            let state = stalled(&receiving);
+            assert!(
+                attempt == 1,
+                "Linux delivered no part of the message in {STALL:?}, on two pairs of \
+                 sockets, as it does now and then for a message many times longer than the \
+                 receive buffer: {state}"
+            );
+            eprintln!(
+                "Linux delivered no part of the message in {STALL:?}, again on a new pair: {state}"
+            );
+            continue;
+        };
+        sent.unwrap();
+        let received = data_payload(received.unwrap().unwrap());
+        assert_eq!(received.len(), payload.len());
+        assert!(received == payload);
+        return;
+    }
 }
 
 #[tokio::test]
 async fn recv_cancelled_in_the_middle_of_a_message_loses_nothing() {
     let len = 300_000;
-    let Some((sending, receiving)) = pair_for_long_messages(len, true).await else {
-        return;
-    };
     let payload = long_payload(len);
-    let send = sending.send_data(SendData::new(payload.clone()));
-    // Each receive is polled once and dropped where it had got to, whatever the speed of
-    // the machine: a time-out cancelled none on a slow build, and the test said nothing.
-    let receive = async {
-        use std::future::Future;
-        let mut cancelled = 0;
-        loop {
-            let polled = {
-                let mut recv = std::pin::pin!(receiving.recv());
-                std::future::poll_fn(|context| std::task::Poll::Ready(recv.as_mut().poll(context)))
+    for attempt in 1..=2 {
+        let Some((sending, receiving)) = pair_for_long_messages(len, true).await else {
+            return;
+        };
+        let send = sending.send_data(SendData::new(payload.clone()));
+        // Each receive is polled once and dropped where it had got to, whatever the speed
+        // of the machine: a time-out cancelled none on a slow build, and the test said
+        // nothing.
+        let receive = async {
+            use std::future::Future;
+            let mut cancelled = 0;
+            loop {
+                let polled = {
+                    let mut recv = std::pin::pin!(receiving.recv());
+                    std::future::poll_fn(|context| {
+                        std::task::Poll::Ready(recv.as_mut().poll(context))
+                    })
                     .await
-            };
-            match polled {
-                std::task::Poll::Ready(received) => return (received, cancelled),
-                std::task::Poll::Pending => cancelled += 1,
+                };
+                match polled {
+                    std::task::Poll::Ready(received) => return (received, cancelled),
+                    std::task::Poll::Pending => cancelled += 1,
+                }
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
-        }
-    };
-    let (sent, (received, cancelled)) = tokio::join!(send, receive);
-    sent.unwrap();
-    assert!(cancelled > 0);
-    let received = data_payload(received.unwrap().unwrap());
-    assert_eq!(received.len(), payload.len());
-    assert!(received == payload);
+        };
+        let delivered = tokio::time::timeout(STALL, async { tokio::join!(send, receive) }).await;
+        let Ok((sent, (received, cancelled))) = delivered else {
+            let state = stalled(&receiving);
+            assert!(
+                attempt == 1,
+                "Linux delivered no part of the message in {STALL:?}, on two pairs of \
+                 sockets, as it does now and then for a message many times longer than the \
+                 receive buffer: {state}"
+            );
+            eprintln!(
+                "Linux delivered no part of the message in {STALL:?}, again on a new pair: {state}"
+            );
+            continue;
+        };
+        sent.unwrap();
+        assert!(cancelled > 0);
+        let received = data_payload(received.unwrap().unwrap());
+        assert_eq!(received.len(), payload.len());
+        assert!(received == payload);
+        return;
+    }
 }
 
 #[tokio::test]

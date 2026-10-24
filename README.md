@@ -543,6 +543,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   Linux wakes the endpoint once for each of its associations when one of
   them has data acknowledged. To 100 associations, a message took 34 µs of
   CPU on loopback, and to one, 11 µs.
+- Now and then Linux stops delivering a message many times longer than the
+  receive buffer: nothing more of it becomes readable, while the sender
+  sends its parts again.
 
 ## Performance
 
