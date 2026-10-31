@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.1 - unreleased
+
+### Added
+
+- `SocketOptions::association_stats` reads `SCTP_GET_ASSOC_STATS`: the
+  per-association statistics the kernel keeps, as `AssociationStats`. It
+  reports the chunks an association retransmitted, the gap-acknowledgement
+  blocks and duplicate and out-of-sequence chunks it saw, the packets and
+  SACKs it sent and received, and its highest measured retransmission
+  timeout. A caller that watched only the socket-wide counters could not
+  tell one association's loss from another's.
+
 ## 0.1.0 - 2026-10-24
 
 First release. The crate started as a fork of sctp-rs 0.3.1 and does not
