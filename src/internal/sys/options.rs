@@ -2,12 +2,13 @@
 use super::SOL_SCTP;
 use crate::consts::*;
 use crate::types::internal::{
-    AssocParamsWire, ConnStatusInternal, InitMsg, PeerAddrInternal, PeerAddressParamsInternal,
-    PrimaryAddressWire, RtoInfoWire, SackInfoWire, SndInfoWire, SubscribeEvent,
+    AssocParamsWire, AssocStatsWire, ConnStatusInternal, InitMsg, PeerAddrInternal,
+    PeerAddressParamsInternal, PrimaryAddressWire, RtoInfoWire, SackInfoWire, SndInfoWire,
+    SubscribeEvent,
 };
 use crate::{
-    AssociationId, AssociationParams, ConnStatus, Event, EventSubscriptionError, InitParams,
-    PeerAddress, PeerAddressParams, RtoInfo, SackInfo, SendInfo, SubscribeEventAssocId,
+    AssociationId, AssociationParams, AssociationStats, ConnStatus, Event, EventSubscriptionError,
+    InitParams, PeerAddress, PeerAddressParams, RtoInfo, SackInfo, SendInfo, SubscribeEventAssocId,
 };
 use os_socketaddr::OsSocketAddr;
 use std::convert::TryInto;
@@ -368,6 +369,30 @@ pub(crate) fn association_params_internal(
         peer_rwnd: wire.peer_rwnd,
         local_rwnd: wire.local_rwnd,
         cookie_life: wire.cookie_life,
+    })
+}
+
+pub(crate) fn association_stats_internal(
+    fd: BorrowedFd<'_>,
+    assoc_id: AssociationId,
+) -> std::io::Result<AssociationStats> {
+    let wire = AssocStatsWire {
+        assoc_id,
+        ..Default::default()
+    };
+    // Safety: the structure holds integers and opaque octets, so any bytes are a valid value.
+    let wire = unsafe { getsockopt_internal(fd, SOL_SCTP, SCTP_GET_ASSOC_STATS, wire)? };
+    Ok(AssociationStats {
+        assoc_id: wire.assoc_id,
+        max_rto: wire.max_rto,
+        rtx_chunks: wire.rtx_chunks,
+        gap_count: wire.gap_count,
+        out_of_sequence_tsns: wire.out_of_sequence_tsns,
+        in_dup_chunks: wire.in_dup_chunks,
+        out_packets: wire.out_packets,
+        in_packets: wire.in_packets,
+        out_sacks: wire.out_sacks,
+        in_sacks: wire.in_sacks,
     })
 }
 

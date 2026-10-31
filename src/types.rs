@@ -545,6 +545,32 @@ pub struct AssociationParams {
     pub cookie_life: u32,
 }
 
+/// Per-association statistics (`SCTP_GET_ASSOC_STATS`, see Section 8.2.6 of
+/// RFC 6458), read only. The counts are since the association began.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AssociationStats {
+    /// Association ID the statistics are of.
+    pub assoc_id: AssociationId,
+    /// Highest measured retransmission timeout, in milliseconds.
+    pub max_rto: u64,
+    /// Chunks retransmitted: data the peer did not acknowledge in time.
+    pub rtx_chunks: u64,
+    /// Gap acknowledgement blocks received: a sign of loss or reordering.
+    pub gap_count: u64,
+    /// Data chunks received out of sequence.
+    pub out_of_sequence_tsns: u64,
+    /// Duplicate data chunks received.
+    pub in_dup_chunks: u64,
+    /// Packets sent.
+    pub out_packets: u64,
+    /// Packets received.
+    pub in_packets: u64,
+    /// SACK packets sent.
+    pub out_sacks: u64,
+    /// SACK packets received.
+    pub in_sacks: u64,
+}
+
 /// Delayed acknowledgement (`SCTP_DELAYED_SACK`, see Section 8.1.19 of RFC 6458).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SackInfo {

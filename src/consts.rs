@@ -57,6 +57,8 @@ pub(crate) const SCTP_PEER_ADDR_PARAMS: libc::c_int = 9;
 
 // Association parameters, the primary path, the delay of acknowledgements
 pub(crate) const SCTP_ASSOCINFO: libc::c_int = 1;
+// Per-association statistics, read only
+pub(crate) const SCTP_GET_ASSOC_STATS: libc::c_int = 112;
 pub(crate) const SCTP_PRIMARY_ADDR: libc::c_int = 6;
 pub(crate) const SCTP_DELAYED_SACK: libc::c_int = 16;
 

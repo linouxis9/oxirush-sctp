@@ -1,8 +1,8 @@
 //! Borrowed configuration shared by every SCTP socket role.
 use crate::internal::{SocketCore, sys};
 use crate::{
-    AssociationId, AssociationParams, Event, InitParams, PeerAddress, PeerAddressParams, RtoInfo,
-    SackInfo, SendInfo, SubscribeEventAssocId,
+    AssociationId, AssociationParams, AssociationStats, Event, InitParams, PeerAddress,
+    PeerAddressParams, RtoInfo, SackInfo, SendInfo, SubscribeEventAssocId,
 };
 use std::net::SocketAddr;
 use std::os::fd::AsFd;
@@ -216,6 +216,14 @@ impl SocketOptions<'_> {
         assoc_id: AssociationId,
     ) -> std::io::Result<AssociationParams> {
         sys::association_params_internal(self.core.as_fd(), assoc_id)
+    }
+
+    /// Read the statistics of an association (`SCTP_GET_ASSOC_STATS`): the
+    /// chunks it retransmitted, the gaps and duplicates it saw, the packets
+    /// and SACKs it exchanged, and its highest retransmission timeout. For
+    /// the association of a One-to-one socket the ID is ignored.
+    pub fn association_stats(&self, assoc_id: AssociationId) -> std::io::Result<AssociationStats> {
+        sys::association_stats_internal(self.core.as_fd(), assoc_id)
     }
 
     /// Change the retransmission limit of an association and the life of its cookie. A zero

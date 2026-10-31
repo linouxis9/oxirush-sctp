@@ -221,3 +221,24 @@ async fn a_socket_prints_its_addresses() {
         "{printed}"
     );
 }
+
+/// The per-association statistics count the packets an association
+/// exchanged, and are read while it is up.
+#[tokio::test]
+async fn association_statistics_count_the_packets_exchanged() {
+    let (client, peer) = pair().await;
+    client.send(b"one", SendOptions::new()).await.unwrap();
+    client.send(b"two", SendOptions::new()).await.unwrap();
+    let _ = peer.recv().await.unwrap();
+    let _ = peer.recv().await.unwrap();
+    // The association of a One-to-one socket: the ID is ignored.
+    let stats = client.options().association_stats(0).unwrap();
+    assert!(stats.out_packets > 0, "sent packets: {stats:?}");
+    let peer_stats = peer.options().association_stats(0).unwrap();
+    assert!(
+        peer_stats.in_packets > 0,
+        "received packets: {peer_stats:?}"
+    );
+    // A healthy loopback association retransmits nothing.
+    assert_eq!(stats.rtx_chunks, 0, "{stats:?}");
+}

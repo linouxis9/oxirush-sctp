@@ -202,6 +202,39 @@ pub(crate) struct AssocParamsWire {
     pub(crate) cookie_life: u32,
 }
 
+// `struct sctp_assoc_stats`. The observed-RTO address is kept opaque, as
+// a `sockaddr_storage`; the counters follow it, each a `__u64`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct AssocStatsWire {
+    pub(crate) assoc_id: AssociationId,
+    pub(crate) _pad: u32,
+    pub(crate) _obs_rto_ipaddr: [u8; 128],
+    pub(crate) max_rto: u64,
+    pub(crate) in_sacks: u64,
+    pub(crate) out_sacks: u64,
+    pub(crate) out_packets: u64,
+    pub(crate) in_packets: u64,
+    pub(crate) rtx_chunks: u64,
+    pub(crate) out_of_sequence_tsns: u64,
+    pub(crate) in_dup_chunks: u64,
+    pub(crate) gap_count: u64,
+    pub(crate) out_unordered_chunks: u64,
+    pub(crate) in_unordered_chunks: u64,
+    pub(crate) out_ordered_chunks: u64,
+    pub(crate) in_ordered_chunks: u64,
+    pub(crate) out_control_chunks: u64,
+    pub(crate) in_control_chunks: u64,
+}
+
+impl Default for AssocStatsWire {
+    fn default() -> Self {
+        // Safety: the structure is integers and opaque octets; zero is a
+        // valid value of every field.
+        unsafe { std::mem::zeroed() }
+    }
+}
+
 // `struct sctp_sack_info`.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -304,6 +337,10 @@ mod tests {
         assert_eq!(size_of::<RtoInfoWire>(), 16);
         assert_eq!(size_of::<AssocParamsWire>(), 20);
         assert_eq!(offset_of!(AssocParamsWire, peer_rwnd), 8);
+        // __s32 and padding, a sockaddr_storage of 128, then fifteen __u64.
+        assert_eq!(size_of::<AssocStatsWire>(), 4 + 4 + 128 + 15 * 8);
+        assert_eq!(align_of::<AssocStatsWire>(), 8);
+        assert_eq!(offset_of!(AssocStatsWire, max_rto), 136);
         assert_eq!(size_of::<SackInfoWire>(), 12);
         assert_eq!(size_of::<PrimaryAddressWire>(), 132);
         assert_eq!(size_of::<PeerAddrInternal>(), 152);
