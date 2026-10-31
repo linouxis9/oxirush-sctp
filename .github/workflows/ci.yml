@@ -34,6 +34,33 @@ jobs:
       - run: cargo test
       - run: cargo test --release
 
+  # The lines that no test reaches: the summary of each file in the log, and each
+  # line in the report that the job keeps (cargo-llvm-cov 0.9.1).
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      - name: Load SCTP
+        run: |
+          sudo modprobe sctp
+          sudo sysctl -w net.core.wmem_max=8388608 net.core.rmem_max=8388608
+      - run: cargo llvm-cov --all-features --html
+      - run: cargo llvm-cov report --summary-only
+      - run: cargo llvm-cov report --lcov --output-path target/llvm-cov/lcov.info
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            target/llvm-cov/html
+            target/llvm-cov/lcov.info
+
   minimal-versions:
     name: Minimal dependency versions
     runs-on: ubuntu-latest
