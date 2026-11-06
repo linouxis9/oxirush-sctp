@@ -1357,6 +1357,25 @@ mod tests {
         );
     }
 
+    /// A message of a batch goes with `MSG_MORE` when the next is to a stream that the
+    /// association has, and not when the next is to one that it lacks, which the kernel
+    /// refuses: nothing that it took is held back for that one.
+    #[tokio::test]
+    async fn a_message_before_one_to_a_stream_that_the_association_lacks_is_not_held() {
+        let (_listener, address) = listening(SocketToAssociation::OneToOne);
+        let peer = peer_that_sent(address, b"before").await;
+        let streams = peer.status().unwrap().outstreams;
+        let messages = [
+            (&b"first"[..], crate::SendOptions::new()),
+            (b"second", crate::SendOptions::new().stream(1)),
+            (b"refused", crate::SendOptions::new().stream(streams)),
+        ];
+        let mut flags = Vec::new();
+        let sent = SocketCore::send_flagged(peer.as_fd(), &messages, &mut flags);
+        assert_eq!(sent.unwrap(), 2);
+        assert_eq!(flags, [true, false, false]);
+    }
+
     /// An endpoint that no longer interleaves the messages of its associations subscribes to
     /// nothing for itself when its receive information is turned off again.
     #[tokio::test]

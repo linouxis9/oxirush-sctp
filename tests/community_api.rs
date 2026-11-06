@@ -294,6 +294,12 @@ async fn confirmed_peer_address_is_a_typed_notification() {
         .options()
         .subscribe_events(&[Event::Address], SubscribeEventAssocId::All)
         .unwrap();
+    // Linux probes an unconfirmed address each retransmission timeout, give or take half of
+    // it: one of 10 s at first leaves the heartbeat that the test requests alone in its 2 s.
+    client
+        .options()
+        .set_rto_info(RtoInfo::new(10_000, 60_000, 10_000))
+        .unwrap();
     // The server announces its second address, which stays unconfirmed until it acknowledges
     // a heartbeat.
     let (client, assoc_id) = client.connect(addresses[0]).await.unwrap();
