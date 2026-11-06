@@ -6,3 +6,106 @@
 #
 # The CI of the crate is the same build without debug information
 # (CARGO_PROFILE_DEV_DEBUG=0), which builds and links each mutant faster.
+
+# The readers that `cargo fuzz` drives, which it builds with `--cfg fuzzing`: no build
+# that the tests run on has them.
+exclude_globs = ["src/internal/fuzzing.rs"]
+
+# Mutants that no test can tell from the code, each with why.
+exclude_re = [
+    # Constants of linux/sctp.h that no code reads.
+    'src/consts\.rs:(29|30):[0-9]+: replace ',
+    # The flags that end a run of messages bundled with MSG_MORE, and SCTP_SENDALL among
+    # them: the messages of a batch have the flags of `SendOptions`, which sets
+    # SCTP_UNORDERED alone, so none has one of them, whatever `special` holds.
+    'src/consts\.rs:70:40: replace << with >>$',
+    'src/internal\.rs:695:(37|65): replace \| with [&^] in SocketCore::send_flagged$',
+    # Flags of distinct bits: `^` joins them as `|` does. SOCK_NONBLOCK, SOCK_CLOEXEC and
+    # the type of a socket; MSG_NOSIGNAL and MSG_MORE; the heartbeat flags of a path;
+    # SCTP_ABORT and SCTP_EOF.
+    'src/internal/sys/descriptor\.rs:(21:38|77:35|77:57|180:33): replace \| with \^ ',
+    'src/internal/sys/batch\.rs:114:36: replace \| with \^ in send_from$',
+    'src/internal/sys/options\.rs:160:54: replace \| with \^ in set_peer_address_params_internal$',
+    'src/internal\.rs:1040:53: replace \| with \^ in SocketCore::poll_send$',
+    # A descriptor of 0 from a call that makes one: 0 is the standard input, which the
+    # process has open, so no call returns it.
+    'src/internal/sys/descriptor\.rs:(44:19|81:18|191:15): replace < with <= ',
+    # A connect of a socket that does not block returns -1 (EINPROGRESS) when it starts
+    # an association, never 0 (sctp_wait_for_connect).
+    'src/internal/sys/descriptor\.rs:151:19: replace < with <= in initiate_connect$',
+    # What makes a descriptor non-blocking and closed on `exec` on systems other than
+    # Linux and Android, where the call that makes it cannot: not built on Linux.
+    'src/internal/sys/descriptor\.rs:23[6-9]:[0-9]+: replace ',
+    'src/internal/sys/descriptor\.rs:24[0-9]:[0-9]+: replace ',
+    # `sendmmsg` and `recvmmsg` of one message at least return 1 at least, or -1.
+    'src/internal/sys/batch\.rs:(125:13|235:17): replace < with <= ',
+    # Linux refuses SCTP_INITMSG, SCTP_RECVRCVINFO and SCTP_RECVNXTINFO only for a value
+    # of another length than the one that the crate gives.
+    'src/internal/sys/options\.rs:(212|249|272):19: replace < with > ',
+    # `getsockname` of a socket does not fail.
+    'src/internal/sys/addresses\.rs:60:85: replace < with > in local_addr$',
+    # The buffer of the addresses of an association grows otherwise: another error than
+    # ENOMEM is tried again with a larger buffer, up to the largest, and then returned
+    # alike; 2 octets more each time come to the same addresses after more tries; and
+    # past the largest, 1 MiB, the 65,536 addresses of IPv4 that it holds, which no test
+    # binds (Linux binds addresses in a time quadratic in their number).
+    'src/internal/sys/addresses\.rs:116:59: replace && with \|\| in sctp_getaddrs_internal$',
+    'src/internal/sys/addresses\.rs:116:71: replace < with <= in sctp_getaddrs_internal$',
+    'src/internal/sys/addresses\.rs:117:26: replace \*= with \+= in sctp_getaddrs_internal$',
+    # The last control message that fills the buffer ends the walk either way.
+    'src/internal/sys/message\.rs:101:17: replace > with >= in ancillary_info$',
+    # The end of an association that was shut down is told apart from the errors that
+    # end one by a number that is no error number: -1 or 1, EPERM, which ends no
+    # association.
+    'src/internal\.rs:94:24: delete -$',
+    # The EINVAL of the status of an association whose connect failed is said as
+    # ECONNREFUSED: Linux sets SO_ERROR before it deletes such an association, and the
+    # loop reads SO_ERROR first, so only a failure between the two calls reaches it.
+    'src/internal\.rs:273:45: replace == with != in SocketCore::connect$',
+    # A batch of reads, or a read into the buffer of the caller, interrupted by a signal:
+    # neither waits, so no signal interrupts them.
+    'src/internal\.rs:548:31: replace match guard error\.kind\(\) == std::io::ErrorKind::Interrupted with false in SocketCore::receive_batch_once$',
+    'src/internal\.rs:810:27: replace match guard error\.kind\(\) == std::io::ErrorKind::Interrupted with false in SocketCore::receive_direct$',
+    # A read into the buffer of the caller that would block, or fails, goes the way of
+    # `recv`, which waits and fails alike: what the caller gets is the same.
+    'src/internal\.rs:810:27: replace match guard error\.kind\(\) == std::io::ErrorKind::Interrupted with true in SocketCore::receive_direct$',
+    'src/internal\.rs:810:40: replace == with != in SocketCore::receive_direct$',
+    # A read into the buffer of the caller fails with WouldBlock, or not at all: Linux
+    # tells the end of the association of a one-to-one socket in an association change,
+    # which the crate subscribes to, and the error of the socket, which it then reads with
+    # SO_ERROR, only to a socket of one association (sctp_cmd_set_sk_err).
+    'src/internal\.rs:813:27: replace match guard error\.kind\(\) == std::io::ErrorKind::WouldBlock with true in SocketCore::receive_direct$',
+    # The loss of the association of a one-to-one socket, in an association change: the
+    # error that Linux gives the socket with it, which this arm reads, is what the next
+    # call reads in its place, and that call records the same end.
+    'src/internal\.rs:901:21: delete match arm AssocChangeState::CommLost in SocketCore::note_received$',
+    # The end of the stream, read into the buffer of the caller, goes the way of `recv`,
+    # which reads it again: Linux repeats it.
+    'src/internal\.rs:816:30: delete ! in SocketCore::receive_direct$',
+    # After the end, the socket is shut down for reading: a read gives what the kernel
+    # holds, InvalidData for a message past the limit, or the end, and no other error.
+    'src/internal\.rs:869:31: replace match guard error\.kind\(\) == std::io::ErrorKind::InvalidData with true in SocketCore::after_the_end$',
+    # A single message has no next to bundle with: the mutant reads the send buffer, and
+    # sends it alike.
+    'src/internal\.rs:688:39: replace > with >= in SocketCore::send_flagged$',
+    # Streams known short by one, or the status asked again, make the batch ask the
+    # status of the association, which gives the streams that it has: the same flags.
+    'src/internal\.rs:710:55: replace \+ with \* in SocketCore::send_flagged$',
+    'src/internal\.rs:726:47: replace && with \|\| in SocketCore::send_flagged$',
+    # A run that the kernel took in part is tried again at once: it takes nothing more
+    # (EAGAIN), or more, and the count returned is what it took.
+    'src/internal\.rs:744:30: replace < with > in SocketCore::send_flagged$',
+    # The shutdown of the writing side of a socket of one association: `write_shutdown`
+    # is read by no code, and the association changes that it subscribes to are
+    # subscribed from the socket's beginning, and kept while it lives.
+    'src/internal\.rs:981:(16|44|58): replace ',
+    # `shutdown` of a connected socket does not fail: Linux keeps a socket of one
+    # association ESTABLISHED after its association has ended, aborted or shut down,
+    # and fails a shutdown with ENOTCONN on a socket that never had one (inet_shutdown).
+    'src/internal/sys/descriptor\.rs:225:19: replace < with > in shutdown_internal$',
+    'src/connected_socket\.rs:426:(27|48): replace ',
+    # An endpoint has no end of the stream: Linux refuses to shut a one-to-many socket
+    # that listens down for reading (EOPNOTSUPP).
+    'src/endpoint\.rs:198:35: replace match guard limit > 0 with false in OneToManyEndpoint::poll_recv_many$',
+    'src/endpoint\.rs:198:41: replace > with < in OneToManyEndpoint::poll_recv_many$',
+]
