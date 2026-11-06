@@ -356,6 +356,50 @@ mod tests {
         assert_eq!(ancillary_info(&bytes, 0), (Some(rcv), None));
     }
 
+    /// A control message of a header alone is skipped, and so is one of another level or
+    /// type, however long: neither ends the walk nor is taken for SCTP's.
+    #[test]
+    fn ancillary_bytes_skip_empty_and_foreign_control_messages() {
+        let rcv = RcvInfo {
+            assoc_id: 7,
+            ..Default::default()
+        };
+        let nxt = NxtInfo {
+            assoc_id: 8,
+            ..Default::default()
+        };
+        let mut bytes = cmsg(libc::IPPROTO_SCTP, CmsgType::RcvInfo as _, &[]);
+        bytes.extend(cmsg(libc::SOL_SOCKET, 1, &[0x5a; 40]));
+        bytes.extend(cmsg(libc::IPPROTO_SCTP, 999, &[0x5a; 40]));
+        assert_eq!(ancillary_info(&bytes, 0), (None, None));
+        bytes.extend(cmsg(
+            libc::IPPROTO_SCTP,
+            CmsgType::RcvInfo as _,
+            &rcv_bytes(&rcv),
+        ));
+        bytes.extend(cmsg(
+            libc::IPPROTO_SCTP,
+            CmsgType::NxtInfo as _,
+            &nxt_bytes(&nxt),
+        ));
+        assert_eq!(ancillary_info(&bytes, 0), (Some(rcv), Some(nxt)));
+    }
+
+    /// Control messages that the kernel truncated are a warning, and those that it did not are
+    /// none.
+    #[test]
+    fn truncated_control_messages_are_a_warning() {
+        use crate::logged::{logged, warnings};
+        let (parsed, events) = logged(|| ancillary_info(&[], libc::MSG_CTRUNC));
+        assert_eq!(parsed, (None, None));
+        assert_eq!(
+            warnings(&events),
+            ["Control messages truncated, `RcvInfo` or `NxtInfo` may be missing."]
+        );
+        let (_, events) = logged(|| ancillary_info(&[], libc::MSG_EOR));
+        assert_eq!(warnings(&events), Vec::<&str>::new());
+    }
+
     #[test]
     fn cmsg_buffer_holds_the_sctp_control_messages() {
         // Safety: `CMSG_SPACE` only computes a size.

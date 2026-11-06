@@ -390,3 +390,185 @@ async fn an_endpoint_sends_and_receives_the_batches_of_several_associations() {
         .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
+
+/// The packets that the association of `socket` has sent.
+fn packets_out(socket: &ConnectedSocket) -> u64 {
+    socket.options().association_stats(0).unwrap().out_packets
+}
+
+/// A batch of small messages to one association goes out bundled, in fewer packets than
+/// messages: on one stream, and on streams that it takes one after the other, which the
+/// association has.
+#[tokio::test]
+async fn a_batch_of_small_messages_goes_out_in_few_packets() {
+    for one_stream in [true, false] {
+        let (client, server) = pair().await;
+        assert!(client.status().unwrap().outstreams >= 10);
+        let payloads: Vec<Vec<u8>> = (0..10).map(|index| payload(index, 100)).collect();
+        let messages: Vec<(&[u8], SendOptions)> = payloads
+            .iter()
+            .enumerate()
+            .map(|(index, payload)| {
+                let stream = if one_stream { 0 } else { index as u16 };
+                (payload.as_slice(), SendOptions::new().stream(stream))
+            })
+            .collect();
+        let before = packets_out(&client);
+        assert_eq!(client.send_many(&messages).await.unwrap(), 10);
+        let (got, _) = received(&server, 10).await;
+        assert_eq!(got.len(), 10);
+        let packets = packets_out(&client) - before;
+        assert!(
+            packets <= 3,
+            "{packets} packets for 10 messages, on one stream: {one_stream}"
+        );
+    }
+}
+
+/// A message to a stream that the association lacks, in a run of the batch after one that
+/// was sent, ends the batch: the count is what was sent, and nothing of it is held back.
+#[tokio::test]
+async fn a_refused_message_after_a_run_that_was_sent_counts_the_run() {
+    let (client, server) = pair().await;
+    let streams = client.status().unwrap().outstreams;
+    let payloads: Vec<Vec<u8>> = (0..3).map(|index| payload(index, 200)).collect();
+    let messages: Vec<(&[u8], SendOptions)> = vec![
+        (&payloads[0], SendOptions::new()),
+        (&payloads[1], SendOptions::new().stream(streams + 5)),
+        (&payloads[2], SendOptions::new()),
+    ];
+    assert_eq!(client.send_many(&messages).await.unwrap(), 1);
+    let (got, _) = received(&server, 1).await;
+    assert_eq!(got[0].payload, payloads[0]);
+}
+
+/// On an endpoint, the streams of an association are not counted for the next: a message to
+/// an association of two streams, before one to a stream that it lacks, is not held back as
+/// if the next were to follow it.
+#[tokio::test]
+async fn the_streams_of_each_association_of_an_endpoint_are_its_own() {
+    let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let endpoint = socket.into_endpoint(4).unwrap();
+    endpoint.options().set_nodelay(true).unwrap();
+    let address = endpoint.local_addr().unwrap();
+    let mut peers = Vec::new();
+    for inbound in [10, 2] {
+        let peer = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
+        let params = oxirush_sctp::InitParams::streams(10, inbound);
+        peer.options().set_init_params(params).unwrap();
+        let (peer, _) = peer.connect(address).await.unwrap();
+        peer.send(b"hello", SendOptions::new()).await.unwrap();
+        let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() else {
+            panic!("not the message of the peer")
+        };
+        peers.push((peer, message.assoc_id().unwrap()));
+    }
+    let (wide, narrow) = (peers[0].1, peers[1].1);
+    assert_eq!(endpoint.status(narrow).unwrap().outstreams, 2);
+    let messages = [
+        (&b"wide"[..], SendOptions::new().association(wide).stream(5)),
+        (b"narrow", SendOptions::new().association(narrow)),
+        (b"refused", SendOptions::new().association(narrow).stream(3)),
+    ];
+    assert_eq!(endpoint.send_many(&messages).await.unwrap(), 2);
+    for ((peer, _), expected) in peers.iter().zip([&b"wide"[..], b"narrow"]) {
+        match tokio::time::timeout(Duration::from_secs(2), peer.recv()).await {
+            Ok(Ok(Some(NotificationOrData::Data(message)))) => {
+                assert_eq!(message.payload, expected)
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+/// A message longer than the send buffer, in a batch, is refused with the buffer that it
+/// does not fit in.
+#[tokio::test]
+async fn a_message_longer_than_the_send_buffer_in_a_batch_says_which_buffer() {
+    let (client, _server) = pair().await;
+    client.options().set_send_buffer_size(4096).unwrap();
+    let buffer = client.options().send_buffer_size().unwrap();
+    let long = vec![0; 4 * buffer];
+    let error = client
+        .send_many(&[(&long, SendOptions::new())])
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(error.to_string().contains("(SO_SNDBUF)"), "{error}");
+}
+
+/// A batch of a message over the limit alone is that error.
+#[tokio::test]
+async fn a_batch_of_a_message_over_the_limit_alone_is_its_error() {
+    let (client, server) = pair().await;
+    server.options().set_max_message_size(10);
+    client.send(&[0x5a; 20], SendOptions::new()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut out = Vec::new();
+    let start = std::time::Instant::now();
+    let error = tokio::time::timeout(WAIT, server.recv_many(&mut out, 8))
+        .await
+        .expect("the error comes")
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(out.is_empty());
+    // At once, and not when something else wakes the call
+    assert!(start.elapsed() < WAIT / 2, "{:?}", start.elapsed());
+}
+
+/// The errors of several messages over the limit, in a batch after a message that it
+/// delivers, come with the next calls, one each, in their order.
+#[tokio::test]
+async fn the_errors_of_a_batch_come_one_a_call_in_their_order() {
+    let (client, server) = pair().await;
+    server.options().set_max_message_size(10);
+    let (twenty, thirty) = (vec![0x5a; 20], vec![0x5a; 30]);
+    let messages = [
+        (&b"ok"[..], SendOptions::new()),
+        (&twenty, SendOptions::new()),
+        (&thirty, SendOptions::new()),
+    ];
+    assert_eq!(client.send_many(&messages).await.unwrap(), 3);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut out = Vec::new();
+    let got = tokio::time::timeout(WAIT, server.recv_many(&mut out, 8))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got, 1);
+    assert!(matches!(&out[0], NotificationOrData::Data(message) if message.payload == b"ok"));
+    for octets in [20, 30] {
+        let error = tokio::time::timeout(WAIT, server.recv())
+            .await
+            .expect("the error comes")
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("discarded a message of {octets} octets, longer than 10")
+        );
+    }
+}
+
+/// After the messages that it had, `recv_many` waits again for the next.
+#[tokio::test]
+async fn recv_many_waits_again_after_the_messages_that_it_had() {
+    let (client, server) = pair().await;
+    client.send(b"one", SendOptions::new()).await.unwrap();
+    let (got, _) = received(&server, 1).await;
+    assert_eq!(got[0].payload, b"one");
+    let mut out = Vec::new();
+    let mut waiting = std::pin::pin!(server.recv_many(&mut out, 8));
+    // It waits for the socket to be readable: nothing wakes it meanwhile
+    let mut polls = 0;
+    let counted = std::future::poll_fn(|cx| {
+        polls += 1;
+        waiting.as_mut().poll(cx)
+    });
+    let waited = tokio::time::timeout(Duration::from_millis(100), counted).await;
+    assert!(waited.is_err(), "recv_many returned with nothing to read");
+    assert!(
+        polls <= 2,
+        "recv_many was polled {polls} times with nothing to read"
+    );
+}

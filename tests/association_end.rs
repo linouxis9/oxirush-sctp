@@ -142,6 +142,11 @@ async fn an_abort_that_a_send_sees_first_is_the_same_error_for_receive() {
     drop(client);
     let error = send_until_it_fails(&peer).await;
     assert_eq!(error.raw_os_error(), Some(libc::ECONNRESET), "{error}");
+    // The next send too: the association is gone, which Linux tells the first call alone
+    assert_eq!(
+        send(&peer).await.unwrap_err().raw_os_error(),
+        Some(libc::ECONNRESET)
+    );
     for _ in 0..3 {
         assert_eq!(error_number(recv(&peer).await), Some(libc::ECONNRESET));
     }
@@ -176,6 +181,11 @@ async fn an_abort_with_association_events_is_a_notification_then_the_error() {
             // A user-initiated abort
             assert_eq!(change.cause, 12);
         }
+        // The notification is the end: a send after it has the error
+        assert_eq!(
+            send(&peer).await.unwrap_err().raw_os_error(),
+            Some(libc::ECONNRESET)
+        );
         for _ in 0..2 {
             assert_eq!(error_number(recv(&peer).await), Some(libc::ECONNRESET));
         }
@@ -561,4 +571,54 @@ async fn close_completes_when_the_peer_reads_nothing() {
     let closed = server.close(Duration::from_secs(2)).await;
     assert!(closed.is_ok(), "{closed:?}");
     drop(peer);
+}
+
+/// `close` of an association that the peer aborted is the error of the abort, which `recv`
+/// gives; `abort` of a socket peeled off an endpoint, whose association the peer aborted, is
+/// the broken pipe of the kernel.
+#[tokio::test]
+async fn closing_or_aborting_an_association_that_the_peer_aborted() {
+    let (client, peer) = pair().await;
+    client.abort(b"").unwrap();
+    assert_eq!(error_number(recv(&peer).await), Some(libc::ECONNRESET));
+    let error = tokio::time::timeout(Duration::from_secs(2), peer.close(Duration::from_secs(1)))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::ECONNRESET), "{error}");
+
+    let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let endpoint = socket.into_endpoint(1).unwrap();
+    let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
+    let (client, _) = client
+        .connect(endpoint.local_addr().unwrap())
+        .await
+        .unwrap();
+    client.send(b"hello", SendOptions::new()).await.unwrap();
+    let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() else {
+        panic!("not the message of the client")
+    };
+    let peeled = endpoint.peeloff(message.assoc_id().unwrap()).unwrap();
+    client.abort(b"").unwrap();
+    assert_eq!(error_number(recv(&peeled).await), Some(libc::ECONNRESET));
+    let error = peeled.abort(b"too late").unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::EPIPE), "{error}");
+}
+
+/// After the end that a send learned of, `recv` still reports a message over the limit that
+/// the peer had sent, then the end.
+#[tokio::test]
+async fn after_the_end_a_message_over_the_limit_is_reported() {
+    let (client, peer) = pair().await;
+    peer.options().set_max_message_size(10);
+    client.send(&[0x5a; 20], SendOptions::new()).await.unwrap();
+    drop(client);
+    // The shutdown completes, whatever the peer has not read
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let error = send(&peer).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "{error}");
+    let error = recv(&peer).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}");
+    assert!(is_end(&recv(&peer).await));
 }

@@ -206,3 +206,45 @@ async fn a_message_longer_than_the_send_buffer_says_which_buffer() {
         )
     );
 }
+
+/// At the limit of the descriptors of the process, a new socket is the error of the kernel.
+/// Run alone, in a process of its own (see `a_socket_past_the_limit_of_descriptors_fails`):
+/// the limit holds for every thread.
+#[test]
+#[ignore]
+fn at_the_limit_of_descriptors_a_socket_is_an_error() {
+    if std::env::var_os("SCTP_RS_TEST_FD_LIMIT").is_none() {
+        return;
+    }
+    // The lowest free descriptor becomes the limit: the next one is past it.
+    // Safety: `dup` and `close` take a descriptor of the process, and `setrlimit` a limit.
+    unsafe {
+        let lowest = libc::dup(0);
+        assert!(lowest > 0, "{}", std::io::Error::last_os_error());
+        libc::close(lowest);
+        let mut limit: libc::rlimit = std::mem::zeroed();
+        assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit), 0);
+        limit.rlim_cur = lowest as libc::rlim_t;
+        assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &limit), 0);
+    }
+    // It fails before it would be registered with a runtime
+    let error = Socket::new_v4(SocketToAssociation::OneToOne).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::EMFILE), "{error}");
+}
+
+#[test]
+fn a_socket_past_the_limit_of_descriptors_fails() {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "at_the_limit_of_descriptors_a_socket_is_an_error",
+            "--ignored",
+        ])
+        .env("SCTP_RS_TEST_FD_LIMIT", "1")
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "`at_the_limit_of_descriptors_a_socket_is_an_error` failed"
+    );
+}

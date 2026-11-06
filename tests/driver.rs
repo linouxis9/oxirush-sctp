@@ -6,7 +6,10 @@
 //! Linux then drops packets, which wait for a retransmission timeout of a second.
 
 use oxirush_sctp::driver::{self, DriverConfig, OnOverload, SendError};
-use oxirush_sctp::{ConnectedSocket, NotificationOrData, SendOptions, Socket, SocketToAssociation};
+use oxirush_sctp::{
+    AssociationId, ConnectedSocket, NotificationOrData, OneToManyEndpoint, SendOptions, Socket,
+    SocketToAssociation,
+};
 use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -331,4 +334,153 @@ async fn the_end_of_the_association_ends_the_reader_and_the_writer() {
         writer.try_send(Vec::new(), SendOptions::new()),
         Err(SendError::Closed(_) | SendError::Empty)
     ));
+}
+
+/// An endpoint, and a peer that has an association with it, whose ID at the endpoint the
+/// first message gives.
+async fn endpoint_and_peer() -> (OneToManyEndpoint, ConnectedSocket, AssociationId) {
+    let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let endpoint = socket.into_endpoint(4).unwrap();
+    let peer = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
+    let (peer, _) = peer.connect(endpoint.local_addr().unwrap()).await.unwrap();
+    peer.send(b"hello", SendOptions::new()).await.unwrap();
+    let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() else {
+        panic!("not the message of the peer")
+    };
+    (endpoint, peer, message.assoc_id().unwrap())
+}
+
+/// The data of the next item of `reader`.
+async fn next_payload(reader: &mut driver::Reader) -> Vec<u8> {
+    match tokio::time::timeout(WAIT, reader.recv()).await.unwrap() {
+        Some(Ok(NotificationOrData::Data(message))) => message.payload,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Until the counters of `writer` say that `sent` messages were sent and `failed` failed.
+async fn settled(writer: &driver::Writer, sent: u64, failed: u64) -> driver::Overload {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let overload = writer.overload();
+        if (overload.sent, overload.failed) == (sent, failed) {
+            return overload;
+        }
+        assert!(Instant::now() < deadline, "{overload:?}");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+/// The reader of an endpoint's driver passes on what its associations send.
+#[tokio::test]
+async fn the_reader_of_an_endpoint_passes_on_its_messages() {
+    let (endpoint, peer, _) = endpoint_and_peer().await;
+    let (_writer, mut reader) = driver::spawn(endpoint, DriverConfig::default()).unwrap();
+    peer.send(b"again", SendOptions::new()).await.unwrap();
+    assert_eq!(next_payload(&mut reader).await, b"again");
+}
+
+/// Once the last clone of its writer and its reader are dropped, the tasks of a driver end
+/// and let the socket go: the peer sees the end of the association.
+#[tokio::test]
+async fn dropping_the_writer_and_the_reader_lets_the_socket_go() {
+    let (client, server) = pair().await;
+    let (writer, reader) = driver::spawn(client, DriverConfig::default()).unwrap();
+    writer
+        .send(b"last".to_vec(), SendOptions::new())
+        .await
+        .unwrap();
+    match tokio::time::timeout(WAIT, server.recv()).await.unwrap() {
+        Ok(Some(NotificationOrData::Data(message))) => assert_eq!(message.payload, b"last"),
+        other => panic!("{other:?}"),
+    }
+    let clone = writer.clone();
+    drop(clone);
+    // The writer's task wakes, finds a writer left, and waits again
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    drop(writer);
+    drop(reader);
+    let end = tokio::time::timeout(WAIT, server.recv())
+        .await
+        .expect("the socket of the driver is closed");
+    assert!(end.unwrap().is_none());
+}
+
+/// A message over the limit is reported and the reader goes on; an error that lasts, that of
+/// an association that the peer aborted, is reported once, and the reader ends.
+#[tokio::test]
+async fn the_reader_goes_on_after_a_message_over_the_limit_and_ends_after_an_abort() {
+    let (client, server) = pair().await;
+    server.options().set_max_message_size(10);
+    let (_writer, mut reader) = driver::spawn(server, DriverConfig::default()).unwrap();
+    client.send(&[0x5a; 20], SendOptions::new()).await.unwrap();
+    client.send(b"next", SendOptions::new()).await.unwrap();
+    // The error of the message comes after the messages of its batch
+    let mut seen = Vec::new();
+    for _ in 0..2 {
+        match tokio::time::timeout(WAIT, reader.recv()).await.unwrap() {
+            Some(Err(error)) => seen.push(format!("{:?}", error.kind())),
+            Some(Ok(NotificationOrData::Data(message))) => {
+                seen.push(String::from_utf8(message.payload).unwrap())
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    seen.sort();
+    assert_eq!(seen, ["InvalidData", "next"]);
+    client.abort(b"").unwrap();
+    match tokio::time::timeout(WAIT, reader.recv()).await.unwrap() {
+        Some(Err(error)) => assert_eq!(error.raw_os_error(), Some(libc::ECONNRESET)),
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        tokio::time::timeout(WAIT, reader.recv())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// What the writer sent leaves the queue, with its octets.
+#[tokio::test]
+async fn what_was_sent_leaves_the_queue() {
+    let (client, server) = pair().await;
+    let (writer, _) = driver::spawn(client, DriverConfig::default()).unwrap();
+    for _ in 0..3 {
+        writer
+            .try_send(b"four".to_vec(), SendOptions::new())
+            .unwrap();
+    }
+    let overload = settled(&writer, 3, 0).await;
+    assert_eq!((overload.queued, overload.queued_octets), (0, 0));
+    for _ in 0..3 {
+        let received = tokio::time::timeout(WAIT, server.recv()).await.unwrap();
+        assert!(matches!(received, Ok(Some(NotificationOrData::Data(_)))));
+    }
+}
+
+/// On an endpoint, the messages to an association that it does not have fail and leave the
+/// queue, octets and all, and those of its other associations in the same batch are sent.
+#[tokio::test]
+async fn the_messages_to_an_association_that_an_endpoint_lacks_fail_alone() {
+    let (endpoint, peer, assoc_id) = endpoint_and_peer().await;
+    let (writer, _reader) = driver::spawn(endpoint, DriverConfig::default()).unwrap();
+    // Queued at once, for one batch: those to the association that is not first
+    for _ in 0..3 {
+        let options = SendOptions::new().association(assoc_id + 100);
+        writer.try_send(b"lost".to_vec(), options).unwrap();
+    }
+    for _ in 0..2 {
+        let options = SendOptions::new().association(assoc_id);
+        writer.try_send(b"kept".to_vec(), options).unwrap();
+    }
+    let overload = settled(&writer, 2, 3).await;
+    assert_eq!((overload.queued, overload.queued_octets), (0, 0));
+    for _ in 0..2 {
+        match tokio::time::timeout(WAIT, peer.recv()).await.unwrap() {
+            Ok(Some(NotificationOrData::Data(message))) => assert_eq!(message.payload, b"kept"),
+            other => panic!("{other:?}"),
+        }
+    }
 }

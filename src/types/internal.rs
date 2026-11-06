@@ -350,4 +350,20 @@ mod tests {
         assert_eq!(size_of::<PeerAddressParamsInternal>(), 156);
         assert_eq!(align_of::<PeerAddressParamsInternal>(), 4);
     }
+
+    /// The send information goes in its wire form with the payload protocol identifier in
+    /// network byte order, and comes back from it as it was.
+    #[test]
+    fn the_send_information_comes_back_from_its_wire_form() {
+        let info = crate::SendInfo {
+            sid: 2,
+            flags: crate::SendInfo::UNORDERED,
+            ppid: 60,
+            context: 7,
+            assoc_id: 9,
+        };
+        let wire = SndInfoWire::from(&info);
+        assert_eq!(wire.ppid, 60_u32.to_be());
+        assert_eq!(crate::SendInfo::from(wire), info);
+    }
 }

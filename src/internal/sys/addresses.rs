@@ -197,3 +197,25 @@ pub(crate) fn check_addresses(fd: BorrowedFd<'_>, addrs: &[SocketAddr]) -> std::
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::AsFd;
+
+    /// A query of addresses says in the log which addresses it asks for.
+    #[tokio::test]
+    async fn a_query_of_addresses_says_which_it_asks_for() {
+        let socket = crate::Socket::new_v4(crate::SocketToAssociation::OneToMany).unwrap();
+        let fd = socket.as_fd();
+        let (_, local) = crate::logged::logged(|| sctp_getladdrs_internal(fd, 0));
+        let (_, peer) = crate::logged::logged(|| sctp_getpaddrs_internal(fd, 0));
+        for (events, which) in [(local, "local"), (peer, "peer")] {
+            let expected = format!("Getting {which} Addresses for the SCTP Association 0");
+            assert!(
+                events.iter().any(|(_, message)| *message == expected),
+                "{events:?}"
+            );
+        }
+    }
+}

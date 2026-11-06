@@ -345,6 +345,9 @@ pub mod fuzzing {
 
 mod consts;
 
+#[cfg(test)]
+mod logged;
+
 mod types;
 
 #[doc(inline)]

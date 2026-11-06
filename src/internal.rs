@@ -1232,4 +1232,146 @@ mod tests {
             }
         }
     }
+
+    /// A socket of `style` bound to an address of the loopback interface, which listens.
+    fn listening(style: SocketToAssociation) -> (SocketCore, SocketAddr) {
+        let core = SocketCore::new(libc::AF_INET, style).unwrap();
+        let any_port = "127.0.0.1:0".parse().unwrap();
+        sys::sctp_bindx_internal(core.as_fd(), &[any_port], crate::BindxFlags::Add).unwrap();
+        sys::sctp_listen_internal(core.as_fd(), 4).unwrap();
+        let address = sys::local_addr(core.as_fd()).unwrap();
+        (core, address)
+    }
+
+    /// A peer of `address`, which has sent it `message`.
+    async fn peer_that_sent(address: SocketAddr, message: &[u8]) -> crate::ConnectedSocket {
+        let peer = crate::Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
+        let (peer, _) = peer.connect(address).await.unwrap();
+        peer.send(message, crate::SendOptions::new()).await.unwrap();
+        peer
+    }
+
+    /// The first part of a message, from `from`, without its receive information.
+    fn first_part(octets: &[u8], from: Option<SocketAddr>) -> PartialMessage {
+        PartialMessage::begun(
+            octets,
+            &receive::Piece {
+                len: octets.len(),
+                notification: false,
+                end_of_record: false,
+                rcv_info: None,
+                nxt_info: None,
+                from,
+            },
+        )
+    }
+
+    fn payload(received: Option<NotificationOrData>) -> Vec<u8> {
+        match received {
+            Some(NotificationOrData::Data(message)) => message.payload,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Without the receive information, an endpoint tells the senders of the parts of a
+    /// message apart by their addresses: a message from another address is not taken for the
+    /// next part of one in assembly, by `recv` and by `recv_many`.
+    #[tokio::test]
+    async fn without_the_receive_information_an_endpoint_tells_senders_apart_by_address() {
+        for many in [false, true] {
+            let (core, address) = listening(SocketToAssociation::OneToMany);
+            core.request_rcvinfo(false).unwrap();
+            let elsewhere = Some("192.0.2.1:38412".parse().unwrap());
+            core.partials
+                .lock()
+                .unwrap()
+                .begin(first_part(b"partial ", elsewhere));
+            let _peer = peer_that_sent(address, b"whole").await;
+            let received = if many {
+                let mut out = Vec::new();
+                assert_eq!(core.recv_many(&mut out, 8).await.unwrap(), 1);
+                out.pop()
+            } else {
+                core.recv().await.unwrap()
+            };
+            assert_eq!(payload(received), b"whole", "recv_many: {many}");
+        }
+    }
+
+    /// `recv_into` goes on with a message in assembly, which a cancelled call left, rather
+    /// than read the next part on its own.
+    #[tokio::test]
+    async fn recv_into_goes_on_with_the_message_in_assembly() {
+        let (listener, address) = listening(SocketToAssociation::OneToOne);
+        let peer = peer_that_sent(address, b"before").await;
+        let (core, _) = listener.accept().await.unwrap();
+        // After the notification that the association came up
+        assert_eq!(payload(core.recv().await.unwrap()), b"before");
+        core.partials
+            .lock()
+            .unwrap()
+            .begin(first_part(b"first ", None));
+        peer.send(b"last", crate::SendOptions::new()).await.unwrap();
+        let mut buffer = [0; 64];
+        match core.recv_into(&mut buffer).await.unwrap() {
+            Some(ReceivedInto::Data { len, .. }) => assert_eq!(&buffer[..len], b"first last"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A socket of one association that has an event subscribed for the crate alone, as a
+    /// socket peeled off an endpoint has the partial deliveries, does not pass on its
+    /// notifications.
+    #[tokio::test]
+    async fn a_notification_subscribed_for_the_crate_alone_is_not_passed_on() {
+        let core = SocketCore::new(libc::AF_INET, SocketToAssociation::OneToOne).unwrap();
+        core.quiet_events
+            .fetch_or(bit(Event::PartialDelivery), Ordering::AcqRel);
+        let given_up = Notification::PartialDelivery(crate::PartialDelivery {
+            indication: 0,
+            assoc_id: 1,
+            stream: 0,
+            sequence: 0,
+        });
+        let received = Ok(Some(NotificationOrData::Notification(given_up)));
+        assert!(core.note_received(received).is_none());
+    }
+
+    /// A socket of one association keeps its association changes subscribed when the caller
+    /// unsubscribes them: it learns of the end of its association through them.
+    #[tokio::test]
+    async fn a_socket_of_one_association_keeps_its_association_changes() {
+        let core = SocketCore::new(libc::AF_INET, SocketToAssociation::OneToOne).unwrap();
+        core.subscribe_events(&[Event::Association], SubscribeEventAssocId::All, false)
+            .unwrap();
+        assert!(sys::sctp_event_subscribed_internal(core.as_fd(), Event::Association).unwrap());
+        assert!(
+            core.quiet(&Notification::AssociationChange(crate::AssociationChange {
+                state: AssocChangeState::CommLost,
+                cause: 0,
+                outbound_streams: 0,
+                inbound_streams: 0,
+                assoc_id: 0,
+                info: Vec::new(),
+            }))
+        );
+    }
+
+    /// An endpoint that no longer interleaves the messages of its associations subscribes to
+    /// nothing for itself when its receive information is turned off again.
+    #[tokio::test]
+    async fn turning_interleaving_off_subscribes_to_nothing() {
+        let core = SocketCore::new(libc::AF_INET, SocketToAssociation::OneToMany).unwrap();
+        let subscribed =
+            || sys::sctp_event_subscribed_internal(core.as_fd(), Event::PartialDelivery).unwrap();
+        assert!(subscribed());
+        core.request_rcvinfo(false).unwrap();
+        core.subscribe_events(&[Event::PartialDelivery], SubscribeEventAssocId::All, false)
+            .unwrap();
+        assert!(!subscribed());
+        core.request_rcvinfo(false).unwrap();
+        assert!(!subscribed());
+        core.request_rcvinfo(true).unwrap();
+        assert!(subscribed());
+    }
 }

@@ -377,4 +377,47 @@ mod tests {
             Notification::Shutdown(Shutdown { assoc_id: 7 })
         );
     }
+
+    /// A peer address change has the length of its structure, 148 octets: one of another
+    /// length is unsupported, and another notification of that length is not read as one.
+    #[test]
+    fn a_peer_address_change_is_one_of_148_octets_alone() {
+        let short = notification(Event::Address, 20);
+        assert_eq!(
+            notification_from_message(&short),
+            Notification::Unsupported {
+                kind: Event::Address as u16,
+                data: short.clone()
+            }
+        );
+        let failure = notification(Event::SendFailureEvent, 148);
+        assert!(matches!(
+            notification_from_message(&failure),
+            Notification::SendFailure(SendFailure { payload, .. }) if payload.len() == 116
+        ));
+    }
+
+    /// A notification shorter than its type is a warning; one that has its type and is too
+    /// short for the rest is unsupported without one, and so is one of a type that the crate
+    /// does not know, which it logs for debugging with its type and length.
+    #[test]
+    fn what_is_logged_of_a_notification_that_is_not_read() {
+        use crate::logged::{logged, warnings};
+        let (_, events) = logged(|| notification_from_message(&[1]));
+        assert_eq!(warnings(&events), ["Notification of 1 octets."]);
+        let (_, events) = logged(|| notification_from_message(&[1, 0]));
+        assert_eq!(warnings(&events), Vec::<&str>::new());
+        let header = notification(Event::Association, 8);
+        let (_, events) = logged(|| notification_from_message(&header));
+        assert_eq!(
+            events,
+            [(
+                tracing::Level::DEBUG,
+                format!(
+                    "Unsupported notification received: type {:x}, 8 octets.",
+                    Event::Association as u16
+                )
+            )]
+        );
+    }
 }

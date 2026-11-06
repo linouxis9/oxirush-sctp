@@ -1256,5 +1256,59 @@ mod tests {
             SendInfo::from(SendOptions::new().unordered(true)).flags,
             SendInfo::UNORDERED
         );
+        // The values of linux/sctp.h, which the kernel reads
+        assert_eq!(
+            [SendInfo::UNORDERED, SendInfo::ADDR_OVER, SendInfo::ABORT],
+            [1, 2, 4]
+        );
+        assert_eq!(
+            [SendInfo::SACK_IMMEDIATELY, SendInfo::SENDALL, SendInfo::EOF],
+            [8, 64, 512]
+        );
+    }
+
+    /// What is sent, a failed send, an error of the peer and a change of an association print
+    /// their fields, with their octets in hexadecimal.
+    #[test]
+    fn debug_prints_the_fields_of_sends_and_notifications() {
+        let data = SendData::new(b"ab".to_vec());
+        assert_eq!(
+            format!("{data:?}"),
+            "SendData { payload: 2 octets 6162, snd_info: None }"
+        );
+        let failure = SendFailure {
+            sent: true,
+            cause: 1,
+            snd_info: SendInfo::default(),
+            assoc_id: 7,
+            payload: vec![0xab],
+        };
+        assert_eq!(
+            format!("{failure:?}"),
+            "SendFailure { sent: true, cause: 1, snd_info: SendInfo { sid: 0, flags: 0, ppid: 0, \
+             context: 0, assoc_id: 0 }, assoc_id: 7, payload: 1 octets ab }"
+        );
+        let remote = RemoteError {
+            cause: 2,
+            assoc_id: 7,
+            data: vec![0, 2],
+        };
+        assert_eq!(
+            format!("{remote:?}"),
+            "RemoteError { cause: 2, assoc_id: 7, data: 2 octets 0002 }"
+        );
+        let change = AssociationChange {
+            state: AssocChangeState::CommLost,
+            cause: 12,
+            outbound_streams: 1,
+            inbound_streams: 2,
+            assoc_id: 7,
+            info: vec![0x0c],
+        };
+        assert_eq!(
+            format!("{change:?}"),
+            "AssociationChange { state: CommLost, cause: 12, outbound_streams: 1, \
+             inbound_streams: 2, assoc_id: 7, info: 1 octets 0c }"
+        );
     }
 }

@@ -1219,4 +1219,282 @@ mod tests {
             );
         }
     }
+
+    /// The notification of a change of the association `assoc_id` to `state`
+    /// (`struct sctp_assoc_change`).
+    fn assoc_change(state: u16, assoc_id: i32) -> Step {
+        let mut octets = (crate::Event::Association as u16).to_ne_bytes().to_vec();
+        octets.extend_from_slice(&0_u16.to_ne_bytes());
+        octets.extend_from_slice(&20_u32.to_ne_bytes());
+        for value in [state, 0, 0, 0] {
+            octets.extend_from_slice(&value.to_ne_bytes());
+        }
+        octets.extend_from_slice(&assoc_id.to_ne_bytes());
+        Step::Piece(
+            octets.clone(),
+            Piece {
+                len: octets.len(),
+                notification: true,
+                end_of_record: true,
+                rcv_info: None,
+                nxt_info: None,
+                from: None,
+            },
+        )
+    }
+
+    /// The octets in assembly count a message while its parts are kept, and no more once it
+    /// is taken back to be continued.
+    #[test]
+    fn a_message_taken_back_counts_no_more_in_the_assembly() {
+        let mut partials = Partials::default();
+        let mut read = reader(vec![
+            data(b"first", false, None),
+            Step::Error(std::io::ErrorKind::WouldBlock),
+            data(b"last", true, None),
+        ]);
+        let error = receive_message(&mut partials, 100, false, &mut read).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(partials.held, 5);
+        let received = receive_message(&mut partials, 100, false, read).unwrap();
+        assert_eq!(payload(received), b"firstlast");
+        assert_eq!(partials.held, 0);
+    }
+
+    /// The end of the stream drops every message that an endpoint assembles.
+    #[test]
+    fn the_end_of_the_stream_drops_the_messages_in_assembly() {
+        let mut partials = Partials::default();
+        partials.set_interleaved(true);
+        let read = reader(vec![data(b"part", false, of(7)), data(b"", false, None)]);
+        assert_eq!(
+            receive_message(&mut partials, 100, false, read).unwrap(),
+            None
+        );
+        assert!(partials.is_empty());
+        assert_eq!(partials.held, 0);
+    }
+
+    /// The end of the stream read first is the end, on a socket of one association and on
+    /// an endpoint.
+    #[test]
+    fn the_end_of_the_stream_read_first_is_the_end() {
+        for interleaved in [false, true] {
+            let mut partials = Partials::default();
+            partials.set_interleaved(interleaved);
+            let read = reader(vec![data(b"", false, None)]);
+            assert_eq!(
+                receive_message(&mut partials, 100, false, read).unwrap(),
+                None
+            );
+            assert!(partials.is_empty());
+        }
+    }
+
+    /// The parts of a message stay through the notification of a change of its association
+    /// that does not end it: that it came up.
+    #[test]
+    fn a_change_that_does_not_end_the_association_keeps_its_parts() {
+        let mut partials = Partials::default();
+        partials.set_interleaved(true);
+        let mut read = reader(vec![
+            data(b"kept ", false, of(7)),
+            // COMM_UP
+            assoc_change(0, 7),
+            data(b"message", true, of(7)),
+        ]);
+        let mut next = || receive_message(&mut partials, 100, false, &mut read).unwrap();
+        assert!(matches!(next(), Some(NotificationOrData::Notification(_))));
+        assert_eq!(payload(next()), b"kept message");
+    }
+
+    /// A read that fails otherwise than by blocking drops the message in assembly: only one
+    /// that would block keeps it, for the next read.
+    #[test]
+    fn a_failed_read_drops_the_message_in_assembly() {
+        let mut partials = Partials::default();
+        let read = reader(vec![
+            data(b"first", false, None),
+            Step::Error(std::io::ErrorKind::ConnectionReset),
+        ]);
+        let error = receive_message(&mut partials, 100, true, read).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        assert!(partials.is_empty());
+    }
+
+    /// A read that would block keeps a message of which octets were received, and not one
+    /// of which none were.
+    #[test]
+    fn a_read_that_would_block_keeps_a_message_of_octets_alone() {
+        let mut partials = Partials::default();
+        partials.begin(PartialMessage::default());
+        let read = reader(vec![Step::Error(std::io::ErrorKind::WouldBlock)]);
+        let error = receive_message(&mut partials, 100, true, read).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(partials.is_empty());
+    }
+
+    /// The parts of an ordered message have its stream sequence number: a part of another
+    /// begins another message.
+    #[test]
+    fn the_parts_of_an_ordered_message_have_its_stream_sequence_number() {
+        let first = RcvInfo {
+            assoc_id: 7,
+            sid: 2,
+            ssn: 1,
+            ..Default::default()
+        };
+        let other = RcvInfo {
+            ssn: 2,
+            ..first.clone()
+        };
+        let read = reader(vec![
+            data(b"first", false, Some(first)),
+            data(b"other", true, Some(other)),
+        ]);
+        let received = receive_message(&mut Partials::default(), 100, false, read).unwrap();
+        assert_eq!(payload(received), b"other");
+    }
+
+    /// An interrupted read is tried again and loses nothing: the first read of a message, and
+    /// one of an endpoint whose messages come in turns.
+    #[test]
+    fn an_interrupted_read_is_tried_again() {
+        let read = reader(vec![
+            Step::Error(std::io::ErrorKind::Interrupted),
+            data(b"whole", true, None),
+        ]);
+        let received = receive_message(&mut Partials::default(), 100, false, read).unwrap();
+        assert_eq!(payload(received), b"whole");
+
+        let mut partials = Partials::default();
+        partials.set_interleaved(true);
+        let read = reader(vec![
+            data(b"first ", false, of(7)),
+            Step::Error(std::io::ErrorKind::Interrupted),
+            data(b"last", true, of(7)),
+        ]);
+        let received = receive_message(&mut partials, 100, false, read).unwrap();
+        assert_eq!(payload(received), b"first last");
+    }
+
+    /// On an endpoint, a part of another message of an association drops the message of
+    /// that association in assembly, whose delivery was given up.
+    #[test]
+    fn a_part_of_another_message_drops_the_message_of_its_association() {
+        let stream = |sid| {
+            Some(RcvInfo {
+                assoc_id: 7,
+                sid,
+                ..Default::default()
+            })
+        };
+        let mut partials = Partials::default();
+        partials.set_interleaved(true);
+        let read = reader(vec![
+            data(b"given up", false, stream(1)),
+            data(b"new", true, stream(2)),
+        ]);
+        let received = receive_message(&mut partials, 100, false, read).unwrap();
+        assert_eq!(payload(received), b"new");
+        assert!(partials.is_empty());
+    }
+
+    /// A message of exactly the limit is whole, in parts that come in turns.
+    #[test]
+    fn a_message_of_the_limit_is_whole_on_an_endpoint() {
+        let mut partials = Partials::default();
+        partials.set_interleaved(true);
+        let read = reader(vec![
+            data(b"01234", false, of(7)),
+            data(b"56789", true, of(7)),
+        ]);
+        let received = receive_message(&mut partials, 10, false, read).unwrap();
+        assert_eq!(payload(received), b"0123456789");
+    }
+
+    /// The first part of a message is kept, and counts in the assembly, up to the limit: past
+    /// it, the message is discarded at its end and nothing of it is kept meanwhile.
+    #[test]
+    fn the_first_part_of_a_message_counts_in_the_assembly_up_to_the_limit() {
+        for (part, held) in [(&b"1234"[..], 4), (b"12345", 0)] {
+            let mut partials = Partials::default();
+            partials.set_interleaved(true);
+            let read = reader(vec![
+                data(part, false, of(7)),
+                Step::Error(std::io::ErrorKind::WouldBlock),
+            ]);
+            let error = receive_message(&mut partials, 4, false, read).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+            assert_eq!(partials.held, held, "a first part of {} octets", part.len());
+        }
+    }
+
+    /// A message in assembly prints where it comes from and how much of it came, and not its
+    /// octets.
+    #[test]
+    fn a_message_in_assembly_prints_without_its_octets() {
+        let message = PartialMessage {
+            notification: false,
+            payload: b"secret".to_vec(),
+            rcv_info: of(7),
+            from: Some("192.0.2.1:38412".parse().unwrap()),
+            received: 6,
+        };
+        let printed = format!("{message:?}");
+        assert!(printed.starts_with("PartialMessage {"), "{printed}");
+        for part in [
+            "notification: false",
+            "assoc_id: 7",
+            "192.0.2.1:38412",
+            "received: 6",
+        ] {
+            assert!(printed.contains(part), "{part} in {printed}");
+        }
+        assert!(!printed.contains("payload"), "{printed}");
+    }
+
+    /// The end of the stream in the middle of a message is a warning, which says how much of
+    /// the message it cut; at the beginning of one it is none.
+    #[test]
+    fn the_end_of_the_stream_in_a_message_is_a_warning() {
+        let ((), events) = crate::logged::logged(|| {
+            let read = reader(vec![data(b"partial", false, None), data(b"", false, None)]);
+            assert_eq!(
+                receive_message(&mut Partials::default(), 100, false, read).unwrap(),
+                None
+            );
+        });
+        assert_eq!(
+            crate::logged::warnings(&events),
+            ["End of stream after 7 octets of a message."]
+        );
+        let ((), events) = crate::logged::logged(|| {
+            let mut partials = Partials::default();
+            partials.begin(PartialMessage::default());
+            let read = reader(vec![data(b"", false, None)]);
+            assert_eq!(
+                receive_message(&mut partials, 100, false, read).unwrap(),
+                None
+            );
+        });
+        assert_eq!(crate::logged::warnings(&events), Vec::<&str>::new());
+    }
+
+    /// A message of which nothing was received is begun by the next part, from whatever
+    /// address, without the warning of a message whose delivery was given up.
+    #[test]
+    fn a_message_of_no_octets_is_begun_without_a_warning() {
+        let ((), events) = crate::logged::logged(|| {
+            let mut partials = Partials::default();
+            partials.begin(PartialMessage::default());
+            let mut piece = data(b"whole", true, of(7));
+            if let Step::Piece(_, piece) = &mut piece {
+                piece.from = Some("192.0.2.1:38412".parse().unwrap());
+            }
+            let received = receive_message(&mut partials, 100, false, reader(vec![piece]));
+            assert_eq!(payload(received.unwrap()), b"whole");
+        });
+        assert_eq!(crate::logged::warnings(&events), Vec::<&str>::new());
+    }
 }

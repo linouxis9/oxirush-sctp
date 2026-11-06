@@ -1014,3 +1014,300 @@ fn set_overload(shared: &Shared, overloaded: bool) {
         shared.relieved.notify_waiters();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a driver's tasks and writers share, as `spawn` makes it.
+    fn shared(config: DriverConfig) -> Shared {
+        Shared {
+            config,
+            queue: Mutex::new(VecDeque::new()),
+            queued: Notify::new(),
+            room: Semaphore::new(config.max_queued.clamp(1, Semaphore::MAX_PERMITS)),
+            relieved: Notify::new(),
+            overloaded: AtomicBool::new(false),
+            length: AtomicUsize::new(0),
+            octets: AtomicUsize::new(0),
+            sent: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
+            refused_octets: AtomicU64::new(0),
+            failed: AtomicU64::new(0),
+            window: Mutex::new(Window::default()),
+            closed: Mutex::new(None),
+            writers: AtomicUsize::new(1),
+        }
+    }
+
+    fn writer(config: DriverConfig) -> Writer {
+        Writer {
+            shared: Arc::new(shared(config)),
+        }
+    }
+
+    fn queued(byte: u8) -> Queued {
+        Queued {
+            payload: vec![byte],
+            options: SendOptions::new(),
+            since: Instant::now(),
+            permits: 1,
+        }
+    }
+
+    fn micros(sojourn: u64) -> Duration {
+        Duration::from_micros(sojourn)
+    }
+
+    /// The percentiles of an interval are the upper ends of the powers of two of microseconds
+    /// that hold them, from a sojourn under a microsecond to one past the last power.
+    #[test]
+    fn an_interval_has_the_percentiles_of_its_sojourns() {
+        let mut interval = Interval::new(Instant::now());
+        for _ in 0..98 {
+            interval.record(micros(3));
+        }
+        for _ in 0..2 {
+            interval.record(micros(1000));
+        }
+        assert_eq!((interval.total, interval.min), (100, Some(micros(3))));
+        assert_eq!(interval.percentile(50), micros(4));
+        assert_eq!(interval.percentile(99), micros(1024));
+
+        let mut interval = Interval::new(Instant::now());
+        interval.record(Duration::from_nanos(10));
+        assert_eq!(interval.percentile(99), micros(2));
+        interval.record(Duration::from_secs(1 << 40));
+        assert_eq!(interval.percentile(100), micros(1 << 39));
+        assert_eq!(interval.min, Some(Duration::from_nanos(10)));
+    }
+
+    /// The queue is in overload once the shortest sojourn of an interval is above the target,
+    /// and not when it is at it or under it; an empty queue is in overload no more.
+    #[test]
+    fn the_shortest_sojourn_above_the_target_is_an_overload() {
+        let shared = shared(DriverConfig::default());
+        for (min, empty, overloaded) in [
+            (Duration::from_millis(1), false, false),
+            (Duration::from_millis(5), false, false),
+            (Duration::from_millis(6), false, true),
+            (Duration::from_millis(6), true, false),
+        ] {
+            let mut interval = Interval::new(Instant::now());
+            interval.record(min);
+            interval.record(min * 2);
+            close_interval(&shared, &mut interval, Instant::now(), empty);
+            let state = shared.overloaded.load(Ordering::Acquire);
+            assert_eq!(state, overloaded, "shortest {min:?}, empty {empty}");
+            assert_eq!(shared.window.lock().unwrap().min, min);
+            assert_eq!(interval.total, 0, "the next interval begins");
+        }
+    }
+
+    /// The slower trigger: the 99th percentile above the ceiling, and not at it, for
+    /// `ceiling_intervals` intervals in a row.
+    #[test]
+    fn the_99th_percentile_above_the_ceiling_for_intervals_in_a_row_is_an_overload() {
+        let shared = shared(DriverConfig {
+            target: Duration::from_secs(1),
+            ceiling: micros(131_072),
+            ceiling_intervals: 3,
+            ..Default::default()
+        });
+        let mut interval = Interval::new(Instant::now());
+        let mut close = |sojourn| {
+            interval.record(micros(sojourn));
+            close_interval(&shared, &mut interval, Instant::now(), false);
+            shared.overloaded.load(Ordering::Acquire)
+        };
+        // 100 000 µs is in the power of two of 131 072 µs, at the ceiling
+        for _ in 0..5 {
+            assert!(!close(100_000));
+        }
+        // 200 000 µs is in that of 262 144 µs, above it
+        assert_eq!(
+            [
+                close(200_000),
+                close(200_000),
+                close(200_000),
+                close(200_000)
+            ],
+            [false, false, true, true]
+        );
+        // An interval under it counts again from none
+        assert_eq!([close(10), close(200_000)], [false, false]);
+    }
+
+    /// An interval without a sojourn changes neither the window nor the state of a queue that
+    /// stands; it ends the overload of one that is empty.
+    #[test]
+    fn an_interval_without_sojourns_leaves_the_window() {
+        let shared = shared(DriverConfig::default());
+        shared.overloaded.store(true, Ordering::Release);
+        let mut interval = Interval::new(Instant::now());
+        close_interval(&shared, &mut interval, Instant::now(), false);
+        assert!(shared.overloaded.load(Ordering::Acquire));
+        let window = *shared.window.lock().unwrap();
+        assert_eq!(
+            (window.min, window.p50, window.p99),
+            (Duration::ZERO, Duration::ZERO, Duration::ZERO)
+        );
+        let start = Instant::now();
+        close_interval(&shared, &mut interval, start, true);
+        assert!(!shared.overloaded.load(Ordering::Acquire));
+        assert_eq!(interval.start, start);
+    }
+
+    /// The writers that wait are woken when the overload ends, and only then.
+    #[test]
+    fn the_end_of_the_overload_alone_wakes_the_waiters() {
+        let shared = shared(DriverConfig::default());
+        let woken = |overloaded| {
+            let notified = std::pin::pin!(shared.relieved.notified());
+            set_overload(&shared, overloaded);
+            let mut cx = Context::from_waker(std::task::Waker::noop());
+            notified.poll(&mut cx).is_ready()
+        };
+        assert!(!woken(false), "no overload ends");
+        assert!(!woken(true), "an overload begins");
+        assert!(!woken(true), "it goes on");
+        assert!(woken(false), "it ends");
+    }
+
+    /// A batch takes the associations in turns, a few messages of each a turn, and no more
+    /// than its size.
+    #[test]
+    fn a_batch_takes_the_associations_in_turns_up_to_its_size() {
+        let mut config = DriverConfig::default();
+        (config.batch, config.per_association) = (5, 4);
+        let mut pending = Pending::default();
+        for byte in 0..4 {
+            pending.push_back(1, queued(byte));
+            pending.push_back(2, queued(10 + byte));
+        }
+        let mut batch = Vec::new();
+        let mut taken = |pending: &mut Pending| {
+            batch.clear();
+            pending.batch(&config, &mut batch);
+            batch
+                .iter()
+                .map(|(key, message)| (*key, message.payload[0]))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            taken(&mut pending),
+            [(1, 0), (1, 1), (1, 2), (1, 3), (2, 10)]
+        );
+        assert_eq!(taken(&mut pending), [(2, 11), (2, 12), (2, 13)]);
+        assert!(pending.turns.is_empty() && pending.queues.is_empty());
+    }
+
+    /// The messages of an association that is dropped leave its turns and the others stay;
+    /// draining takes every message.
+    #[test]
+    fn the_messages_of_an_association_leave_the_pending_ones() {
+        let mut pending = Pending::default();
+        for byte in 0..3 {
+            pending.push_back(1, queued(byte));
+            pending.push_back(2, queued(10 + byte));
+        }
+        let removed: Vec<u8> = pending.remove(1).iter().map(|m| m.payload[0]).collect();
+        assert_eq!(removed, [0, 1, 2]);
+        assert_eq!(pending.turns, [2]);
+        assert!(pending.remove(1).is_empty());
+        let mut drained: Vec<u8> = pending.drain().map(|m| m.payload[0]).collect();
+        drained.sort();
+        assert_eq!(drained, [10, 11, 12]);
+        assert!(pending.turns.is_empty() && pending.queues.is_empty());
+    }
+
+    /// A queue in overload that has emptied is in overload for no writer: the next message is
+    /// queued, and the one after it refused.
+    #[test]
+    fn an_empty_queue_is_in_overload_for_no_writer() {
+        let writer = writer(DriverConfig::default());
+        writer.shared.overloaded.store(true, Ordering::Release);
+        assert!(!writer.overload().overloaded);
+        writer.try_send(vec![1], SendOptions::new()).unwrap();
+        assert!(writer.overload().overloaded);
+        let refused = writer.try_send(vec![2, 3], SendOptions::new());
+        assert!(matches!(refused, Err(SendError::Overloaded)), "{refused:?}");
+        let overload = writer.overload();
+        assert_eq!((overload.refused, overload.refused_octets), (1, 2));
+    }
+
+    /// A message takes its octets of the room of the queue: at most all of it, and one at
+    /// least.
+    #[test]
+    fn a_message_takes_its_octets_of_the_room() {
+        let config = DriverConfig {
+            max_queued: 100,
+            ..Default::default()
+        };
+        let writer = writer(config);
+        writer.try_send(vec![0; 80], SendOptions::new()).unwrap();
+        assert_eq!(writer.overload().queued_octets, 80);
+        let full = writer.try_send(vec![0; 80], SendOptions::new());
+        assert!(matches!(full, Err(SendError::Full)), "{full:?}");
+        writer.try_send(vec![0; 20], SendOptions::new()).unwrap();
+        assert_eq!(writer.overload().queued_octets, 100);
+
+        let writer = self::writer(config);
+        writer.try_send(vec![0; 500], SendOptions::new()).unwrap();
+        assert_eq!(writer.overload().queued_octets, 100);
+    }
+
+    /// A writer that has stopped says so before anything else, also of an empty message.
+    #[test]
+    fn a_stopped_writer_says_so_first() {
+        let writer = writer(DriverConfig::default());
+        *writer.shared.closed.lock().unwrap() =
+            Some((std::io::ErrorKind::ConnectionReset, "reset".into()));
+        match writer.try_send(Vec::new(), SendOptions::new()) {
+            Err(SendError::Closed(error)) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+                assert_eq!(error.to_string(), "reset");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A writer prints the state of its queue.
+    #[test]
+    fn a_writer_prints_its_overload() {
+        let printed = format!("{:?}", writer(DriverConfig::default()));
+        assert!(
+            printed.starts_with("Writer { overload: Overload { overloaded: false"),
+            "{printed}"
+        );
+    }
+
+    /// A send error says why, and one of a writer that stopped has the error of the socket as
+    /// its source.
+    #[test]
+    fn a_send_error_says_why() {
+        use std::error::Error;
+        assert_eq!(
+            SendError::Overloaded.to_string(),
+            "the queue of the writer is in overload"
+        );
+        assert_eq!(
+            SendError::Full.to_string(),
+            "the queue of the writer is full"
+        );
+        assert_eq!(
+            SendError::Empty.to_string(),
+            "a message has one octet at least"
+        );
+        let closed = SendError::Closed(std::io::Error::from_raw_os_error(libc::ECONNRESET));
+        let reset = std::io::Error::from_raw_os_error(libc::ECONNRESET);
+        assert_eq!(
+            closed.to_string(),
+            format!("the writer has stopped: {reset}")
+        );
+        let source = closed.source().expect("the error of the socket");
+        let source = source.downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(source.raw_os_error(), Some(libc::ECONNRESET));
+        assert!(SendError::Full.source().is_none());
+    }
+}
