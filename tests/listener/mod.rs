@@ -12,16 +12,11 @@ async fn listening_one_2_one_listen_accept_success() {
 
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
 
-    let assoc_id = client_socket.connectx(&[bindaddr]).await;
-    assert!(assoc_id.is_ok(), "{:#?}", assoc_id.err().unwrap());
+    let _client = client_socket.connectx(&[bindaddr]).await.unwrap();
 
-    let accept = listener.accept().await;
-    assert!(accept.is_ok(), "{:#?}", accept.err().unwrap());
+    let (accepted, _address) = listener.accept().await.unwrap();
 
-    // Get Peer Address
-    let (accepted, _address) = accept.unwrap();
-    let result = accepted.peer_addrs();
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+    accepted.peer_addrs().unwrap();
 }
 
 // Tests for `shutdown` API for Listening Socket.
@@ -33,8 +28,7 @@ async fn listening_sctp_bindx_add_success() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
 
     let bindx_bindaddr: SocketAddr = format!("127.0.0.53:{}", bindaddr.port()).parse().unwrap();
-    let result = listener.bindx(&[bindx_bindaddr], BindxFlags::Add);
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+    listener.bindx(&[bindx_bindaddr], BindxFlags::Add).unwrap();
 }
 
 // Tests for `sctp_peeloff` API for Listening Socket.
@@ -50,20 +44,16 @@ async fn listening_socket_no_connect_peeloff_failure() {
 async fn listening_socket_one2many_connected_peeloff_success() {
     let (listener, bindaddr) = create_endpoint_bind_and_listen(true);
 
-    let result = listener
+    listener
         .options()
-        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Future);
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Future)
+        .unwrap();
 
     let client_socket = create_client_socket(SocketToAssociation::OneToMany, true);
 
-    let assoc_id = connect_endpoint(client_socket, &[bindaddr]).await;
-    assert!(assoc_id.is_ok(), "{:#?}", assoc_id.err().unwrap());
+    let _client = connect_endpoint(client_socket, &[bindaddr]).await.unwrap();
 
-    let result = listener.recv().await;
-    assert!(result.is_ok(), "{:#}", result.err().unwrap());
-
-    let notification = result.unwrap();
+    let notification = listener.recv().await.unwrap();
     assert!(
         matches!(
             notification,
@@ -80,8 +70,7 @@ async fn listening_socket_one2many_connected_peeloff_success() {
         ..
     })) = notification
     {
-        let received = listener.peeloff(assoc_id);
-        assert!(received.is_ok(), "{:#?}", received.err().unwrap());
+        let _peeled = listener.peeloff(assoc_id).unwrap();
         assert!(state == AssocChangeState::CommUp, "{state:#?}");
     } else {
         panic!("Should never come here!: {notification:#?}");

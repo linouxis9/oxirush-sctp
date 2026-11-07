@@ -16,33 +16,22 @@ async fn connected_default_sendinfo_success() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
 
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let result = client_socket.options().request_rcvinfo(true);
-    assert!(result.is_ok(), "{:?}", result.err().unwrap());
+    client_socket.options().request_rcvinfo(true).unwrap();
 
-    let result = client_socket.connectx(&[bindaddr]).await;
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
-    let (connected, assoc_id) = result.unwrap();
+    let (connected, assoc_id) = client_socket.connectx(&[bindaddr]).await.unwrap();
 
-    let accept = listener.accept().await;
-    assert!(accept.is_ok(), "{:#?}", accept.err().unwrap());
-
-    // Get Peer Address
-    let (accepted, _client_addr) = accept.unwrap();
+    let (accepted, _client_addr) = listener.accept().await.unwrap();
 
     let sid = 5;
     let ppid = 0x1234;
     let sendinfo = SendInfo::from(SendOptions::new().stream(sid).ppid(ppid));
 
-    let result = accepted.options().set_default_sendinfo(sendinfo);
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+    accepted.options().set_default_sendinfo(sendinfo).unwrap();
 
     let senddata = SendData::new(b"hello world!".to_vec());
-    let result = accepted.send_data(senddata.clone()).await;
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+    accepted.send_data(senddata.clone()).await.unwrap();
 
-    let result = connected.recv().await;
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
-    let data = result.unwrap();
+    let data = connected.recv().await.unwrap();
     assert!(
         matches!(data, Some(NotificationOrData::Data(ReceivedData { .. }))),
         "{data:#?}"
@@ -87,30 +76,20 @@ async fn connected_send_some_sendinfo_success() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
 
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let result = client_socket.options().request_rcvinfo(true);
-    assert!(result.is_ok(), "{:?}", result.err().unwrap());
+    client_socket.options().request_rcvinfo(true).unwrap();
 
-    let result = client_socket.connectx(&[bindaddr]).await;
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
-    let (connected, assoc_id) = result.unwrap();
+    let (connected, assoc_id) = client_socket.connectx(&[bindaddr]).await.unwrap();
 
-    let accept = listener.accept().await;
-    assert!(accept.is_ok(), "{:#?}", accept.err().unwrap());
-
-    // Get Peer Address
-    let (accepted, _client_addr) = accept.unwrap();
+    let (accepted, _client_addr) = listener.accept().await.unwrap();
 
     let sid = 5;
     let ppid = 0x1234;
     let snd_info = SendInfo::from(SendOptions::new().stream(sid).ppid(ppid).unordered(true));
 
     let senddata = SendData::new(b"hello world!".to_vec()).with_info(snd_info);
-    let result = accepted.send_data(senddata).await;
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+    accepted.send_data(senddata).await.unwrap();
 
-    let result = connected.recv().await;
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
-    let data = result.unwrap();
+    let data = connected.recv().await.unwrap();
     assert!(
         matches!(data, Some(NotificationOrData::Data(ReceivedData { .. }))),
         "{data:#?}"
@@ -154,27 +133,20 @@ async fn test_shutdown_event() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
 
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let result = client_socket.options().request_rcvinfo(true);
-    assert!(result.is_ok(), "{:?}", result.err().unwrap());
+    client_socket.options().request_rcvinfo(true).unwrap();
 
-    let result = client_socket.connectx(&[bindaddr]).await;
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
-    let (connected, client_assoc_id) = result.unwrap();
-    let result = connected
+    let (connected, client_assoc_id) = client_socket.connectx(&[bindaddr]).await.unwrap();
+    connected
         .options()
-        .subscribe_events(&[Event::Shutdown], SubscribeEventAssocId::All);
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+        .subscribe_events(&[Event::Shutdown], SubscribeEventAssocId::All)
+        .unwrap();
 
-    let accept = listener.accept().await;
-    assert!(accept.is_ok(), "{:#?}", accept.err().unwrap());
-    let (accepted, _) = accept.unwrap();
+    let (accepted, _) = listener.accept().await.unwrap();
 
     // drop the connected socket, so that should generate shutdown event.
     drop(accepted);
 
-    let result = connected.recv().await;
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
-    let data = result.unwrap();
+    let data = connected.recv().await.unwrap();
     assert!(
         matches!(
             data,
@@ -238,20 +210,13 @@ async fn test_get_status() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
 
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let result = client_socket.options().request_rcvinfo(true);
-    assert!(result.is_ok(), "{:?}", result.err().unwrap());
+    client_socket.options().request_rcvinfo(true).unwrap();
 
-    let result = client_socket.connectx(&[bindaddr]).await;
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
-    let (connected, client_assoc_id) = result.unwrap();
+    let (connected, client_assoc_id) = client_socket.connectx(&[bindaddr]).await.unwrap();
 
-    let accept = listener.accept().await;
-    assert!(accept.is_ok(), "{:#?}", accept.err().unwrap());
-    let (accepted, client_addr) = accept.unwrap();
+    let (accepted, client_addr) = listener.accept().await.unwrap();
 
-    let result = connected.status();
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
-    let status = result.unwrap();
+    let status = connected.status().unwrap();
     assert_eq!(status.state, ConnState::Established);
     assert_eq!(
         status.assoc_id, client_assoc_id,
@@ -259,9 +224,7 @@ async fn test_get_status() {
         client_assoc_id, status.assoc_id
     );
 
-    let result = accepted.status();
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
-    let status = result.unwrap();
+    let status = accepted.status().unwrap();
     assert!(matches!(status.state, ConnState::Established));
     let peer: PeerAddress = status.peer_primary;
     assert_eq!(

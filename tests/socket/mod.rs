@@ -9,40 +9,30 @@ use oxirush_sctp::*;
 async fn socket_connect_basic_send_recv_req_info_on_and_off() {
     let client_socket = create_client_socket(SocketToAssociation::OneToMany, true);
 
-    let result = client_socket
+    client_socket
         .options()
-        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Current);
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Current)
+        .unwrap();
 
     // Request Receive Info on client socket
-    let result = client_socket.options().request_rcvinfo(true);
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+    client_socket.options().request_rcvinfo(true).unwrap();
 
     let (listener, bindaddr) = create_endpoint_bind_and_listen(true);
 
-    let sock_and_assoc_id = connect_endpoint(client_socket, &[bindaddr]).await;
-    assert!(
-        sock_and_assoc_id.is_ok(),
-        "{:#?}",
-        sock_and_assoc_id.err().unwrap()
-    );
-    let (connected, assoc_id) = sock_and_assoc_id.unwrap();
+    let (connected, assoc_id) = connect_endpoint(client_socket, &[bindaddr]).await.unwrap();
     eprintln!("assoc_id: {assoc_id}");
 
-    let laddrs = connected.local_addrs(assoc_id);
-    assert!(laddrs.is_ok(), "{:#?}", laddrs.err().unwrap());
+    let laddrs = connected.local_addrs(assoc_id).unwrap();
 
-    let client_addr = laddrs.unwrap()[0];
+    let client_addr = laddrs[0];
 
     let senddata = SendData::new(b"hello world!".to_vec());
-    let result = listener
+    listener
         .send_data(Some(client_addr), senddata.clone())
-        .await;
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+        .await
+        .unwrap();
 
-    let result = connected.recv().await;
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
-    let data = result.unwrap();
+    let data = connected.recv().await.unwrap();
     assert!(
         matches!(data, NotificationOrData::Data(ReceivedData { .. })),
         "{data:#?}"
@@ -72,16 +62,15 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
     };
 
     // Now turn off Request Receive Info on client socket
-    let result = connected.options().request_rcvinfo(false);
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+    connected.options().request_rcvinfo(false).unwrap();
 
     // Again send the data to client
-    let result = listener.send_data(Some(client_addr), senddata).await;
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+    listener
+        .send_data(Some(client_addr), senddata)
+        .await
+        .unwrap();
 
-    let result = connected.recv().await;
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
-    let data = result.unwrap();
+    let data = connected.recv().await.unwrap();
     assert!(
         matches!(data, NotificationOrData::Data(ReceivedData { .. })),
         "{data:#?}"
@@ -108,47 +97,37 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
 #[tokio::test]
 async fn socket_send_recv_nxtinfo_test() {
     let client_socket = create_client_socket(SocketToAssociation::OneToMany, true);
-    let result = client_socket
+    client_socket
         .options()
-        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Current);
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Current)
+        .unwrap();
 
     // Request Receive Info on client socket
-    let result = client_socket.options().request_nxtinfo(true);
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+    client_socket.options().request_nxtinfo(true).unwrap();
 
     let (listener, bindaddr) = create_endpoint_bind_and_listen(true);
 
-    let sock_and_assoc_id = connect_endpoint(client_socket, &[bindaddr]).await;
-    assert!(
-        sock_and_assoc_id.is_ok(),
-        "{:#?}",
-        sock_and_assoc_id.err().unwrap()
-    );
-    let (connected, assoc_id) = sock_and_assoc_id.unwrap();
+    let (connected, assoc_id) = connect_endpoint(client_socket, &[bindaddr]).await.unwrap();
     connected.options().request_rcvinfo(false).unwrap();
 
-    let laddrs = connected.local_addrs(assoc_id);
-    assert!(laddrs.is_ok(), "{:#?}", laddrs.err().unwrap());
+    let laddrs = connected.local_addrs(assoc_id).unwrap();
 
-    let client_addr = laddrs.unwrap()[0];
+    let client_addr = laddrs[0];
 
     let senddata = SendData::new(b"hello world!".to_vec());
-    let result = listener
+    listener
         .send_data(Some(client_addr), senddata.clone())
-        .await;
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+        .await
+        .unwrap();
 
     // Send again
-    let result = listener
+    listener
         .send_data(Some(client_addr), senddata.clone())
-        .await;
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+        .await
+        .unwrap();
 
     // First Receive nxtinfo should not be none.
-    let result = connected.recv().await;
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
-    let data = result.unwrap();
+    let data = connected.recv().await.unwrap();
     assert!(
         matches!(data, NotificationOrData::Data(ReceivedData { .. })),
         "{data:#?}"
@@ -172,9 +151,7 @@ async fn socket_send_recv_nxtinfo_test() {
     };
 
     // First Receive nxtinfo should not be none.
-    let result = connected.recv().await;
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
-    let data = result.unwrap();
+    let data = connected.recv().await.unwrap();
     assert!(
         matches!(data, NotificationOrData::Data(ReceivedData { .. })),
         "{data:#?}"
@@ -202,26 +179,22 @@ async fn socket_send_recv_nxtinfo_test() {
 async fn socket_init_params_set_ostreams_success() {
     let (listener, bindaddr) = create_endpoint_bind_and_listen(true);
 
-    let result = listener
+    listener
         .options()
-        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Future);
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Future)
+        .unwrap();
 
     let client_ostreams = 100;
     let client_istreams = 5;
     let client_socket = create_client_socket(SocketToAssociation::OneToMany, true);
-    let result = client_socket
+    client_socket
         .options()
-        .set_init_params(InitParams::streams(client_ostreams, client_istreams));
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+        .set_init_params(InitParams::streams(client_ostreams, client_istreams))
+        .unwrap();
 
-    let assoc_id = connect_endpoint(client_socket, &[bindaddr]).await;
-    assert!(assoc_id.is_ok(), "{:#?}", assoc_id.err().unwrap());
+    let _client = connect_endpoint(client_socket, &[bindaddr]).await.unwrap();
 
-    let result = listener.recv().await;
-    assert!(result.is_ok(), "{:#}", result.err().unwrap());
-
-    let notification = result.unwrap();
+    let notification = listener.recv().await.unwrap();
     assert!(
         matches!(
             notification,
@@ -254,12 +227,10 @@ async fn socket_init_params_set_ostreams_success() {
 #[tokio::test]
 async fn socket_sctp_req_recv_info_success() {
     let one2one_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let result = one2one_socket.options().request_rcvinfo(true);
-    assert!(result.is_ok(), "{:?}", result.err().unwrap());
+    one2one_socket.options().request_rcvinfo(true).unwrap();
 
     let one2many_socket = create_client_socket(SocketToAssociation::OneToMany, true);
-    let result = one2many_socket.options().request_rcvinfo(true);
-    assert!(result.is_ok(), "{:?}", result.err().unwrap());
+    one2many_socket.options().request_rcvinfo(true).unwrap();
 }
 
 #[tokio::test]
@@ -267,8 +238,9 @@ async fn test_bind_success() {
     let sctp_socket = create_client_socket(SocketToAssociation::OneToOne, true);
     let bindaddr = Ipv4Addr::UNSPECIFIED;
 
-    let result = sctp_socket.bind(SocketAddr::new(IpAddr::V4(bindaddr), 0));
-    assert!(result.is_ok(), "{:?}", result.err().unwrap());
+    sctp_socket
+        .bind(SocketAddr::new(IpAddr::V4(bindaddr), 0))
+        .unwrap();
 }
 
 #[tokio::test]
@@ -276,8 +248,9 @@ async fn test_bindx_inaddr_any_add_success() {
     let sctp_socket = create_client_socket(SocketToAssociation::OneToOne, true);
     let bindaddr = Ipv4Addr::UNSPECIFIED;
 
-    let result = sctp_socket.bindx(&[SocketAddr::new(IpAddr::V4(bindaddr), 0)], BindxFlags::Add);
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+    sctp_socket
+        .bindx(&[SocketAddr::new(IpAddr::V4(bindaddr), 0)], BindxFlags::Add)
+        .unwrap();
 }
 
 #[tokio::test]
@@ -285,8 +258,9 @@ async fn test_bindx_inaddr6_any_add_success() {
     let sctp_socket = create_client_socket(SocketToAssociation::OneToOne, false);
     let bindaddr = Ipv6Addr::UNSPECIFIED;
 
-    let result = sctp_socket.bindx(&[SocketAddr::new(IpAddr::V6(bindaddr), 0)], BindxFlags::Add);
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+    sctp_socket
+        .bindx(&[SocketAddr::new(IpAddr::V6(bindaddr), 0)], BindxFlags::Add)
+        .unwrap();
 }
 
 #[tokio::test]
@@ -294,11 +268,12 @@ async fn test_bindx_inaddr_any_add_and_remove_failure() {
     let sctp_socket = create_client_socket(SocketToAssociation::OneToOne, false);
     let bindaddr6_localhost = Ipv6Addr::LOCALHOST;
 
-    let result = sctp_socket.bindx(
-        &[SocketAddr::new(IpAddr::V6(bindaddr6_localhost), 0)],
-        BindxFlags::Add,
-    );
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+    sctp_socket
+        .bindx(
+            &[SocketAddr::new(IpAddr::V6(bindaddr6_localhost), 0)],
+            BindxFlags::Add,
+        )
+        .unwrap();
 
     let mut address: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of_val(&address) as libc::socklen_t;

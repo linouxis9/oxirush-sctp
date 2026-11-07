@@ -13,32 +13,26 @@ fn create_socket_bind_and_listen(
         Socket::new_v4(association)
     } else {
         Socket::new_v6(association)
-    };
-    assert!(sctp_socket.is_ok(), "{:#?}", sctp_socket.err().unwrap());
-    let sctp_socket = sctp_socket.unwrap();
+    }
+    .unwrap();
 
     let mut bindaddr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
-    let result = sctp_socket.bind(bindaddr);
-    assert!(result.is_ok(), "{:#?}", result.err().unwrap());
+    sctp_socket.bind(bindaddr).unwrap();
 
-    let listener = sctp_socket.listen(10);
-    assert!(listener.is_ok(), "{:#?}", listener.err().unwrap());
+    let listener = sctp_socket.listen(10).unwrap();
 
-    let listener = listener.unwrap();
     bindaddr.set_port(listener.local_addrs().unwrap()[0].port());
     (listener, bindaddr)
 }
 
 fn create_client_socket(association: SocketToAssociation, v4: bool) -> Socket {
-    let client_socket = if v4 {
+    if v4 {
         Socket::new_v4(association)
     } else {
         Socket::new_v6(association)
-    };
-    assert!(client_socket.is_ok(), "{:#?}", client_socket.err().unwrap());
-
-    client_socket.unwrap()
+    }
+    .unwrap()
 }
 
 fn create_endpoint_bind_and_listen(v4: bool) -> (OneToManyEndpoint, SocketAddr) {
