@@ -781,13 +781,11 @@ impl SocketCore {
         }
     }
 
+    // Linux says that a shutdown for writing is complete in an association change alone,
+    // which a one-to-one socket has subscribed from its beginning.
     pub(crate) fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
         if how != std::net::Shutdown::Write {
             self.read_shutdown.store(true, Ordering::Release);
-        }
-        // Linux says that a shutdown for writing is complete in an association change alone
-        if how != std::net::Shutdown::Read && self.style == SocketToAssociation::OneToOne {
-            self.hear_of_the_end()?;
         }
         sys::shutdown_internal(self.as_fd(), how)
     }

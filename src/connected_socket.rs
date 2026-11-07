@@ -87,7 +87,7 @@ impl ConnectedSocket {
     ///
     /// After `Shutdown::Write`, [`recv`][Self::recv] returns what the peer had still sent, then
     /// the empty message that ends an association, once the peer has answered the shutdown.
-    /// Linux says so in an association change notification alone, which this call subscribes
+    /// Linux says so in an association change notification alone, which the crate subscribes
     /// to for `recv`. `recv` passes these notifications on only if
     /// [`Event::Association`][crate::Event::Association] is subscribed through
     /// [`options`][Self::options].
@@ -346,11 +346,9 @@ impl ConnectedSocket {
     /// # }
     /// ```
     pub async fn close(self, deadline: std::time::Duration) -> std::io::Result<Vec<ReceivedData>> {
-        match self.core.shutdown(std::net::Shutdown::Write) {
-            // An association that has ended already: `recv` says how
-            Err(error) if error.raw_os_error() == Some(libc::ENOTCONN) => {}
-            other => other?,
-        }
+        // A socket of one association keeps its state after the association ends: the
+        // shutdown succeeds, and `recv` says how it ended
+        self.core.shutdown(std::net::Shutdown::Write)?;
         let mut unread = Vec::new();
         let ended = tokio::time::timeout(deadline, async {
             loop {

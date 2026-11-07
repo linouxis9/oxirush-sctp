@@ -153,12 +153,9 @@ impl OneToManyEndpoint {
         out: &mut Vec<NotificationOrData>,
         limit: usize,
     ) -> std::io::Result<usize> {
-        match self.core.recv_many(out, limit).await {
-            // A one-to-many socket has no end of stream: its associations end in
-            // notifications
-            Ok(0) if limit > 0 => Err(shut_down()),
-            other => other,
-        }
+        // A one-to-many socket has no end of stream, which is 0 for a connected socket: its
+        // associations end in notifications
+        self.core.recv_many(out, limit).await
     }
 
     /// Shut one association down: what was sent is delivered first, and the peer then learns
