@@ -159,7 +159,6 @@ to, in place of data.
 ```rust
 use oxirush_sctp::{
     Event, Notification, NotificationOrData, SendOptions, Socket, SocketToAssociation,
-    SubscribeEventAssocId,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -167,10 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Subscribe before listening: the accepted associations inherit it
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
     socket.bind("127.0.0.1:0".parse()?)?;
-    socket.options().subscribe_events(
-        &[Event::Association, Event::Shutdown],
-        SubscribeEventAssocId::All,
-    )?;
+    socket.options().subscribe_events(&[Event::Association, Event::Shutdown])?;
     let listener = socket.listen(5)?;
 
     // A peer that sends one message and closes its socket

@@ -48,12 +48,12 @@ pub enum SocketToAssociation {
 /// # #[tokio::main(flavor = "current_thread")]
 /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// use oxirush_sctp::{Event, Notification, NotificationOrData, SendOptions, Socket};
-/// use oxirush_sctp::{SocketToAssociation, SubscribeEventAssocId};
+/// use oxirush_sctp::{SocketToAssociation};
 ///
 /// // A socket that subscribes to the changes of its associations
 /// let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
 /// socket.bind("127.0.0.1:0".parse()?)?;
-/// socket.options().subscribe_events(&[Event::Association], SubscribeEventAssocId::All)?;
+/// socket.options().subscribe_events(&[Event::Association])?;
 /// let listener = socket.listen(5)?;
 ///
 /// let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
@@ -203,41 +203,6 @@ impl SendOptions {
     pub const fn context(mut self, context: u32) -> Self {
         self.context = context;
         self
-    }
-}
-
-/// Failures from a batch event subscription or unsubscription.
-///
-/// Every requested event is attempted. The returned [`std::io::Error`] has kind `Other` and
-/// contains this value; use `error.get_ref().and_then(|source| source.downcast_ref::<Self>())`
-/// to inspect each event and its original kernel error. Its error source is the first failure.
-#[derive(Debug)]
-pub struct EventSubscriptionError {
-    pub(crate) failures: Vec<(Event, std::io::Error)>,
-}
-
-impl EventSubscriptionError {
-    /// Failed events, in request order, with their original errors and errno values.
-    pub fn failures(&self) -> &[(Event, std::io::Error)] {
-        &self.failures
-    }
-}
-
-impl std::fmt::Display for EventSubscriptionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for (index, (event, error)) in self.failures.iter().enumerate() {
-            if index != 0 {
-                f.write_str("; ")?;
-            }
-            write!(f, "{event:?}: {error}")?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for EventSubscriptionError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.failures.first().map(|(_, error)| error as _)
     }
 }
 
@@ -438,12 +403,12 @@ pub struct SackInfo {
 /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
 /// # let listener = socket.listen(5)?;
 /// use oxirush_sctp::{AssocChangeState, Event, Notification, NotificationOrData};
-/// use oxirush_sctp::{Socket, SocketToAssociation, SubscribeEventAssocId};
+/// use oxirush_sctp::{Socket, SocketToAssociation};
 ///
 /// // A client that subscribes to the changes of its association before connecting
 /// let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
 /// let events = [Event::Association];
-/// client.options().subscribe_events(&events, SubscribeEventAssocId::All)?;
+/// client.options().subscribe_events(&events)?;
 /// let client = client.connect(listener.local_addr()?).await?;
 ///
 /// // The first that it receives: the association is up, with its streams
@@ -467,7 +432,7 @@ pub enum Notification {
     /// Peer path status changed. Subscribe to [`Event::Address`].
     PeerAddressChange(PeerAddressChange),
 
-    /// A message could not be delivered. Subscribe to [`Event::SendFailureEvent`].
+    /// A message could not be delivered. Subscribe to [`Event::SendFailure`].
     SendFailure(SendFailure),
 
     /// The peer sent an ERROR chunk. Subscribe to [`Event::PeerError`].
@@ -484,8 +449,8 @@ pub enum Notification {
         assoc_id: AssociationId,
     },
 
-    /// A notification this crate does not parse, such as the deprecated send-failure format
-    /// (Section 6.1 of RFC 6458), or one malformed for its type.
+    /// A notification this crate does not parse: of an event that [`Event`] does not have,
+    /// which a descriptor configured elsewhere may receive, or malformed for its type.
     Unsupported {
         /// Type of the notification as the kernel numbers it (`sn_type`), 0 for a
         /// notification too short to have one.
@@ -727,86 +692,33 @@ pub struct Shutdown {
     pub assoc_id: AssociationId,
 }
 
-/// Event: Used for Subscribing for SCTP Events
-///
-/// See [`subscribe_events`][`crate::SocketOptions::subscribe_events`] for the usage.
+/// An event whose notifications `recv` returns once it is subscribed, with
+/// [`subscribe_events`][`crate::SocketOptions::subscribe_events`]. Its value is the type of
+/// the notification (`enum sctp_sn_type`).
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Event {
-    /// The deprecated `SCTP_SNDRCV` ancillary data, which this crate does not parse.
-    DataIo = (1 << 15),
+    /// A change of an association: [`Notification::AssociationChange`].
+    Association = 0x8001,
 
-    /// Event related to association change.
-    Association,
-
-    /// Event related to peer address change.
-    Address,
-
-    /// The deprecated send failure notification, delivered as [`Notification::Unsupported`]:
-    /// subscribe to [`Event::SendFailureEvent`] instead.
-    SendFailure,
+    /// A change of a path to the peer: [`Notification::PeerAddressChange`].
+    Address = 0x8002,
 
     /// An ERROR chunk of the peer: [`Notification::RemoteError`].
-    PeerError,
+    PeerError = 0x8004,
 
-    /// Event related to indicate peer shutdown.
-    Shutdown,
+    /// The peer shuts the association down: [`Notification::Shutdown`].
+    Shutdown = 0x8005,
 
     /// A message whose delivery in parts was given up: [`Notification::PartialDelivery`].
-    PartialDelivery,
-
-    /// Event related to indicate peer's partial indication.
-    AdaptationLayer,
-
-    /// Authentication event.
-    Authentication,
+    PartialDelivery = 0x8006,
 
     /// Nothing left to send or to retransmit: [`Notification::SenderDry`].
-    SenderDry,
-
-    /// Event related to stream reset.
-    StreamReset,
-
-    /// Event related to association reset.
-    AssociationReset,
-
-    /// Event related to stream change.
-    StreamChange,
+    SenderDry = 0x8009,
 
     /// A message could not be delivered: [`Notification::SendFailure`].
-    SendFailureEvent,
-}
-
-/// SubscribeEventAssocId: AssociationID Used for Event Subscription
-///
-/// A one-to-one socket ignores it: a subscription made before `listen` or `connect` applies to
-/// the associations accepted or established afterwards.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum SubscribeEventAssocId {
-    /// Subscribe to Future Association IDs
-    Future,
-
-    /// Subscribe to Current Association IDs
-    Current,
-
-    /// Subscribe to ALL Association IDs
-    All,
-
-    /// Subscribe to Association ID with a given value.
-    Value(AssociationId),
-}
-
-impl From<SubscribeEventAssocId> for AssociationId {
-    fn from(value: SubscribeEventAssocId) -> Self {
-        match value {
-            SubscribeEventAssocId::Future => 0 as Self,
-            SubscribeEventAssocId::Current => 1 as Self,
-            SubscribeEventAssocId::All => 2 as Self,
-            SubscribeEventAssocId::Value(v) => v,
-        }
-    }
+    SendFailure = 0x800d,
 }
 
 /// Association Change States

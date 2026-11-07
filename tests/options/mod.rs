@@ -130,7 +130,7 @@ async fn accepted_and_peeled_off_sockets_inherit_nodelay() {
     listener.options().set_nodelay(true).unwrap();
     listener
         .options()
-        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Future)
+        .subscribe_events(&[Event::Association])
         .unwrap();
     let client = create_client_socket(SocketToAssociation::OneToMany, true);
     let _connected = connect_endpoint(client, &[bindaddr]).await.unwrap();
@@ -221,7 +221,7 @@ async fn descriptors_are_close_on_exec() {
     let (listener, bindaddr) = create_endpoint_bind_and_listen(true);
     listener
         .options()
-        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Future)
+        .subscribe_events(&[Event::Association])
         .unwrap();
     let client = create_client_socket(SocketToAssociation::OneToMany, true);
     let _connected = connect_endpoint(client, &[bindaddr]).await.unwrap();

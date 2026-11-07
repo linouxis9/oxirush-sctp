@@ -79,7 +79,7 @@ async fn the_primary_path_is_one_of_the_addresses_of_the_peer() {
 async fn an_abort_ends_the_association_for_the_peer_at_once() {
     let (client, peer) = pair().await;
     peer.options()
-        .subscribe_events(&[Event::Association], SubscribeEventAssocId::All)
+        .subscribe_events(&[Event::Association])
         .unwrap();
     client.abort(b"going away").unwrap();
     let received = tokio::time::timeout(Duration::from_secs(2), peer.recv())
@@ -107,7 +107,7 @@ async fn an_abort_of_an_endpoint_carries_its_reason() {
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     client
         .options()
-        .subscribe_events(&[Event::Association], SubscribeEventAssocId::All)
+        .subscribe_events(&[Event::Association])
         .unwrap();
     let client = client
         .connect(endpoint.local_addr().unwrap())
@@ -141,7 +141,7 @@ async fn a_sender_with_nothing_left_to_send_is_a_typed_notification() {
     let (client, peer) = pair().await;
     client
         .options()
-        .subscribe_events(&[Event::SenderDry], SubscribeEventAssocId::All)
+        .subscribe_events(&[Event::SenderDry])
         .unwrap();
     client.send(b"data", SendOptions::new()).await.unwrap();
     let dry = tokio::time::timeout(Duration::from_secs(2), async {
@@ -289,40 +289,6 @@ async fn the_highest_dscp_is_taken() {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     socket.options().set_dscp(63).unwrap();
     assert_eq!(socket.options().dscp().unwrap(), 63);
-}
-
-/// A subscription that the kernel refuses for each event says which events and why: on an
-/// endpoint, an association that it does not have.
-#[tokio::test]
-async fn a_refused_subscription_says_each_event_and_why() {
-    let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
-    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let endpoint = socket.into_endpoint(1).unwrap();
-    let events = [Event::Association, Event::Shutdown];
-    let error = endpoint
-        .options()
-        .subscribe_events(&events, SubscribeEventAssocId::Value(12345))
-        .unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::Other);
-    let refused = error
-        .get_ref()
-        .and_then(|source| source.downcast_ref::<EventSubscriptionError>())
-        .unwrap();
-    let failures: Vec<(Event, Option<i32>)> = refused
-        .failures()
-        .iter()
-        .map(|(event, error)| (*event, error.raw_os_error()))
-        .collect();
-    let einval = Some(libc::EINVAL);
-    assert_eq!(failures, [(events[0], einval), (events[1], einval)]);
-    let invalid = std::io::Error::from_raw_os_error(libc::EINVAL);
-    assert_eq!(
-        refused.to_string(),
-        format!("Association: {invalid}; Shutdown: {invalid}")
-    );
-    let source = std::error::Error::source(refused).unwrap();
-    let source = source.downcast_ref::<std::io::Error>().unwrap();
-    assert_eq!(source.raw_os_error(), einval);
 }
 
 /// An endpoint holds 4 MiB of a message and 64 MiB of the messages that it assembles, by

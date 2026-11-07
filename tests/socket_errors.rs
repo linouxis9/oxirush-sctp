@@ -38,7 +38,7 @@ async fn refused_connect_completes_with_association_events() {
         if subscribed {
             client
                 .options()
-                .subscribe_events(&[Event::Association], SubscribeEventAssocId::All)
+                .subscribe_events(&[Event::Association])
                 .unwrap();
         }
         let result = tokio::time::timeout(Duration::from_secs(2), client.connect(address))
@@ -57,7 +57,7 @@ async fn successful_connect_keeps_its_association_notification() {
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     client
         .options()
-        .subscribe_events(&[Event::Association], SubscribeEventAssocId::All)
+        .subscribe_events(&[Event::Association])
         .unwrap();
     let client = tokio::time::timeout(Duration::from_secs(2), client.connect(address))
         .await
@@ -105,10 +105,7 @@ async fn positive_linger_is_rejected_without_changing_close_behavior() {
     let client = client.connect(address).await.unwrap();
     let (peer, _) = listener.accept().await.unwrap();
     peer.options()
-        .subscribe_events(
-            &[Event::Shutdown, Event::Association],
-            SubscribeEventAssocId::All,
-        )
+        .subscribe_events(&[Event::Shutdown, Event::Association])
         .unwrap();
     for duration in [Duration::from_millis(500), Duration::from_secs(2)] {
         assert_eq!(

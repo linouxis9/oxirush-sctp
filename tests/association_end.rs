@@ -163,7 +163,7 @@ async fn an_abort_with_association_events_is_a_notification_then_the_error() {
     for send_first in [false, true] {
         let (client, peer) = pair().await;
         peer.options()
-            .subscribe_events(&[Event::Association], SubscribeEventAssocId::All)
+            .subscribe_events(&[Event::Association])
             .unwrap();
         client.options().set_linger(Some(Duration::ZERO)).unwrap();
         drop(client);
@@ -202,7 +202,7 @@ async fn a_receive_loop_ends_after_an_abort_that_the_sending_task_saw() {
             let (app, peer) = pair().await;
             if subscribed {
                 app.options()
-                    .subscribe_events(&[Event::Association], SubscribeEventAssocId::All)
+                    .subscribe_events(&[Event::Association])
                     .unwrap();
             }
             let app = Arc::new(app);
@@ -298,7 +298,7 @@ async fn a_write_shutdown_with_association_events_ends_after_its_notification() 
     let (client, _peer) = pair().await;
     client
         .options()
-        .subscribe_events(&[Event::Association], SubscribeEventAssocId::All)
+        .subscribe_events(&[Event::Association])
         .unwrap();
     client.shutdown(Shutdown::Write).unwrap();
     let received = recv(&client).await;
@@ -315,16 +315,10 @@ async fn a_write_shutdown_with_association_events_ends_after_its_notification() 
 async fn association_events_unsubscribed_after_a_write_shutdown_are_not_passed_on() {
     let (client, _peer) = pair().await;
     let events = [Event::Association];
-    client
-        .options()
-        .subscribe_events(&events, SubscribeEventAssocId::All)
-        .unwrap();
+    client.options().subscribe_events(&events).unwrap();
     // Hold the shutdown back: the peer has to answer it before it completes.
     client.shutdown(Shutdown::Write).unwrap();
-    client
-        .options()
-        .unsubscribe_events(&events, SubscribeEventAssocId::All)
-        .unwrap();
+    client.options().unsubscribe_events(&events).unwrap();
     // Either the notification was already queued when the events were unsubscribed, or
     // `recv` reads it without passing it on: in both cases the end follows.
     let mut received = recv(&client).await;

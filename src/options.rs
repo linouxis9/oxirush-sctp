@@ -2,7 +2,7 @@
 use crate::internal::{SocketCore, sys};
 use crate::{
     AssociationId, AssociationParams, AssociationStats, Event, InitParams, PeerAddress,
-    PeerAddressParams, RtoInfo, SackInfo, SubscribeEventAssocId,
+    PeerAddressParams, RtoInfo, SackInfo,
 };
 use std::net::SocketAddr;
 use std::os::fd::AsFd;
@@ -16,7 +16,7 @@ use std::os::fd::AsFd;
 /// ```
 /// # #[tokio::main(flavor = "current_thread")]
 /// # async fn main() -> std::io::Result<()> {
-/// use oxirush_sctp::{Event, InitParams, Socket, SocketToAssociation, SubscribeEventAssocId};
+/// use oxirush_sctp::{Event, InitParams, Socket, SocketToAssociation};
 ///
 /// let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
 /// let options = socket.options();
@@ -24,7 +24,6 @@ use std::os::fd::AsFd;
 /// options.set_init_params(InitParams::streams(4, 4))?; // four streams each way
 /// options.subscribe_events(
 ///     &[Event::Association, Event::Shutdown],
-///     SubscribeEventAssocId::All,
 /// )?;
 /// assert!(options.nodelay()?);
 /// # Ok(())
@@ -36,37 +35,29 @@ pub struct SocketOptions<'a> {
 }
 
 impl SocketOptions<'_> {
-    /// Subscribe to events. Every event is attempted; errors retain all failed events and errno
-    /// values in [`EventSubscriptionError`][crate::EventSubscriptionError]. Associations
-    /// accepted from a listener inherit its subscriptions.
+    /// Subscribe to events, on every association of the socket and on those to come: the
+    /// associations that a listener accepts inherit its subscriptions. The first event that
+    /// the kernel refuses is the error, which names it.
     ///
     /// ```
     /// # #[tokio::main(flavor = "current_thread")]
     /// # async fn main() -> std::io::Result<()> {
-    /// use oxirush_sctp::{Event, Socket, SocketToAssociation, SubscribeEventAssocId};
+    /// use oxirush_sctp::{Event, Socket, SocketToAssociation};
     ///
     /// // Before listening: the accepted associations inherit it
     /// let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
     /// let events = [Event::Association, Event::Shutdown];
-    /// socket.options().subscribe_events(&events, SubscribeEventAssocId::All)?;
+    /// socket.options().subscribe_events(&events)?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn subscribe_events(
-        &self,
-        events: &[Event],
-        assoc_id: SubscribeEventAssocId,
-    ) -> std::io::Result<()> {
-        self.core.subscribe_events(events, assoc_id, true)
+    pub fn subscribe_events(&self, events: &[Event]) -> std::io::Result<()> {
+        self.core.subscribe_events(events, true)
     }
 
-    /// Unsubscribe from events, with the same attempt-all error behavior as subscription.
-    pub fn unsubscribe_events(
-        &self,
-        events: &[Event],
-        assoc_id: SubscribeEventAssocId,
-    ) -> std::io::Result<()> {
-        self.core.subscribe_events(events, assoc_id, false)
+    /// Unsubscribe from events, as [`subscribe_events`][Self::subscribe_events] subscribes.
+    pub fn unsubscribe_events(&self, events: &[Event]) -> std::io::Result<()> {
+        self.core.subscribe_events(events, false)
     }
 
     /// Set the streams, the attempts and the timeout of the INIT of the associations that

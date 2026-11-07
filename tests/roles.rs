@@ -357,10 +357,7 @@ async fn a_peer_that_aborts_in_the_middle_of_a_message_leaves_the_others_alone()
     };
     endpoint
         .options()
-        .subscribe_events(
-            &[oxirush_sctp::Event::Association],
-            oxirush_sctp::SubscribeEventAssocId::All,
-        )
+        .subscribe_events(&[oxirush_sctp::Event::Association])
         .unwrap();
     let slow = std::sync::Arc::new(slow);
     let sending = tokio::spawn({

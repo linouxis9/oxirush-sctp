@@ -45,7 +45,7 @@ pub(crate) fn notification_from_message(data: &[u8]) -> Notification {
                 assoc_id: i32_at(144),
             })
         }
-        kind if kind == Event::SendFailureEvent as u16 && data.len() >= 32 => {
+        kind if kind == Event::SendFailure as u16 && data.len() >= 32 => {
             Notification::SendFailure(SendFailure {
                 sent: u16_at(2) & 1 != 0,
                 // The cause code of SCTP, which Linux stores in network byte order in a
@@ -195,7 +195,7 @@ mod tests {
     /// machine. The payload protocol identifier is a number as well.
     #[test]
     fn a_send_failure_has_its_cause_and_its_identifier_as_numbers() {
-        let mut bytes = notification(Event::SendFailureEvent, 35);
+        let mut bytes = notification(Event::SendFailure, 35);
         bytes[2..4].copy_from_slice(&1_u16.to_ne_bytes());
         bytes[8..12].copy_from_slice(&u32::from(12_u16.to_be()).to_ne_bytes());
         bytes[12..14].copy_from_slice(&3_u16.to_ne_bytes());
@@ -217,20 +217,21 @@ mod tests {
             })
         );
 
-        // One whose length is not the one it declares, and the deprecated one
+        // One whose length is not the one it declares, and the deprecated one,
+        // `SCTP_SEND_FAILED`
         bytes[4..8].copy_from_slice(&36_u32.to_ne_bytes());
         assert_eq!(
             notification_from_message(&bytes),
             Notification::Unsupported {
-                kind: Event::SendFailureEvent as u16,
+                kind: Event::SendFailure as u16,
                 data: bytes.clone()
             }
         );
-        bytes[..2].copy_from_slice(&(Event::SendFailure as u16).to_ne_bytes());
+        bytes[..2].copy_from_slice(&0x8003_u16.to_ne_bytes());
         assert_eq!(
             notification_from_message(&bytes),
             Notification::Unsupported {
-                kind: Event::SendFailure as u16,
+                kind: 0x8003,
                 data: bytes.clone()
             }
         );
@@ -362,7 +363,7 @@ mod tests {
                 data: short.clone()
             }
         );
-        let failure = notification(Event::SendFailureEvent, 148);
+        let failure = notification(Event::SendFailure, 148);
         assert!(matches!(
             notification_from_message(&failure),
             Notification::SendFailure(SendFailure { payload, .. }) if payload.len() == 116

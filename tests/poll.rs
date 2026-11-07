@@ -77,7 +77,7 @@ async fn poll_recv_learns_of_an_abort_that_nothing_else_saw() {
         let (app, peer) = pair().await;
         if subscribed {
             app.options()
-                .subscribe_events(&[Event::Association], SubscribeEventAssocId::All)
+                .subscribe_events(&[Event::Association])
                 .unwrap();
         }
         let app = Arc::new(app);
@@ -108,7 +108,7 @@ async fn a_receive_loop_of_polls_ends_after_an_abort_that_the_sending_task_saw()
             let (app, peer) = pair().await;
             if subscribed {
                 app.options()
-                    .subscribe_events(&[Event::Association], SubscribeEventAssocId::All)
+                    .subscribe_events(&[Event::Association])
                     .unwrap();
             }
             let app = Arc::new(app);

@@ -7,7 +7,7 @@
 
 use oxirush_sctp::{
     AssocChangeState, ConnectedSocket, Event, InitParams, Listener, Notification,
-    NotificationOrData, SendOptions, Socket, SocketToAssociation, SubscribeEventAssocId,
+    NotificationOrData, SendOptions, Socket, SocketToAssociation,
 };
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -85,10 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = socket.options();
     options.set_nodelay(true)?; // send small messages at once
     options.set_init_params(InitParams::streams(4, 4))?; // four streams each way
-    options.subscribe_events(
-        &[Event::Association, Event::Shutdown],
-        SubscribeEventAssocId::All,
-    )?;
+    options.subscribe_events(&[Event::Association, Event::Shutdown])?;
     let listener = socket.listen(5)?;
     let address = listener.local_addr()?;
     let (server, peers) = tokio::join!(server(listener), peers(address));

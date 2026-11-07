@@ -46,7 +46,7 @@ async fn listening_socket_one2many_connected_peeloff_success() {
 
     listener
         .options()
-        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Future)
+        .subscribe_events(&[Event::Association])
         .unwrap();
 
     let client_socket = create_client_socket(SocketToAssociation::OneToMany, true);

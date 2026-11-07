@@ -31,7 +31,7 @@ async fn socket_init_params_set_ostreams_success() {
 
     listener
         .options()
-        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Future)
+        .subscribe_events(&[Event::Association])
         .unwrap();
 
     let client_ostreams = 100;

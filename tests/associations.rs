@@ -29,20 +29,13 @@ fn event_enabled(socket: &impl AsRawFd, event: Event) -> bool {
 #[tokio::test]
 async fn every_event_that_is_offered_can_be_subscribed() {
     let events = [
-        Event::DataIo,
         Event::Association,
         Event::Address,
-        Event::SendFailure,
         Event::PeerError,
         Event::Shutdown,
         Event::PartialDelivery,
-        Event::AdaptationLayer,
-        Event::Authentication,
         Event::SenderDry,
-        Event::StreamReset,
-        Event::AssociationReset,
-        Event::StreamChange,
-        Event::SendFailureEvent,
+        Event::SendFailure,
     ];
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     for event in events {
@@ -51,14 +44,11 @@ async fn every_event_that_is_offered_can_be_subscribed() {
         assert_eq!(event_enabled(&socket, event), own, "{event:?}");
         socket
             .options()
-            .subscribe_events(&[event], SubscribeEventAssocId::All)
+            .subscribe_events(&[event])
             .unwrap_or_else(|error| panic!("{event:?}: {error}"));
         assert!(event_enabled(&socket, event), "{event:?}");
     }
-    socket
-        .options()
-        .unsubscribe_events(&events, SubscribeEventAssocId::All)
-        .unwrap();
+    socket.options().unsubscribe_events(&events).unwrap();
     assert!(!event_enabled(&socket, Event::Association));
     assert!(event_enabled(&socket, Event::PartialDelivery));
 }
@@ -239,7 +229,7 @@ async fn confirmed_peer_address_is_a_typed_notification() {
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     client
         .options()
-        .subscribe_events(&[Event::Address], SubscribeEventAssocId::All)
+        .subscribe_events(&[Event::Address])
         .unwrap();
     // Linux probes an unconfirmed address each retransmission timeout, give or take half of
     // it: one of 10 s at first leaves the heartbeat that the test requests alone in its 2 s.
@@ -292,7 +282,7 @@ async fn send_failure_notification_preserves_payload_and_metadata() {
     let client = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     client
         .options()
-        .subscribe_events(&[Event::SendFailureEvent], SubscribeEventAssocId::All)
+        .subscribe_events(&[Event::SendFailure])
         .unwrap();
     let client = client.into_endpoint(1).unwrap();
     client

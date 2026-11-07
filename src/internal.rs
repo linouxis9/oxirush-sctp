@@ -2,7 +2,7 @@
 use crate::types::internal::SndInfoWire;
 use crate::{
     AssocChangeState, AssociationId, ConnState, Event, Notification, NotificationOrData,
-    SendOptions, SocketToAssociation, SubscribeEventAssocId,
+    SendOptions, SocketToAssociation,
 };
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
@@ -104,9 +104,9 @@ fn style_name(style: SocketToAssociation) -> &'static str {
     }
 }
 
-// The bit of `event` among the quiet events.
+// The bit of `event` among the quiet events: the types of the notifications follow 0x8000.
 fn bit(event: Event) -> u32 {
-    1 << (event as u16 - Event::DataIo as u16)
+    1 << (event as u16 - 0x8000)
 }
 
 const RUNNING: i32 = 0;
@@ -154,7 +154,7 @@ impl SocketCore {
     }
 
     fn subscribe_quietly(&self, event: Event) -> std::io::Result<()> {
-        sys::sctp_subscribe_event_internal(self.as_fd(), event, SubscribeEventAssocId::All, true)?;
+        sys::sctp_subscribe_event_internal(self.as_fd(), event, true)?;
         self.quiet_events.fetch_or(bit(event), Ordering::AcqRel);
         Ok(())
     }
@@ -855,14 +855,9 @@ impl SocketCore {
         sys::shutdown_internal(self.as_fd(), how)
     }
 
-    pub(crate) fn subscribe_events(
-        &self,
-        events: &[Event],
-        assoc_id: SubscribeEventAssocId,
-        on: bool,
-    ) -> std::io::Result<()> {
+    pub(crate) fn subscribe_events(&self, events: &[Event], on: bool) -> std::io::Result<()> {
         if on {
-            sys::sctp_subscribe_events_internal(self.as_fd(), events, assoc_id, on)?;
+            sys::sctp_subscribe_events_internal(self.as_fd(), events, on)?;
             for event in events {
                 self.quiet_events.fetch_and(!bit(*event), Ordering::AcqRel);
             }
@@ -883,7 +878,7 @@ impl SocketCore {
         for event in kept {
             self.quiet_events.fetch_or(bit(event), Ordering::AcqRel);
         }
-        sys::sctp_subscribe_events_internal(self.as_fd(), &others, assoc_id, on)
+        sys::sctp_subscribe_events_internal(self.as_fd(), &others, on)
     }
 
     // Sends `payload` with `options`, to `to` or to association `assoc_id`, which a one-to-one
@@ -1087,8 +1082,7 @@ mod tests {
     #[tokio::test]
     async fn a_socket_of_one_association_keeps_its_association_changes() {
         let core = SocketCore::new(libc::AF_INET, SocketToAssociation::OneToOne).unwrap();
-        core.subscribe_events(&[Event::Association], SubscribeEventAssocId::All, false)
-            .unwrap();
+        core.subscribe_events(&[Event::Association], false).unwrap();
         assert!(sys::sctp_event_subscribed_internal(core.as_fd(), Event::Association).unwrap());
         assert!(
             core.quiet(&Notification::AssociationChange(crate::AssociationChange {

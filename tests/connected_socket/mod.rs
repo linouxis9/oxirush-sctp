@@ -33,7 +33,7 @@ async fn test_shutdown_event() {
     let client_assoc_id = connected.status().unwrap().assoc_id;
     connected
         .options()
-        .subscribe_events(&[Event::Shutdown], SubscribeEventAssocId::All)
+        .subscribe_events(&[Event::Shutdown])
         .unwrap();
 
     let (accepted, _) = listener.accept().await.unwrap();
@@ -73,10 +73,7 @@ async fn a_zero_linger_aborts_the_association_on_close() {
     let connected = client_socket.connectx(&[bindaddr]).await.unwrap();
     connected
         .options()
-        .subscribe_events(
-            &[Event::Association, Event::Shutdown],
-            SubscribeEventAssocId::All,
-        )
+        .subscribe_events(&[Event::Association, Event::Shutdown])
         .unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
 
@@ -277,18 +274,6 @@ fn assert_first(received: NotificationOrData) {
         }
         other => panic!("not data: {other:?}"),
     }
-}
-
-#[tokio::test]
-async fn recv_reads_the_receive_information_beside_another_control_message() {
-    let (sending, receiving) = sending_and_receiving().await;
-    // The data I/O event adds an `SCTP_SNDRCV` control message.
-    receiving
-        .options()
-        .subscribe_events(&[Event::DataIo], SubscribeEventAssocId::All)
-        .unwrap();
-    send_two_messages(&sending).await;
-    assert_first(receiving.recv().await.unwrap().unwrap());
 }
 
 #[cfg(target_os = "linux")]

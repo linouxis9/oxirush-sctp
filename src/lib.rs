@@ -310,10 +310,10 @@ mod types;
 #[doc(inline)]
 pub use types::{
     AssocChangeState, AssociationChange, AssociationId, AssociationParams, AssociationStats,
-    BindxFlags, ConnState, ConnStatus, Event, EventSubscriptionError, InitParams, Notification,
-    NotificationOrData, PartialDelivery, PathState, PeerAddress, PeerAddressChange,
-    PeerAddressParams, PeerAddressState, ReceivedData, RemoteError, RtoInfo, SackInfo, SendFailure,
-    SendOptions, Shutdown, SocketToAssociation, SubscribeEventAssocId,
+    BindxFlags, ConnState, ConnStatus, Event, InitParams, Notification, NotificationOrData,
+    PartialDelivery, PathState, PeerAddress, PeerAddressChange, PeerAddressParams,
+    PeerAddressState, ReceivedData, RemoteError, RtoInfo, SackInfo, SendFailure, SendOptions,
+    Shutdown, SocketToAssociation,
 };
 
 /// The blocks of the README, which are compiled, and run unless they say

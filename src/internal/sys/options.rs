@@ -6,8 +6,8 @@ use crate::types::internal::{
     PeerAddressParamsInternal, PrimaryAddressWire, RtoInfoWire, SackInfoWire, SubscribeEvent,
 };
 use crate::{
-    AssociationId, AssociationParams, AssociationStats, ConnStatus, Event, EventSubscriptionError,
-    InitParams, PeerAddress, PeerAddressParams, RtoInfo, SackInfo, SubscribeEventAssocId,
+    AssociationId, AssociationParams, AssociationStats, ConnStatus, Event, InitParams, PeerAddress,
+    PeerAddressParams, RtoInfo, SackInfo,
 };
 use os_socketaddr::OsSocketAddr;
 use std::convert::TryInto;
@@ -19,15 +19,18 @@ pub(crate) fn socket_error(fd: BorrowedFd<'_>) -> std::io::Result<libc::c_int> {
     unsafe { getsockopt_internal(fd, libc::SOL_SOCKET, libc::SO_ERROR, 0) }
 }
 
+// The associations that an event subscription is for: those that a socket has and those to
+// come, `SCTP_ALL_ASSOC`. A one-to-one socket has its association alone.
+const SCTP_ALL_ASSOC: AssociationId = 2;
+
 pub(crate) fn sctp_subscribe_event_internal(
     fd: BorrowedFd<'_>,
     event: Event,
-    assoc_id: SubscribeEventAssocId,
     on: bool,
 ) -> std::io::Result<()> {
     let subscriber = SubscribeEvent {
         event,
-        assoc_id: assoc_id.into(),
+        assoc_id: SCTP_ALL_ASSOC,
         on,
     };
 
@@ -60,7 +63,9 @@ pub(crate) fn sctp_event_subscribed_internal(
         on: u8,
     }
     let query = Query {
-        assoc_id: SubscribeEventAssocId::Future.into(),
+        // `SCTP_FUTURE_ASSOC`: the socket's own, which a one-to-one socket reads from its
+        // association
+        assoc_id: 0,
         event: event as u16,
         on: 0,
     };
@@ -70,23 +75,18 @@ pub(crate) fn sctp_event_subscribed_internal(
     Ok(answer.on != 0)
 }
 
+// Each of `events` subscribed or not, up to the first that the kernel refuses: the error,
+// which names it.
 pub(crate) fn sctp_subscribe_events_internal(
     fd: BorrowedFd<'_>,
     events: &[Event],
-    assoc_id: SubscribeEventAssocId,
     on: bool,
 ) -> std::io::Result<()> {
-    let mut failures = Vec::new();
     for event in events {
-        if let Err(error) = sctp_subscribe_event_internal(fd, *event, assoc_id, on) {
-            failures.push((*event, error));
-        }
+        sctp_subscribe_event_internal(fd, *event, on)
+            .map_err(|error| std::io::Error::new(error.kind(), format!("{event:?}: {error}")))?;
     }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(std::io::Error::other(EventSubscriptionError { failures }))
-    }
+    Ok(())
 }
 
 fn path_params(assoc_id: AssociationId, address: SocketAddr) -> PeerAddressParamsInternal {
@@ -546,4 +546,22 @@ pub(crate) fn sctp_get_status_internal(
         getsockopt_internal(fd, SOL_SCTP, SCTP_STATUS, sctp_status)?
     };
     sctp_status.try_into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::AsFd;
+
+    /// The first event that the kernel refuses is the error, which names it: here on a socket
+    /// of UDP, which has no option of SCTP.
+    #[test]
+    fn a_refused_subscription_names_its_event() {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let events = [Event::Shutdown, Event::Association];
+        let error = sctp_subscribe_events_internal(socket.as_fd(), &events, true).unwrap_err();
+        let refused = std::io::Error::from_raw_os_error(libc::ENOPROTOOPT);
+        assert_eq!(error.kind(), refused.kind());
+        assert_eq!(error.to_string(), format!("Shutdown: {refused}"));
+    }
 }
