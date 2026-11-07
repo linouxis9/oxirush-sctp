@@ -1,5 +1,5 @@
 //! Descriptor creation, ownership and association lifecycle operations.
-use super::{SOL_SCTP, getsockopt_internal};
+use super::{SOL_SCTP, getsockopt};
 use crate::AssociationId;
 use crate::consts::*;
 use crate::types::internal::ConnectxParam;
@@ -139,7 +139,7 @@ pub(crate) fn initiate_connect(
 
 pub(crate) fn socket_type(fd: BorrowedFd<'_>) -> std::io::Result<libc::c_int> {
     // Safety: every bit pattern is a valid c_int.
-    unsafe { getsockopt_internal(fd, libc::SOL_SOCKET, libc::SO_TYPE, 0) }
+    unsafe { getsockopt(fd, libc::SOL_SOCKET, libc::SO_TYPE, 0) }
 }
 
 pub(crate) fn accept_once(fd: BorrowedFd<'_>) -> std::io::Result<(OwnedFd, SocketAddr)> {

@@ -11,4 +11,4 @@ pub(crate) use descriptor::*;
 pub(crate) use message::*;
 pub(crate) use options::*;
 
-const SOL_SCTP: libc::c_int = libc::IPPROTO_SCTP;
+pub(crate) const SOL_SCTP: libc::c_int = libc::IPPROTO_SCTP;

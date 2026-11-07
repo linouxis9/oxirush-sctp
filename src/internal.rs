@@ -946,7 +946,8 @@ impl SocketCore {
 impl SocketCore {
     // The `EMSGSIZE` of a message longer than the send buffer, said in words.
     fn too_long(&self, octets: usize) -> std::io::Error {
-        let buffer = sys::buffer_size_internal(self.as_fd(), libc::SO_SNDBUF)
+        let buffer = crate::SocketOptions { core: self }
+            .send_buffer_size()
             .map(|size| format!(" of {size} octets"))
             .unwrap_or_default();
         std::io::Error::new(

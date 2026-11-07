@@ -147,7 +147,7 @@ impl ConnectedSocket {
     pub fn paths(&self) -> std::io::Result<Vec<PeerAddress>> {
         self.peer_addrs()?
             .into_iter()
-            .map(|address| sys::peer_address_info_internal(self.as_fd(), 0, address))
+            .map(|address| self.options().peer_address_info(0, address))
             .collect()
     }
 
@@ -401,7 +401,7 @@ impl ConnectedSocket {
         match sys::sctp_sendmsg_once(self.as_fd(), None, reason, info) {
             Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {
                 // Closing a socket with a linger of zero aborts its association
-                sys::set_linger_internal(self.as_fd(), Some(std::time::Duration::ZERO))
+                self.options().set_linger(Some(std::time::Duration::ZERO))
             }
             result => result,
         }

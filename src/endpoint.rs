@@ -262,7 +262,7 @@ impl OneToManyEndpoint {
     pub fn paths(&self, assoc_id: AssociationId) -> std::io::Result<Vec<crate::PeerAddress>> {
         self.peer_addrs(assoc_id)?
             .into_iter()
-            .map(|address| sys::peer_address_info_internal(self.as_fd(), assoc_id, address))
+            .map(|address| self.options().peer_address_info(assoc_id, address))
             .collect()
     }
 

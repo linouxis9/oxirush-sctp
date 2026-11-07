@@ -11,9 +11,8 @@ use std::os::fd::{AsRawFd, BorrowedFd};
 pub(crate) fn send_buffer(fd: BorrowedFd<'_>) -> std::io::Result<(usize, usize)> {
     use crate::consts::{SK_MEMINFO_SNDBUF, SK_MEMINFO_VARS, SK_MEMINFO_WMEM_QUEUED};
     // Safety: any octets are a valid array of integers.
-    let info: [u32; SK_MEMINFO_VARS] = unsafe {
-        super::getsockopt_internal(fd, libc::SOL_SOCKET, libc::SO_MEMINFO, [0; SK_MEMINFO_VARS])?
-    };
+    let info: [u32; SK_MEMINFO_VARS] =
+        unsafe { super::getsockopt(fd, libc::SOL_SOCKET, libc::SO_MEMINFO, [0; SK_MEMINFO_VARS])? };
     let size = info[SK_MEMINFO_SNDBUF] as usize;
     Ok((
         size,
