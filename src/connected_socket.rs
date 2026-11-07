@@ -5,7 +5,7 @@ use crate::{
     SocketOptions,
 };
 use std::net::SocketAddr;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::task::{Context, Poll};
 
 /// One association established by [`Socket::connect`][crate::Socket::connect],
@@ -20,7 +20,7 @@ use std::task::{Context, Poll};
 /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
 /// # let listener = socket.listen(5)?;
 /// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-/// # let (association, _) = client.connect(listener.local_addr()?).await?;
+/// # let association = client.connect(listener.local_addr()?).await?;
 /// # let (peer, _) = listener.accept().await?;
 ///
 /// let options = SendOptions::new().stream(1).ppid(60);
@@ -56,30 +56,26 @@ impl std::fmt::Debug for ConnectedSocket {
     }
 }
 
-impl ConnectedSocket {
-    /// Take ownership of an existing established nonblocking `SOCK_STREAM` SCTP descriptor.
-    /// Raw Linux peeled-off `SOCK_SEQPACKET` descriptors are not accepted by this import;
-    /// use [`OneToManyEndpoint::peeloff`][crate::OneToManyEndpoint::peeloff] to obtain those.
-    ///
-    /// A valid descriptor is closed on failure, including rejection of a one-to-many socket.
-    /// Its options stay as they are: receive metadata is off unless the descriptor has it on.
-    ///
-    /// # Safety
-    ///
-    /// `rawfd` must be an established nonblocking SCTP socket that nobody else owns. Nothing
-    /// else may close or use it after this call, as with `OwnedFd::from_raw_fd`.
-    pub unsafe fn from_rawfd(rawfd: RawFd) -> std::io::Result<Self> {
-        let fd = sys::owned_fd_from_raw(rawfd)?;
+/// An established nonblocking `SOCK_STREAM` SCTP descriptor. A peeled-off `SOCK_SEQPACKET`
+/// descriptor is refused: [`OneToManyEndpoint::peeloff`][crate::OneToManyEndpoint::peeloff]
+/// gives those. The descriptor is closed on failure. Its options stay as they are: receive
+/// metadata is off unless the descriptor has it on.
+impl TryFrom<OwnedFd> for ConnectedSocket {
+    type Error = std::io::Error;
+
+    fn try_from(fd: OwnedFd) -> std::io::Result<Self> {
         if sys::socket_type(fd.as_fd())? != libc::SOCK_STREAM {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "raw import requires a SOCK_STREAM SCTP association",
+                "an import requires a SOCK_STREAM SCTP association",
             ));
         }
         let core = SocketCore::import(fd)?;
         Ok(Self { core })
     }
+}
 
+impl ConnectedSocket {
     /// Borrow shared socket configuration.
     pub fn options(&self) -> SocketOptions<'_> {
         SocketOptions { core: &self.core }
@@ -133,7 +129,7 @@ impl ConnectedSocket {
     /// // Four streams each way, as an NGAP node with three streams for its UEs asks
     /// let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
     /// client.options().set_init_params(InitParams::streams(4, 4))?;
-    /// let (client, _) = client.connect(listener.local_addr()?).await?;
+    /// let client = client.connect(listener.local_addr()?).await?;
     /// let status = client.status()?;
     /// assert_eq!(status.state, ConnState::Established);
     /// assert_eq!(status.outstreams, 4);
@@ -175,7 +171,7 @@ impl ConnectedSocket {
     /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
     /// # let listener = socket.listen(5)?;
     /// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    /// # let (client, _) = client.connect(listener.local_addr()?).await?;
+    /// # let client = client.connect(listener.local_addr()?).await?;
     /// # let (server, _) = listener.accept().await?;
     /// use oxirush_sctp::{NotificationOrData, SendOptions};
     ///
@@ -252,7 +248,7 @@ impl ConnectedSocket {
     /// let listener = socket.listen(5)?;
     /// let gnb = Socket::new_v4(SocketToAssociation::OneToOne)?;
     /// gnb.options().set_init_params(InitParams::streams(2, 2))?;
-    /// let (gnb, _) = gnb.connect(listener.local_addr()?).await?;
+    /// let gnb = gnb.connect(listener.local_addr()?).await?;
     ///
     /// // Stream 1 of the two, with the payload protocol identifier of NGAP
     /// gnb.send(b"a message of a UE", SendOptions::new().stream(1).ppid(60)).await?;
@@ -296,7 +292,7 @@ impl ConnectedSocket {
     /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
     /// # let listener = socket.listen(5)?;
     /// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    /// # let (client, _) = client.connect(listener.local_addr()?).await?;
+    /// # let client = client.connect(listener.local_addr()?).await?;
     /// # let (server, _) = listener.accept().await?;
     /// use oxirush_sctp::SendOptions;
     ///
@@ -391,7 +387,7 @@ impl ConnectedSocket {
     /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
     /// # let listener = socket.listen(5)?;
     /// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    /// # let (client, _) = client.connect(listener.local_addr()?).await?;
+    /// # let client = client.connect(listener.local_addr()?).await?;
     /// # let (server, _) = listener.accept().await?;
     /// use oxirush_sctp::SendOptions;
     /// use std::time::Duration;

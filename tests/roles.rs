@@ -2,7 +2,7 @@
 use oxirush_sctp::{
     BindxFlags, ConnectedSocket, NotificationOrData, SendOptions, Socket, SocketToAssociation,
 };
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 
 #[tokio::test]
 async fn one_to_many_socket_cannot_become_an_accepting_listener() {
@@ -85,7 +85,7 @@ async fn configuration_and_registration_survive_listen_connect_and_accept() {
     client.options().set_max_message_size(1024);
     client.options().set_nodelay(true).unwrap();
     let original = client.as_raw_fd();
-    let (client, _) = client.connect(address).await.unwrap();
+    let client = client.connect(address).await.unwrap();
     assert_eq!(client.as_raw_fd(), original);
     assert_eq!(client.options().max_message_size(), 1024);
     assert!(client.options().nodelay().unwrap());
@@ -111,7 +111,7 @@ async fn local_addr_reports_the_bound_address_in_every_role() {
     assert_ne!(address.port(), 0);
     let listener = server.listen(4).unwrap();
     assert_eq!(listener.local_addr().unwrap(), address);
-    let (client, _) = unbound.connect(address).await.unwrap();
+    let client = unbound.connect(address).await.unwrap();
     let (peer, client_address) = listener.accept().await.unwrap();
     assert_eq!(peer.local_addr().unwrap().port(), address.port());
     assert_eq!(client.local_addr().unwrap(), client_address);
@@ -130,11 +130,12 @@ async fn connected_and_accepted_sockets_report_stream_and_ppid_by_default() {
     let server = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     server.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let listener = server.listen(4).unwrap();
-    let (client, assoc_id) = Socket::new_v4(SocketToAssociation::OneToOne)
+    let client = Socket::new_v4(SocketToAssociation::OneToOne)
         .unwrap()
         .connect(listener.local_addrs().unwrap()[0])
         .await
         .unwrap();
+    let assoc_id = client.status().unwrap().assoc_id;
     let (peer, _) = listener.accept().await.unwrap();
     let options = SendOptions::new().stream(3).ppid(60);
     client.send(b"request", options).await.unwrap();
@@ -161,7 +162,7 @@ async fn endpoint_defaults_identify_associations_and_peeloff_preserves_configura
     assert_eq!(endpoint.as_raw_fd(), original);
     assert_eq!(endpoint.options().max_message_size(), 100);
     let address = endpoint.local_addrs(0).unwrap()[0];
-    let (client, _) = Socket::new_v6(SocketToAssociation::OneToOne)
+    let client = Socket::new_v6(SocketToAssociation::OneToOne)
         .unwrap()
         .connect(address)
         .await
@@ -192,18 +193,16 @@ async fn raw_stream_import_transfers_ownership_of_an_established_association() {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let listener = socket.listen(2).unwrap();
-    let (client, _) = Socket::new_v4(SocketToAssociation::OneToOne)
+    let client = Socket::new_v4(SocketToAssociation::OneToOne)
         .unwrap()
         .connect(listener.local_addrs().unwrap()[0])
         .await
         .unwrap();
     let (peer, _) = listener.accept().await.unwrap();
-    // Safety: dup returns a new, independently owned descriptor with inherited O_NONBLOCK.
-    let owned = unsafe { libc::dup(client.as_raw_fd()) };
-    assert!(owned >= 0);
+    // A duplicate of the descriptor, nonblocking as the original is
+    let owned = client.as_fd().try_clone_to_owned().unwrap();
     drop(client);
-    // Safety: this is the sole owned established SCTP descriptor, and remains nonblocking.
-    let imported = unsafe { ConnectedSocket::from_rawfd(owned) }.unwrap();
+    let imported = ConnectedSocket::try_from(owned).unwrap();
     imported
         .send(b"imported", SendOptions::new())
         .await
@@ -242,9 +241,9 @@ async fn endpoint_with_two_clients(
         eprintln!("`net.core.wmem_max` is below {} octets; skipping", 2 * long);
         return None;
     }
-    let (slow, _) = slow.connect(address).await.unwrap();
+    let slow = slow.connect(address).await.unwrap();
     let quick = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-    let (quick, _) = quick.connect(address).await.unwrap();
+    let quick = quick.connect(address).await.unwrap();
     Some((endpoint, slow, quick))
 }
 

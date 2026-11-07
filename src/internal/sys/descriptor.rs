@@ -6,7 +6,7 @@ use crate::types::internal::ConnectxParam;
 use os_socketaddr::OsSocketAddr;
 use std::convert::TryInto;
 use std::net::SocketAddr;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 pub(crate) fn sctp_peeloff_internal(
     fd: BorrowedFd<'_>,
@@ -191,16 +191,5 @@ pub(crate) fn shutdown_internal(
         } else {
             Ok(())
         }
-    }
-}
-
-pub(crate) fn owned_fd_from_raw(fd: RawFd) -> std::io::Result<OwnedFd> {
-    // Safety: `F_GETFD` only queries `fd`. Whether the caller may give up `fd` is part of the
-    // contract of the public API that calls this function.
-    unsafe {
-        if libc::fcntl(fd, libc::F_GETFD) < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(OwnedFd::from_raw_fd(fd))
     }
 }

@@ -83,7 +83,7 @@ async fn sockets_close_their_descriptor_whatever_happens_to_them() {
     // Connected and accepted sockets.
     for _ in 0..10 {
         let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-        let (connected, _) = client.connectx(&[address]).await.unwrap();
+        let connected = client.connectx(&[address]).await.unwrap();
         let (accepted, _) = listener.accept().await.unwrap();
         drop(connected);
         drop(accepted);

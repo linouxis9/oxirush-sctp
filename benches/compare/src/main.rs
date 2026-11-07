@@ -122,7 +122,7 @@ async fn oxirush_pair()
     socket.bind(loopback())?;
     let listener = socket.listen(1024)?;
     let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    let (client, _) = client.connect(listener.local_addr()?).await?;
+    let client = client.connect(listener.local_addr()?).await?;
     let (server, _) = listener.accept().await?;
     Ok((client, server))
 }

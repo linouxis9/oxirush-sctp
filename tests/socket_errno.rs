@@ -24,7 +24,7 @@ async fn a_refused_argument_is_named() {
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let listener = socket.listen(1).unwrap();
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-    let (client, _) = client
+    let client = client
         .connect(listener.local_addr().unwrap())
         .await
         .unwrap();

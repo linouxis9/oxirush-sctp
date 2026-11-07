@@ -21,7 +21,7 @@ async fn listener() -> (Listener, SocketAddr) {
 async fn pair() -> (ConnectedSocket, ConnectedSocket) {
     let (listener, address) = listener().await;
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-    let (client, _) = client.connect(address).await.unwrap();
+    let client = client.connect(address).await.unwrap();
     let (peer, _) = poll_fn(|cx| listener.poll_accept(cx)).await.unwrap();
     (client, peer)
 }

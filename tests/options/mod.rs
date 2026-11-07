@@ -54,7 +54,7 @@ async fn descriptors_are_the_sctp_sockets() {
     assert_sctp_socket(&listener, libc::SOCK_STREAM);
 
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
-    let (connected, _) = client.connectx(&[bindaddr]).await.unwrap();
+    let connected = client.connectx(&[bindaddr]).await.unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
     assert_sctp_socket(&connected, libc::SOCK_STREAM);
     assert_sctp_socket(&accepted, libc::SOCK_STREAM);
@@ -90,7 +90,7 @@ async fn nodelay_round_trips_on_every_socket_type() {
 
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
     client.options().set_nodelay(true).unwrap();
-    let (connected, _) = client.connectx(&[bindaddr]).await.unwrap();
+    let connected = client.connectx(&[bindaddr]).await.unwrap();
     assert!(connected.options().nodelay().unwrap());
     connected.options().set_nodelay(false).unwrap();
     assert!(!connected.options().nodelay().unwrap());
@@ -157,7 +157,7 @@ async fn third_message_lag(nodelay: bool) -> std::time::Duration {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
     client.options().set_nodelay(nodelay).unwrap();
-    let (connected, _) = client.connectx(&[bindaddr]).await.unwrap();
+    let connected = client.connectx(&[bindaddr]).await.unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
     let send = |payload: &[u8]| connected.send_data(SendData::new(payload.to_vec()));
 
@@ -213,7 +213,7 @@ async fn descriptors_are_close_on_exec() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
     assert_close_on_exec_and_non_blocking(&listener);
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
-    let (connected, _) = client.connectx(&[bindaddr]).await.unwrap();
+    let connected = client.connectx(&[bindaddr]).await.unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
     assert_close_on_exec_and_non_blocking(&connected);
     assert_close_on_exec_and_non_blocking(&accepted);
@@ -258,7 +258,8 @@ async fn rto_info_round_trips() {
     assert_eq!(listener.options().rto_info(0).unwrap(), rto_info);
 
     // Associations start with the values of their socket.
-    let (connected, assoc_id) = socket.connectx(&[bindaddr]).await.unwrap();
+    let connected = socket.connectx(&[bindaddr]).await.unwrap();
+    let assoc_id = connected.status().unwrap().assoc_id;
     let association = connected.options().rto_info(assoc_id).unwrap();
     assert_eq!((association.max, association.min), (6000, 100));
     connected

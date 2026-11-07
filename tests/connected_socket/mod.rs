@@ -3,22 +3,15 @@ use oxirush_sctp::*;
 use crate::{create_client_socket, create_socket_bind_and_listen};
 
 #[tokio::test]
-async fn bindx_not_supported() {
-    // Safety: descriptor 100 is not open, so `from_rawfd` fails without taking it over.
-    let connected = unsafe { ConnectedSocket::from_rawfd(100) };
-    assert!(connected.is_err(), "{:?}", connected.ok().unwrap());
-
-    // TODO: Write real test
-}
-
-#[tokio::test]
 async fn connected_default_sendinfo_success() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
 
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
     client_socket.options().request_rcvinfo(true).unwrap();
 
-    let (connected, assoc_id) = client_socket.connectx(&[bindaddr]).await.unwrap();
+    let connected = client_socket.connectx(&[bindaddr]).await.unwrap();
+
+    let assoc_id = connected.status().unwrap().assoc_id;
 
     let (accepted, _client_addr) = listener.accept().await.unwrap();
 
@@ -78,7 +71,9 @@ async fn connected_send_some_sendinfo_success() {
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
     client_socket.options().request_rcvinfo(true).unwrap();
 
-    let (connected, assoc_id) = client_socket.connectx(&[bindaddr]).await.unwrap();
+    let connected = client_socket.connectx(&[bindaddr]).await.unwrap();
+
+    let assoc_id = connected.status().unwrap().assoc_id;
 
     let (accepted, _client_addr) = listener.accept().await.unwrap();
 
@@ -135,7 +130,9 @@ async fn test_shutdown_event() {
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
     client_socket.options().request_rcvinfo(true).unwrap();
 
-    let (connected, client_assoc_id) = client_socket.connectx(&[bindaddr]).await.unwrap();
+    let connected = client_socket.connectx(&[bindaddr]).await.unwrap();
+
+    let client_assoc_id = connected.status().unwrap().assoc_id;
     connected
         .options()
         .subscribe_events(&[Event::Shutdown], SubscribeEventAssocId::All)
@@ -175,7 +172,7 @@ async fn test_shutdown_event() {
 async fn a_zero_linger_aborts_the_association_on_close() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let (connected, _) = client_socket.connectx(&[bindaddr]).await.unwrap();
+    let connected = client_socket.connectx(&[bindaddr]).await.unwrap();
     connected
         .options()
         .subscribe_events(
@@ -212,7 +209,9 @@ async fn test_get_status() {
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
     client_socket.options().request_rcvinfo(true).unwrap();
 
-    let (connected, client_assoc_id) = client_socket.connectx(&[bindaddr]).await.unwrap();
+    let connected = client_socket.connectx(&[bindaddr]).await.unwrap();
+
+    let client_assoc_id = connected.status().unwrap().assoc_id;
 
     let (accepted, client_addr) = listener.accept().await.unwrap();
 
@@ -249,7 +248,7 @@ async fn futures_are_send() {
     let addrs = [bindaddr];
     let connect = client.connectx(&addrs);
     assert_send(&connect);
-    let (connected, _) = connect.await.unwrap();
+    let connected = connect.await.unwrap();
     assert_send(&connected.recv());
     assert_send(&connected.send_data(SendData::new(vec![])));
 }
@@ -277,7 +276,7 @@ async fn send_waits_for_room_instead_of_failing_with_would_block() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
     set_send_buffer(client.as_raw_fd());
-    let (connected, _) = client.connectx(&[bindaddr]).await.unwrap();
+    let connected = client.connectx(&[bindaddr]).await.unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
 
     let data = SendData::new(vec![0x5a; 1024]);
@@ -326,7 +325,7 @@ async fn send_after_peer_closed_fails_without_sigpipe() {
 
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
-    let (connected, _) = client.connectx(&[bindaddr]).await.unwrap();
+    let connected = client.connectx(&[bindaddr]).await.unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
     drop(accepted);
     // The association has ended once the client reads the end of the stream.
@@ -362,7 +361,7 @@ async fn pair_receiving_rcvinfo_and_nxtinfo() -> (ConnectedSocket, ConnectedSock
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
     client.options().request_rcvinfo(true).unwrap();
     client.options().request_nxtinfo(true).unwrap();
-    let (receiving, _) = client.connectx(&[bindaddr]).await.unwrap();
+    let receiving = client.connectx(&[bindaddr]).await.unwrap();
     let (sending, _) = listener.accept().await.unwrap();
     (sending, receiving)
 }
@@ -501,7 +500,7 @@ async fn pair_for_long_messages(
         .options()
         .set_rto_info(RtoInfo::new(10, 10, 10))
         .unwrap();
-    let (sending, _) = client.connectx(&[bindaddr]).await.unwrap();
+    let sending = client.connectx(&[bindaddr]).await.unwrap();
     let (receiving, _) = listener.accept().await.unwrap();
     Some((sending, receiving))
 }
@@ -709,7 +708,7 @@ async fn recv_limit_is_set_per_socket_and_inherited_on_accept() {
     assert_eq!(listener.options().max_message_size(), 4 << 20);
     listener.options().set_max_message_size(1000);
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
-    let (sending, _) = client.connectx(&[bindaddr]).await.unwrap();
+    let sending = client.connectx(&[bindaddr]).await.unwrap();
     let (receiving, _) = listener.accept().await.unwrap();
     assert_eq!(receiving.options().max_message_size(), 1000);
     for len in [1001, 1000] {

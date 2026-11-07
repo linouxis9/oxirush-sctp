@@ -57,7 +57,7 @@ pub enum SocketToAssociation {
 /// let listener = socket.listen(5)?;
 ///
 /// let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
-/// let (peer, _) = peer.connect(listener.local_addr()?).await?;
+/// let peer = peer.connect(listener.local_addr()?).await?;
 /// peer.send(b"hello", SendOptions::new()).await?;
 /// let (association, _) = listener.accept().await?;
 ///
@@ -97,7 +97,7 @@ pub enum NotificationOrData {
 /// socket.bind("127.0.0.1:0".parse()?)?;
 /// let listener = socket.listen(5)?;
 /// let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
-/// let (peer, _) = peer.connect(listener.local_addr()?).await?;
+/// let peer = peer.connect(listener.local_addr()?).await?;
 /// let (association, _) = listener.accept().await?;
 ///
 /// // A message on stream 0, with the payload protocol identifier of NGAP
@@ -631,7 +631,7 @@ pub struct NxtInfo {
 /// let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
 /// let events = [Event::Association];
 /// client.options().subscribe_events(&events, SubscribeEventAssocId::All)?;
-/// let (client, _) = client.connect(listener.local_addr()?).await?;
+/// let client = client.connect(listener.local_addr()?).await?;
 ///
 /// // The first that it receives: the association is up, with its streams
 /// let received = client.recv().await?;

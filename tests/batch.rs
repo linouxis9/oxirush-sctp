@@ -16,7 +16,7 @@ async fn pair() -> (ConnectedSocket, ConnectedSocket) {
     let listener = socket.listen(1).unwrap();
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     client.options().set_nodelay(true).unwrap();
-    let (client, _) = client
+    let client = client
         .connect(listener.local_addrs().unwrap()[0])
         .await
         .unwrap();
@@ -333,7 +333,7 @@ async fn an_endpoint_sends_and_receives_the_batches_of_several_associations() {
     for _ in 0..4 {
         let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
         client.options().set_nodelay(true).unwrap();
-        let (client, _) = client.connect(address).await.unwrap();
+        let client = client.connect(address).await.unwrap();
         client.send(b"hello", SendOptions::new()).await.unwrap();
         clients.push(client);
     }
@@ -457,7 +457,7 @@ async fn the_streams_of_each_association_of_an_endpoint_are_its_own() {
         let peer = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
         let params = oxirush_sctp::InitParams::streams(10, inbound);
         peer.options().set_init_params(params).unwrap();
-        let (peer, _) = peer.connect(address).await.unwrap();
+        let peer = peer.connect(address).await.unwrap();
         peer.send(b"hello", SendOptions::new()).await.unwrap();
         let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() else {
             panic!("not the message of the peer")

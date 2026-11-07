@@ -66,7 +66,7 @@ async fn server(listener: Listener) -> std::io::Result<()> {
 async fn peers(server: SocketAddr) -> std::io::Result<()> {
     for abort in [false, true] {
         let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-        let (association, _) = socket.connect(server).await?;
+        let association = socket.connect(server).await?;
         association.send(b"hello", SendOptions::new()).await?;
         association.recv().await?;
         if abort {

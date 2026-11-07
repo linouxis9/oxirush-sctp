@@ -19,7 +19,7 @@
 //! socket.bind("127.0.0.1:0".parse().unwrap())?;
 //! let listener = socket.listen(1)?;
 //! let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-//! let (client, _) = client.connect(listener.local_addr()?).await?;
+//! let client = client.connect(listener.local_addr()?).await?;
 //! let (server, _) = listener.accept().await?;
 //!
 //! let (writer, _) = driver::spawn(client, DriverConfig::default())?;
@@ -371,7 +371,7 @@ impl Writer {
     /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
     /// # let listener = socket.listen(5)?;
     /// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    /// # let (client, _) = client.connect(listener.local_addr()?).await?;
+    /// # let client = client.connect(listener.local_addr()?).await?;
     /// # let (server, _) = listener.accept().await?;
     /// use oxirush_sctp::driver::{self, DriverConfig, SendError};
     /// use oxirush_sctp::SendOptions;
@@ -452,7 +452,7 @@ impl Writer {
     /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
     /// # let listener = socket.listen(5)?;
     /// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    /// # let (client, _) = client.connect(listener.local_addr()?).await?;
+    /// # let client = client.connect(listener.local_addr()?).await?;
     /// # let (server, _) = listener.accept().await?;
     /// use oxirush_sctp::driver::{self, DriverConfig};
     /// use oxirush_sctp::SendOptions;
@@ -573,7 +573,7 @@ impl Reader {
     /// socket.bind("127.0.0.1:0".parse()?)?;
     /// let listener = socket.listen(5)?;
     /// let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    /// let (client, _) = client.connect(listener.local_addr()?).await?;
+    /// let client = client.connect(listener.local_addr()?).await?;
     /// let (server, _) = listener.accept().await?;
     /// let (_writer, mut reader) = driver::spawn(server, DriverConfig::default())?;
     ///
@@ -602,7 +602,7 @@ impl Reader {
     /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
     /// # let listener = socket.listen(5)?;
     /// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    /// # let (client, _) = client.connect(listener.local_addr()?).await?;
+    /// # let client = client.connect(listener.local_addr()?).await?;
     /// # let (server, _) = listener.accept().await?;
     /// use oxirush_sctp::driver::{self, DriverConfig};
     /// use oxirush_sctp::SendOptions;
@@ -657,7 +657,7 @@ impl Reader {
 /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
 /// # let listener = socket.listen(5)?;
 /// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-/// # let (client, _) = client.connect(listener.local_addr()?).await?;
+/// # let client = client.connect(listener.local_addr()?).await?;
 /// # let (server, _) = listener.accept().await?;
 /// use oxirush_sctp::driver::{self, DriverConfig};
 /// use oxirush_sctp::{NotificationOrData, SendOptions};

@@ -1,8 +1,7 @@
 //! SCTP socket creation and consuming role transitions.
 use crate::internal::{SocketCore, sys};
 use crate::{
-    AssociationId, BindxFlags, ConnectedSocket, Listener, OneToManyEndpoint, SocketOptions,
-    SocketToAssociation,
+    BindxFlags, ConnectedSocket, Listener, OneToManyEndpoint, SocketOptions, SocketToAssociation,
 };
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
@@ -19,7 +18,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 /// let listener = socket.listen(5)?;
 ///
 /// let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-/// let (association, _id) = client.connect(listener.local_addr()?).await?;
+/// let association = client.connect(listener.local_addr()?).await?;
 /// let (_accepted, peer) = listener.accept().await?;
 /// assert_eq!(association.local_addr()?, peer);
 /// # Ok(())
@@ -133,7 +132,7 @@ impl Socket {
     ///
     /// // A peer of one association connects to it as to a listener
     /// let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    /// let (peer, _) = peer.connect(endpoint.local_addr()?).await?;
+    /// let peer = peer.connect(endpoint.local_addr()?).await?;
     /// assert_eq!(peer.peer_addrs()?, [endpoint.local_addr()?]);
     ///
     /// // A one-to-one socket has no endpoint
@@ -163,16 +162,13 @@ impl Socket {
     ///
     /// // A gNB connects to its AMF: the association is up when `connect` returns
     /// let gnb = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    /// let (association, _id) = gnb.connect(listener.local_addr()?).await?;
+    /// let association = gnb.connect(listener.local_addr()?).await?;
     /// assert_eq!(association.peer_addrs()?, [listener.local_addr()?]);
     /// let (_amf, _) = listener.accept().await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn connect(
-        self,
-        addr: SocketAddr,
-    ) -> std::io::Result<(ConnectedSocket, AssociationId)> {
+    pub async fn connect(self, addr: SocketAddr) -> std::io::Result<ConnectedSocket> {
         self.connectx(&[addr]).await
     }
 
@@ -194,17 +190,14 @@ impl Socket {
     /// // A client bound to one address, which gives both of the server: two paths
     /// let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
     /// client.bind("127.0.0.1:0".parse().unwrap())?;
-    /// let (client, _) = client.connectx(&listener.local_addrs()?).await?;
+    /// let client = client.connectx(&listener.local_addrs()?).await?;
     /// assert_eq!(client.peer_addrs()?.len(), 2);
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn connectx(
-        self,
-        addrs: &[SocketAddr],
-    ) -> std::io::Result<(ConnectedSocket, AssociationId)> {
-        let (core, assoc_id) = self.core.connect(addrs).await?;
-        Ok((ConnectedSocket::from_core(core), assoc_id))
+    pub async fn connectx(self, addrs: &[SocketAddr]) -> std::io::Result<ConnectedSocket> {
+        let core = self.core.connect(addrs).await?;
+        Ok(ConnectedSocket::from_core(core))
     }
 }
 

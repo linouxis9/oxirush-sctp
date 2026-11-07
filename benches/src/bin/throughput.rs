@@ -159,8 +159,7 @@ async fn connect(address: SocketAddr) -> ConnectedSocket {
         .options()
         .set_recv_buffer_size(RECEIVE_BUFFER)
         .unwrap();
-    let (socket, _) = socket.connect(address).await.unwrap();
-    socket
+    socket.connect(address).await.unwrap()
 }
 
 /// A driver whose writer never refuses: this measures what it carries, not its overload.

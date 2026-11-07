@@ -59,7 +59,7 @@ async fn successful_connect_keeps_its_association_notification() {
         .options()
         .subscribe_events(&[Event::Association], SubscribeEventAssocId::All)
         .unwrap();
-    let (client, _) = tokio::time::timeout(Duration::from_secs(2), client.connect(address))
+    let client = tokio::time::timeout(Duration::from_secs(2), client.connect(address))
         .await
         .unwrap()
         .unwrap();
@@ -85,7 +85,7 @@ async fn peer_abort_without_notifications_completes_receive() {
     let listener = socket.listen(1).unwrap();
     let address = listener.local_addrs().unwrap()[0];
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-    let (client, _) = client.connect(address).await.unwrap();
+    let client = client.connect(address).await.unwrap();
     let (peer, _) = listener.accept().await.unwrap();
     client.options().set_linger(Some(Duration::ZERO)).unwrap();
     drop(client);
@@ -102,7 +102,7 @@ async fn positive_linger_is_rejected_without_changing_close_behavior() {
     let listener = socket.listen(1).unwrap();
     let address = listener.local_addrs().unwrap()[0];
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-    let (client, _) = client.connect(address).await.unwrap();
+    let client = client.connect(address).await.unwrap();
     let (peer, _) = listener.accept().await.unwrap();
     peer.options()
         .subscribe_events(
@@ -142,7 +142,7 @@ async fn aborted_partial_delivery_does_not_contaminate_another_sender() {
         let address = listener.local_addrs(0).unwrap()[0];
         let a = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
         set_int(&a, libc::SO_SNDBUF, 1 << 20);
-        let (a, _) = a.connect(address).await.unwrap();
+        let a = a.connect(address).await.unwrap();
         a.send_data(SendData::new(vec![0xaa; 300_000]))
             .await
             .unwrap();
@@ -156,7 +156,7 @@ async fn aborted_partial_delivery_does_not_contaminate_another_sender() {
         drop(a);
         tokio::time::sleep(Duration::from_millis(100)).await;
         let b = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-        let (b, _) = b.connect(address).await.unwrap();
+        let b = b.connect(address).await.unwrap();
         let b_address = b.local_addrs().unwrap()[0];
         b.send_data(SendData::new(b"hello from B".to_vec()))
             .await
@@ -187,7 +187,7 @@ async fn a_message_longer_than_the_send_buffer_says_which_buffer() {
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     client.options().set_send_buffer_size(4096).unwrap();
     let buffer = client.options().send_buffer_size().unwrap();
-    let (client, _) = client
+    let client = client
         .connect(listener.local_addrs().unwrap()[0])
         .await
         .unwrap();

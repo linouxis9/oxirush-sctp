@@ -251,10 +251,7 @@ impl SocketCore {
         self.max_message_size.store(octets, Ordering::Relaxed);
     }
 
-    pub(crate) async fn connect(
-        self,
-        addrs: &[SocketAddr],
-    ) -> std::io::Result<(Self, AssociationId)> {
+    pub(crate) async fn connect(self, addrs: &[SocketAddr]) -> std::io::Result<Self> {
         self.require_style(SocketToAssociation::OneToOne, "connect")?;
         let assoc_id = sys::initiate_connect(self.as_fd(), addrs)?;
         loop {
@@ -278,7 +275,7 @@ impl SocketCore {
                 })?;
             if status.state == ConnState::Established {
                 self.came_up();
-                return Ok((self, assoc_id));
+                return Ok(self);
             }
             guard.clear_ready();
         }
@@ -1098,7 +1095,7 @@ mod tests {
     /// A peer of `address`, which has sent it `message`.
     async fn peer_that_sent(address: SocketAddr, message: &[u8]) -> crate::ConnectedSocket {
         let peer = crate::Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-        let (peer, _) = peer.connect(address).await.unwrap();
+        let peer = peer.connect(address).await.unwrap();
         peer.send(message, crate::SendOptions::new()).await.unwrap();
         peer
     }

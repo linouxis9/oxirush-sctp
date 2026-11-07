@@ -170,7 +170,8 @@ impl SocketOptions<'_> {
     /// # socket.bind("127.0.0.1:0".parse().unwrap())?;
     /// # let listener = socket.listen(5)?;
     /// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    /// # let (client, id) = client.connect(listener.local_addr()?).await?;
+    /// # let client = client.connect(listener.local_addr()?).await?;
+    /// # let id = client.status()?.assoc_id;
     /// use std::time::Duration;
     ///
     /// // A heartbeat on the path to the peer each second, where Linux sends one each 30

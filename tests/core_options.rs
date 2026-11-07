@@ -11,7 +11,7 @@ async fn pair() -> (ConnectedSocket, ConnectedSocket) {
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let listener = socket.listen(1).unwrap();
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-    let (client, _) = client
+    let client = client
         .connect(listener.local_addr().unwrap())
         .await
         .unwrap();
@@ -109,7 +109,7 @@ async fn an_abort_of_an_endpoint_carries_its_reason() {
         .options()
         .subscribe_events(&[Event::Association], SubscribeEventAssocId::All)
         .unwrap();
-    let (client, _) = client
+    let client = client
         .connect(endpoint.local_addr().unwrap())
         .await
         .unwrap();
@@ -205,7 +205,7 @@ async fn endpoint_and_peer() -> (OneToManyEndpoint, ConnectedSocket, Association
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let endpoint = socket.into_endpoint(4).unwrap();
     let peer = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-    let (peer, _) = peer.connect(endpoint.local_addr().unwrap()).await.unwrap();
+    let peer = peer.connect(endpoint.local_addr().unwrap()).await.unwrap();
     peer.send(b"hello", SendOptions::new()).await.unwrap();
     let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() else {
         panic!("not the message of the peer")

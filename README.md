@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let client = async {
         let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-        let (association, _) = socket.connect(address).await?;
+        let association = socket.connect(address).await?;
         association.send(b"ping", options).await?;
         if let Some(NotificationOrData::Data(message)) = association.recv().await? {
             println!("client: {:?}", String::from_utf8_lossy(&message.payload));
@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gnb = Socket::new_v4(SocketToAssociation::OneToOne)?;
     gnb.options().set_nodelay(true)?;
     gnb.options().set_init_params(InitParams::streams(4, 4))?;
-    let (gnb, _) = gnb.connect(listener.local_addr()?).await?;
+    let gnb = gnb.connect(listener.local_addr()?).await?;
     let (amf, _) = listener.accept().await?;
     let status = amf.status()?;
     println!("{:?}, {} streams each way", status.state, status.outstreams);
@@ -175,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A peer that sends one message and closes its socket
     let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    let (peer, _) = peer.connect(listener.local_addr()?).await?;
+    let peer = peer.connect(listener.local_addr()?).await?;
     peer.send(b"hello", SendOptions::new()).await?;
     drop(peer);
 
@@ -216,7 +216,7 @@ use std::time::Duration;
 /// The two ends of a new association of `listener`.
 async fn connected(listener: &Listener) -> std::io::Result<(ConnectedSocket, ConnectedSocket)> {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    let (peer, _) = socket.connect(listener.local_addr()?).await?;
+    let peer = socket.connect(listener.local_addr()?).await?;
     let (accepted, _) = listener.accept().await?;
     Ok((accepted, peer))
 }
@@ -292,7 +292,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
     let addresses: [SocketAddr; 2] = ["127.0.0.1:0".parse()?, "127.0.0.3:0".parse()?];
     client.bindx(&addresses, BindxFlags::Add)?;
-    let (client, id) = client.connectx(&server_addresses).await?;
+    let client = client.connectx(&server_addresses).await?;
+    let id = client.status()?.assoc_id;
     let (accepted, _) = listener.accept().await?;
 
     println!("client: {:?}", ips(&client.local_addrs()?));
@@ -350,7 +351,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = socket.listen(5)?;
 
     let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    let (_peer, _) = peer.connect(listener.local_addr()?).await?;
+    let _peer = peer.connect(listener.local_addr()?).await?;
     let (association, _) = listener.accept().await?;
 
     let status = association.status()?;
@@ -385,7 +386,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = socket.into_endpoint(5)?;
 
     let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    let (peer, _) = peer.connect(endpoint.local_addr()?).await?;
+    let peer = peer.connect(endpoint.local_addr()?).await?;
     peer.send(b"ping", SendOptions::new()).await?;
 
     // A message comes with its association, which the answer names
@@ -426,7 +427,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     socket.bind("127.0.0.1:0".parse()?)?;
     let listener = socket.listen(5)?;
     let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    let (client, _) = client.connect(listener.local_addr()?).await?;
+    let client = client.connect(listener.local_addr()?).await?;
     let (server, _) = listener.accept().await?;
 
     // Three messages, each with its options, in one system call

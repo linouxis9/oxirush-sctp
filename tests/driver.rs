@@ -28,7 +28,7 @@ async fn pair() -> (ConnectedSocket, ConnectedSocket) {
         .unwrap();
     let listener = socket.listen(1).unwrap();
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-    let (client, _) = client
+    let client = client
         .connect(listener.local_addrs().unwrap()[0])
         .await
         .unwrap();
@@ -93,7 +93,7 @@ async fn the_associations_of_an_endpoint_take_turns() {
             .options()
             .set_recv_buffer_size(RECEIVE_BUFFER)
             .unwrap();
-        let (client, _) = client.connect(address).await.unwrap();
+        let client = client.connect(address).await.unwrap();
         client.send(b"hello", SendOptions::new()).await.unwrap();
         let identity = loop {
             if let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() {
@@ -343,7 +343,7 @@ async fn endpoint_and_peer() -> (OneToManyEndpoint, ConnectedSocket, Association
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let endpoint = socket.into_endpoint(4).unwrap();
     let peer = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-    let (peer, _) = peer.connect(endpoint.local_addr().unwrap()).await.unwrap();
+    let peer = peer.connect(endpoint.local_addr().unwrap()).await.unwrap();
     peer.send(b"hello", SendOptions::new()).await.unwrap();
     let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() else {
         panic!("not the message of the peer")

@@ -29,7 +29,7 @@
 //!     };
 //!     let client = async {
 //!         let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-//!         let (association, _) = socket.connect(address).await?;
+//!         let association = socket.connect(address).await?;
 //!         association.send(b"ping", options).await?;
 //!         if let Some(NotificationOrData::Data(message)) = association.recv().await? {
 //!             println!("client: {:?}", String::from_utf8_lossy(&message.payload));
@@ -196,7 +196,7 @@
 //!
 //! let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
 //! client.bind("127.0.0.1:0".parse()?)?;
-//! let (association, _) = client.connect(server).await?;
+//! let association = client.connect(server).await?;
 //! # let (accepted, _) = listener.accept().await?;
 //! // The peer sees the one address that was bound
 //! assert_eq!(accepted.peer_addrs()?.len(), 1);

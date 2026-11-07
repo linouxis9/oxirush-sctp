@@ -13,7 +13,7 @@ async fn pair() -> (ConnectedSocket, ConnectedSocket) {
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let listener = socket.listen(1).unwrap();
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-    let (client, _) = client
+    let client = client
         .connect(listener.local_addr().unwrap())
         .await
         .unwrap();
@@ -463,7 +463,7 @@ async fn a_lost_peer_in_network_namespace_is_a_time_out() {
         options.association_params(0).unwrap().max_retransmissions,
         2
     );
-    let (client, _) = client
+    let client = client
         .connect(listener.local_addr().unwrap())
         .await
         .unwrap();
@@ -591,7 +591,7 @@ async fn closing_or_aborting_an_association_that_the_peer_aborted() {
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let endpoint = socket.into_endpoint(1).unwrap();
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-    let (client, _) = client
+    let client = client
         .connect(endpoint.local_addr().unwrap())
         .await
         .unwrap();

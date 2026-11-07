@@ -114,7 +114,7 @@ async fn listening_getladdrs_and_getpaddrs_of_many_addresses() {
             assert_eq!(laddrs, expected);
 
             let client = create_client_socket(SocketToAssociation::OneToOne, true);
-            let (connected, _) = client
+            let connected = client
                 .connectx(&[SocketAddr::from(([127, 0, 0, 1], port))])
                 .await
                 .unwrap();
@@ -134,7 +134,7 @@ async fn listening_getladdrs_and_getpaddrs_of_many_addresses() {
 async fn one_to_many_recv_reports_the_sender_address() {
     let (listener, bindaddr) = create_endpoint_bind_and_listen(true);
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    let (client, _assoc_id) = client_socket.connectx(&[bindaddr]).await.unwrap();
+    let client = client_socket.connectx(&[bindaddr]).await.unwrap();
     let client_addresses = client.local_addrs().unwrap();
     client
         .send_data(SendData::new(b"from the client".to_vec()))

@@ -40,7 +40,7 @@ fn send_recv(criterion: &mut Criterion) {
         // acknowledgement of the one before, which the peer delays by up to
         // 200 ms: the benchmark would time that delay
         client.options().set_nodelay(true).expect("no delay");
-        let (sender, _) = client
+        let sender = client
             .connect(listener.local_addr().unwrap())
             .await
             .expect("connected");

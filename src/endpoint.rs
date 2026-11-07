@@ -24,7 +24,7 @@ use std::task::{Context, Poll};
 /// socket.bind("127.0.0.1:0".parse().unwrap())?;
 /// let endpoint = socket.into_endpoint(5)?;
 /// # let client = Socket::new_v4(SocketToAssociation::OneToOne)?;
-/// # let (client, _) = client.connect(endpoint.local_addr()?).await?;
+/// # let client = client.connect(endpoint.local_addr()?).await?;
 /// # client.send(b"request", SendOptions::default()).await?;
 ///
 /// // Answer a message on the association it came from.
@@ -223,7 +223,7 @@ impl OneToManyEndpoint {
     /// socket.bind("127.0.0.1:0".parse().unwrap())?;
     /// let endpoint = socket.into_endpoint(16)?;
     /// let peer = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    /// let (peer, _) = peer.connect(endpoint.local_addr()?).await?;
+    /// let peer = peer.connect(endpoint.local_addr()?).await?;
     /// peer.send(b"ping", SendOptions::new()).await?;
     ///
     /// // The association of the first message gets a socket of its own

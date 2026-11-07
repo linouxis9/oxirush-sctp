@@ -90,7 +90,7 @@ async fn expect_message(receiver: &ConnectedSocket, expected: &[u8], ppid: u32) 
 async fn borrowed_send_converts_host_ppid_without_changing_legacy_wire_order() {
     let server = server();
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-    let (client, _) = socket
+    let client = socket
         .connect(server.local_addrs().unwrap()[0])
         .await
         .unwrap();
@@ -252,7 +252,7 @@ async fn heartbeat_and_path_settings_roundtrip_on_defaults_and_established_paths
     );
     let server = server();
     let address = server.local_addrs().unwrap()[0];
-    let (client, _) = socket.connect(address).await.unwrap();
+    let client = socket.connect(address).await.unwrap();
     let (_peer, _) = server.accept().await.unwrap();
     let mut params = client.options().peer_address_params(0, address).unwrap();
     assert!(!params.heartbeat_enabled);
@@ -302,7 +302,8 @@ async fn confirmed_peer_address_is_a_typed_notification() {
         .unwrap();
     // The server announces its second address, which stays unconfirmed until it acknowledges
     // a heartbeat.
-    let (client, assoc_id) = client.connect(addresses[0]).await.unwrap();
+    let client = client.connect(addresses[0]).await.unwrap();
+    let assoc_id = client.status().unwrap().assoc_id;
     client
         .options()
         .request_heartbeat(assoc_id, addresses[1])
@@ -390,7 +391,7 @@ async fn concurrent_receivers_preserve_record_boundaries_and_streams() {
     let server = server();
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     socket.options().set_nodelay(true).unwrap();
-    let (sender, _) = socket
+    let sender = socket
         .connect(server.local_addrs().unwrap()[0])
         .await
         .unwrap();
@@ -429,7 +430,7 @@ async fn ipv6_borrowed_send_and_path_controls_preserve_native_addresses() {
     let address = server.local_addrs().unwrap()[0];
     assert!(address.is_ipv6());
     let socket = Socket::new_v6(SocketToAssociation::OneToOne).unwrap();
-    let (client, _) = socket.connect(address).await.unwrap();
+    let client = socket.connect(address).await.unwrap();
     let (peer, accepted_address) = server.accept().await.unwrap();
     assert!(accepted_address.is_ipv6());
     let mut params = client.options().peer_address_params(0, address).unwrap();
@@ -462,7 +463,7 @@ async fn connected_bindx_adds_and_removes_local_addresses() {
     let server = server.listen(1).unwrap();
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     client.bind("127.0.0.2:0".parse().unwrap()).unwrap();
-    let (client, _) = client
+    let client = client
         .connect(server.local_addrs().unwrap()[0])
         .await
         .unwrap();
@@ -491,7 +492,7 @@ async fn each_path_of_an_association_has_its_information() {
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     client.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     client.options().set_nodelay(true).unwrap();
-    let (client, _) = client.connectx(&server_addresses).await.unwrap();
+    let client = client.connectx(&server_addresses).await.unwrap();
     client.send(b"hello", SendOptions::new()).await.unwrap();
     let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() else {
         panic!("not the message");
