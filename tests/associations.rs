@@ -66,7 +66,6 @@ async fn every_event_that_is_offered_can_be_subscribed() {
 fn server() -> Listener {
     let socket = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    socket.options().request_rcvinfo(true).unwrap();
     socket.listen(2).unwrap()
 }
 
@@ -80,10 +79,7 @@ async fn expect_message(receiver: &ConnectedSocket, expected: &[u8], ppid: u32) 
         panic!("not data");
     };
     assert_eq!(data.payload, expected);
-    let info = data.rcv_info.unwrap();
-    assert_eq!(info.ppid, ppid);
-    assert_eq!(info.sid, 2);
-    assert_eq!(info.flags & 1, 1);
+    assert_eq!((data.ppid, data.stream, data.unordered), (ppid, 2, true));
 }
 
 #[tokio::test]
@@ -329,7 +325,7 @@ async fn read_fifty(socket: std::sync::Arc<ConnectedSocket>) -> Vec<u32> {
         let id = u32::from_be_bytes(data.payload[..4].try_into().unwrap());
         assert_eq!(data.payload.len(), if id % 2 == 0 { 9000 } else { 300 });
         assert!(data.payload[4..].iter().all(|&byte| byte == id as u8));
-        assert_eq!(data.rcv_info.unwrap().sid, (id % 4) as u16);
+        assert_eq!(data.stream, (id % 4) as u16);
         ids.push(id);
     }
     ids
@@ -374,7 +370,6 @@ async fn concurrent_receivers_preserve_record_boundaries_and_streams() {
 async fn ipv6_borrowed_send_and_path_controls_preserve_native_addresses() {
     let server = Socket::new_v6(SocketToAssociation::OneToOne).unwrap();
     server.bind("[::1]:0".parse().unwrap()).unwrap();
-    server.options().request_rcvinfo(true).unwrap();
     let server = server.listen(1).unwrap();
     let address = server.local_addrs().unwrap()[0];
     assert!(address.is_ipv6());
@@ -446,7 +441,7 @@ async fn each_path_of_an_association_has_its_information() {
     let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() else {
         panic!("not the message");
     };
-    let assoc_id = message.assoc_id().unwrap();
+    let assoc_id = message.assoc_id;
 
     // The second address is confirmed by a heartbeat, which may take a moment.
     let confirmed = async {

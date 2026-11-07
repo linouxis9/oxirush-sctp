@@ -1,6 +1,7 @@
 //! Whole-record assembly, independent of descriptor ownership and readiness.
 use super::notifications::notification_from_message;
-use crate::{NotificationOrData, NxtInfo, RcvInfo, ReceivedData};
+use crate::types::internal::RcvInfoWire;
+use crate::{NotificationOrData, ReceivedData};
 use std::net::SocketAddr;
 
 // Messages longer than this are discarded unless the socket sets another limit, so that a peer
@@ -38,7 +39,8 @@ const DISCARD_BUFFER_SIZE: usize = 65536;
 pub(crate) struct PartialMessage {
     notification: bool,
     payload: Vec<u8>,
-    rcv_info: Option<RcvInfo>,
+    // The receive information of its first part, none for a notification.
+    info: RcvInfoWire,
     from: Option<SocketAddr>,
     // Octets received, also those discarded once the message is longer than the limit.
     received: usize,
@@ -50,16 +52,15 @@ impl PartialMessage {
         Self {
             notification: piece.notification,
             payload: part.to_vec(),
-            rcv_info: piece.rcv_info.clone(),
+            info: piece.info,
             from: piece.from,
             received: piece.len,
         }
     }
 
+    // Whether it may be of association `assoc_id`: a notification may be of any.
     pub(crate) fn belongs_to(&self, assoc_id: crate::AssociationId) -> bool {
-        self.rcv_info
-            .as_ref()
-            .is_none_or(|info| info.assoc_id == assoc_id)
+        self.notification || self.info.assoc_id == assoc_id
     }
 }
 
@@ -68,7 +69,7 @@ impl std::fmt::Debug for PartialMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PartialMessage")
             .field("notification", &self.notification)
-            .field("rcv_info", &self.rcv_info)
+            .field("info", &self.info)
             .field("from", &self.from)
             .field("received", &self.received)
             .finish()
@@ -80,8 +81,8 @@ pub(crate) struct Piece {
     pub(super) len: usize,
     pub(super) notification: bool,
     pub(super) end_of_record: bool,
-    pub(super) rcv_info: Option<RcvInfo>,
-    pub(super) nxt_info: Option<NxtInfo>,
+    // Zero for a notification, which has none.
+    pub(super) info: RcvInfoWire,
     pub(super) from: Option<SocketAddr>,
 }
 
@@ -121,6 +122,7 @@ impl Default for Partials {
 }
 
 impl Partials {
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.messages.is_empty()
     }
@@ -162,10 +164,7 @@ impl Partials {
             .iter()
             .enumerate()
             .filter(|(_, message)| !message.notification)
-            .filter_map(|(index, message)| {
-                let assoc_id = message.rcv_info.as_ref()?.assoc_id;
-                Some((message.payload.len(), index, assoc_id))
-            })
+            .map(|(index, message)| (message.payload.len(), index, message.info.assoc_id))
             .max();
         let Some((octets, index, assoc_id)) = longest else {
             return Ok(());
@@ -209,12 +208,11 @@ impl Partials {
         self.messages.push(message);
     }
 
-    // The message of the key of `piece`, if one is being assembled.
+    // The message of the association of `piece`, if one is being assembled.
     fn take(&mut self, piece: &Piece) -> Option<PartialMessage> {
-        let key = |info: &Option<RcvInfo>| info.as_ref().map(|info| info.assoc_id);
         let index = self.messages.iter().position(|message| {
             message.notification == piece.notification
-                && key(&message.rcv_info) == key(&piece.rcv_info)
+                && message.info.assoc_id == piece.info.assoc_id
         })?;
         let message = self.messages.swap_remove(index);
         self.held -= message.payload.len();
@@ -223,11 +221,7 @@ impl Partials {
 
     // Whether `piece` is of an association aborted for the limit, whose parts are dropped.
     fn dropped(&self, piece: &Piece) -> bool {
-        !piece.notification
-            && piece
-                .rcv_info
-                .as_ref()
-                .is_some_and(|info| self.dropping.contains(&info.assoc_id))
+        !piece.notification && self.dropping.contains(&piece.info.assoc_id)
     }
 
     // An association whose end `notification` tells has no more parts to give.
@@ -247,13 +241,8 @@ impl Partials {
             }
             _ => return,
         };
-        self.messages.retain(|message| {
-            message.notification
-                || message
-                    .rcv_info
-                    .as_ref()
-                    .is_some_and(|info| info.assoc_id != ended)
-        });
+        self.messages
+            .retain(|message| message.notification || message.info.assoc_id != ended);
         self.held = self
             .messages
             .iter()
@@ -272,10 +261,9 @@ impl Partials {
 pub(super) fn receive_message(
     partials: &mut Partials,
     max_message_size: usize,
-    one_association: bool,
     mut read: impl FnMut(&mut [u8]) -> std::io::Result<Piece>,
 ) -> std::io::Result<Option<NotificationOrData>> {
-    let received = assemble(partials, max_message_size, one_association, &mut read);
+    let received = assemble(partials, max_message_size, &mut read);
     if let Ok(Some(NotificationOrData::Notification(notification))) = &received {
         partials.learn(notification);
     }
@@ -285,7 +273,6 @@ pub(super) fn receive_message(
 fn assemble(
     partials: &mut Partials,
     max_message_size: usize,
-    one_association: bool,
     read: &mut impl FnMut(&mut [u8]) -> std::io::Result<Piece>,
 ) -> std::io::Result<Option<NotificationOrData>> {
     loop {
@@ -354,13 +341,13 @@ fn assemble(
         }
 
         let continued = message.received > 0;
-        if continued && !continues(&message, &piece, one_association) {
+        if continued && !continues(&message, &piece) {
             message.payload.drain(..start);
             message.received = 0;
         }
         if message.received == 0 {
             message.notification = piece.notification;
-            message.rcv_info = piece.rcv_info;
+            message.info = piece.info;
             message.from = piece.from;
         }
         message.received = message.received.saturating_add(piece.len);
@@ -369,32 +356,26 @@ fn assemble(
             partials.begin(message);
             continue;
         }
-        return finish(message, piece.nxt_info, max_message_size);
+        return finish(message, max_message_size);
     }
 }
 
-// Whether `piece` is the next part of `message`.
-fn continues(message: &PartialMessage, piece: &Piece, one_association: bool) -> bool {
-    let same_message = match (&message.rcv_info, &piece.rcv_info) {
-        (Some(first), Some(next)) => {
-            first.assoc_id == next.assoc_id
-                && first.sid == next.sid
-                && first.ppid == next.ppid
-                && first.flags == next.flags
-                // The SSN has no meaning for unordered messages.
-                && (first.flags & 1 != 0 || first.ssn == next.ssn)
-        }
-        // Without receive information only the address tells senders apart, and the parts
-        // of a message can come from several addresses of a multihomed peer.
-        _ => one_association || message.from == piece.from,
-    };
-    piece.notification == message.notification && same_message
+// Whether `piece` is the next part of `message`. The parts of a message can come from several
+// addresses of a multihomed peer: its receive information tells it apart.
+fn continues(message: &PartialMessage, piece: &Piece) -> bool {
+    let (first, next) = (&message.info, &piece.info);
+    piece.notification == message.notification
+        && first.assoc_id == next.assoc_id
+        && first.sid == next.sid
+        && first.ppid == next.ppid
+        && first.flags == next.flags
+        // The SSN has no meaning for unordered messages.
+        && (first.flags & crate::consts::SCTP_UNORDERED != 0 || first.ssn == next.ssn)
 }
 
 // A message whose last part has come.
 fn finish(
     mut message: PartialMessage,
-    nxt_info: Option<NxtInfo>,
     max_message_size: usize,
 ) -> std::io::Result<Option<NotificationOrData>> {
     if !message.notification && message.received > max_message_size {
@@ -414,12 +395,19 @@ fn finish(
     // The buffer had room for the largest read, 4 KiB at least, which a
     // program that keeps many short messages would pay for each
     message.payload.shrink_to_fit();
-    Ok(Some(NotificationOrData::Data(ReceivedData {
-        payload: message.payload,
-        from: message.from,
-        rcv_info: message.rcv_info,
-        nxt_info,
-    })))
+    Ok(Some(data(message.payload, &message.info, message.from)))
+}
+
+// The message of `payload`, with the receive information of its first part.
+fn data(payload: Vec<u8>, info: &RcvInfoWire, from: Option<SocketAddr>) -> NotificationOrData {
+    NotificationOrData::Data(ReceivedData {
+        payload,
+        stream: info.sid,
+        ppid: u32::from_be(info.ppid),
+        assoc_id: info.assoc_id,
+        unordered: info.flags & crate::consts::SCTP_UNORDERED != 0,
+        from,
+    })
 }
 
 // The next part of one of the messages of several associations that come in turns, read into the
@@ -439,13 +427,7 @@ fn interleaved_read(
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => return Ok(None),
             Err(error) => return Err(error),
         };
-        push(
-            partials,
-            &buffer[..piece.len],
-            &piece,
-            max_message_size,
-            false,
-        )
+        push(partials, &buffer[..piece.len], &piece, max_message_size)
     })
 }
 
@@ -456,7 +438,6 @@ fn push(
     octets: &[u8],
     piece: &Piece,
     max_message_size: usize,
-    one_association: bool,
 ) -> std::io::Result<Option<Option<NotificationOrData>>> {
     if piece.len == 0 && !piece.notification {
         partials.clear();
@@ -466,7 +447,7 @@ fn push(
         return Ok(None);
     }
     let message = match partials.take(piece) {
-        Some(message) if continues(&message, piece, one_association) => Some(message),
+        Some(message) if continues(&message, piece) => Some(message),
         // A message whose delivery was aborted is dropped.
         _ => None,
     };
@@ -496,7 +477,7 @@ fn push(
         partials.begin(message);
         return Ok(None);
     }
-    finish(message, piece.nxt_info.clone(), max_message_size).map(Some)
+    finish(message, max_message_size).map(Some)
 }
 
 // The messages and notifications that one batch of reads makes whole, in their order, each as
@@ -506,12 +487,11 @@ fn push(
 pub(super) fn receive_batch<'a>(
     partials: &mut Partials,
     max_message_size: usize,
-    one_association: bool,
     pieces: impl IntoIterator<Item = (&'a [u8], &'a Piece)>,
     received: &mut Vec<std::io::Result<Option<NotificationOrData>>>,
 ) {
     for (octets, piece) in pieces {
-        match push(partials, octets, piece, max_message_size, one_association) {
+        match push(partials, octets, piece, max_message_size) {
             Ok(None) => {
                 if let Err(error) = partials.within_limit() {
                     received.push(Err(error));
@@ -591,12 +571,11 @@ fn begin(octets: &[u8], piece: &Piece, max_message_size: usize) -> std::io::Resu
                 notification_from_message(octets),
             ))));
         }
-        Ok(First::Whole(Some(NotificationOrData::Data(ReceivedData {
-            payload: octets.to_vec(),
-            from: piece.from,
-            rcv_info: piece.rcv_info.clone(),
-            nxt_info: piece.nxt_info.clone(),
-        }))))
+        Ok(First::Whole(Some(data(
+            octets.to_vec(),
+            &piece.info,
+            piece.from,
+        ))))
     }
 }
 
@@ -611,15 +590,14 @@ mod tests {
         Error(std::io::ErrorKind),
     }
 
-    fn data(payload: &[u8], end_of_record: bool, rcv_info: Option<RcvInfo>) -> Step {
+    fn data(payload: &[u8], end_of_record: bool, info: Option<RcvInfoWire>) -> Step {
         Step::Piece(
             payload.to_vec(),
             Piece {
                 len: payload.len(),
                 notification: false,
                 end_of_record,
-                rcv_info,
-                nxt_info: None,
+                info: info.unwrap_or_default(),
                 from: None,
             },
         )
@@ -660,8 +638,7 @@ mod tests {
                 len,
                 notification: false,
                 end_of_record: rest.is_empty(),
-                rcv_info: None,
-                nxt_info: None,
+                info: RcvInfoWire::default(),
                 from: None,
             })
         }
@@ -676,7 +653,7 @@ mod tests {
             let mut partial = Partials::default();
             let message: Vec<u8> = (0..octets).map(|i| i as u8).collect();
             let read = kernel(message.clone(), &reads);
-            let received = payload(receive_message(&mut partial, 1 << 20, true, read).unwrap());
+            let received = payload(receive_message(&mut partial, 1 << 20, read).unwrap());
             assert_eq!(received, message);
             assert_eq!(received.capacity(), octets);
             assert_eq!(reads.get(), 1, "{octets} octets");
@@ -686,7 +663,7 @@ mod tests {
         let mut partial = Partials::default();
         let message = vec![7; 200_000];
         let received = payload(
-            receive_message(&mut partial, 1 << 20, true, kernel(message.clone(), &reads)).unwrap(),
+            receive_message(&mut partial, 1 << 20, kernel(message.clone(), &reads)).unwrap(),
         );
         assert_eq!((received == message, received.capacity()), (true, 200_000));
         assert!(reads.get() <= 3, "{} reads", reads.get());
@@ -699,12 +676,12 @@ mod tests {
     fn a_message_keeps_no_more_memory_than_its_octets() {
         let mut partial = Partials::default();
         let read = reader(vec![data(b"sixty-four octets, say", true, None)]);
-        let short = payload(receive_message(&mut partial, 1 << 20, true, read).unwrap());
+        let short = payload(receive_message(&mut partial, 1 << 20, read).unwrap());
         assert_eq!(short.capacity(), short.len());
 
         let (first, last) = (vec![1; 4000], vec![2; 300]);
         let read = reader(vec![data(&first, false, None), data(&last, true, None)]);
-        let long = payload(receive_message(&mut partial, 1 << 20, true, read).unwrap());
+        let long = payload(receive_message(&mut partial, 1 << 20, read).unwrap());
         assert_eq!((long.len(), long.capacity()), (4300, 4300));
     }
 
@@ -717,49 +694,47 @@ mod tests {
             data(b"last", true, None),
         ]);
         assert_eq!(
-            payload(receive_message(&mut partial, 100, false, read).unwrap()),
+            payload(receive_message(&mut partial, 100, read).unwrap()),
             b"firstlast"
         );
         assert!(partial.is_empty());
     }
 
     #[test]
-    fn would_block_and_resume_preserve_first_and_last_metadata() {
-        let first = RcvInfo {
+    fn would_block_and_resume_preserve_the_receive_information() {
+        let first = RcvInfoWire {
             sid: 2,
+            ppid: 60_u32.to_be(),
+            flags: crate::consts::SCTP_UNORDERED,
             assoc_id: 7,
             ..Default::default()
         };
-        let next = NxtInfo {
-            length: 5,
-            assoc_id: 7,
-            ..Default::default()
-        };
-        let mut last = data(b"last", true, Some(first.clone()));
-        if let Step::Piece(_, piece) = &mut last {
-            piece.nxt_info = Some(next.clone());
-        }
         let mut read = reader(vec![
-            data(b"first", false, Some(first.clone())),
+            data(b"first", false, Some(first)),
             Step::Error(std::io::ErrorKind::WouldBlock),
-            last,
+            data(b"last", true, Some(first)),
         ]);
         let mut partial = Partials::default();
         assert_eq!(
-            receive_message(&mut partial, 100, false, &mut read)
+            receive_message(&mut partial, 100, &mut read)
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::WouldBlock
         );
         assert_eq!(partial.messages[0].payload, b"first");
         let Some(NotificationOrData::Data(record)) =
-            receive_message(&mut partial, 100, false, read).unwrap()
+            receive_message(&mut partial, 100, read).unwrap()
         else {
             panic!("not data");
         };
         assert_eq!(record.payload, b"firstlast");
-        assert_eq!(record.rcv_info, Some(first));
-        assert_eq!(record.nxt_info, Some(next));
+        let info = (
+            record.stream,
+            record.ppid,
+            record.unordered,
+            record.assoc_id,
+        );
+        assert_eq!(info, (2, 60, true, 7));
         assert!(partial.is_empty());
     }
 
@@ -772,14 +747,14 @@ mod tests {
             data(b"ok", true, None),
         ]);
         assert_eq!(
-            receive_message(&mut partial, 4, false, &mut read)
+            receive_message(&mut partial, 4, &mut read)
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::InvalidData
         );
         assert!(partial.is_empty());
         assert_eq!(
-            payload(receive_message(&mut partial, 4, false, read).unwrap()),
+            payload(receive_message(&mut partial, 4, read).unwrap()),
             b"ok"
         );
     }
@@ -794,19 +769,19 @@ mod tests {
             data(b"ok", true, None),
         ]);
         assert_eq!(
-            receive_message(&mut partial, 10, false, &mut read)
+            receive_message(&mut partial, 10, &mut read)
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::WouldBlock
         );
         assert_eq!(
-            receive_message(&mut partial, 4, false, &mut read)
+            receive_message(&mut partial, 4, &mut read)
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::InvalidData
         );
         assert_eq!(
-            payload(receive_message(&mut partial, 4, false, read).unwrap()),
+            payload(receive_message(&mut partial, 4, read).unwrap()),
             b"ok"
         );
     }
@@ -818,7 +793,7 @@ mod tests {
             data(
                 b"aborted",
                 false,
-                Some(RcvInfo {
+                Some(RcvInfoWire {
                     assoc_id: 7,
                     ..Default::default()
                 }),
@@ -826,20 +801,20 @@ mod tests {
             data(
                 b"new",
                 true,
-                Some(RcvInfo {
+                Some(RcvInfoWire {
                     assoc_id: 8,
                     ..Default::default()
                 }),
             ),
         ]);
         assert_eq!(
-            payload(receive_message(&mut partial, 100, false, read).unwrap()),
+            payload(receive_message(&mut partial, 100, read).unwrap()),
             b"new"
         );
     }
 
-    fn of(assoc_id: i32) -> Option<RcvInfo> {
-        Some(RcvInfo {
+    fn of(assoc_id: i32) -> Option<RcvInfoWire> {
+        Some(RcvInfoWire {
             assoc_id,
             ..Default::default()
         })
@@ -861,18 +836,18 @@ mod tests {
             Step::Error(std::io::ErrorKind::WouldBlock),
         ]);
         let mut next = || {
-            let message = match receive_message(&mut partials, 100, false, &mut read) {
+            let message = match receive_message(&mut partials, 100, &mut read) {
                 Ok(Some(NotificationOrData::Data(message))) => message,
                 other => panic!("{other:?}"),
             };
             (
-                message.assoc_id(),
+                message.assoc_id,
                 String::from_utf8(message.payload).unwrap(),
             )
         };
-        assert_eq!(next(), (Some(8), "short".into()));
-        assert_eq!(next(), (Some(7), "long long message".into()));
-        assert_eq!(next(), (Some(9), "other message".into()));
+        assert_eq!(next(), (8, "short".into()));
+        assert_eq!(next(), (7, "long long message".into()));
+        assert_eq!(next(), (9, "other message".into()));
         assert!(partials.is_empty());
     }
 
@@ -913,8 +888,7 @@ mod tests {
                     len: octets.len(),
                     notification: true,
                     end_of_record: true,
-                    rcv_info: None,
-                    nxt_info: None,
+                    info: RcvInfoWire::default(),
                     from: None,
                 },
             )
@@ -929,7 +903,7 @@ mod tests {
                 data(b"new", true, of(7)),
                 data(b"message", true, of(8)),
             ]);
-            let mut next = || receive_message(&mut partials, 100, false, &mut read).unwrap();
+            let mut next = || receive_message(&mut partials, 100, &mut read).unwrap();
             assert!(matches!(next(), Some(NotificationOrData::Notification(_))));
             assert_eq!(payload(next()), b"new");
             assert_eq!(payload(next()), b"kept message");
@@ -949,7 +923,7 @@ mod tests {
             data(b"0123456789", true, of(7)),
             data(b"next", true, of(7)),
         ]);
-        let mut next = || receive_message(&mut partials, 15, false, &mut read);
+        let mut next = || receive_message(&mut partials, 15, &mut read);
         assert_eq!(payload(next().unwrap()), b"short");
         assert_eq!(next().unwrap_err().kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(payload(next().unwrap()), b"next");
@@ -977,8 +951,7 @@ mod tests {
                     len: octets.len(),
                     notification: true,
                     end_of_record: true,
-                    rcv_info: None,
-                    nxt_info: None,
+                    info: RcvInfoWire::default(),
                     from: None,
                 },
             )
@@ -996,7 +969,7 @@ mod tests {
             given_up,
             data(b"new", true, of(7)),
         ]);
-        let mut next = || receive_message(&mut partials, 100, false, &mut read);
+        let mut next = || receive_message(&mut partials, 100, &mut read);
         let error = next().unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(
@@ -1006,7 +979,7 @@ mod tests {
         );
         assert_eq!(partials.take_aborts(), [7]);
         assert_eq!(partials.held, 6);
-        let mut next = || receive_message(&mut partials, 100, false, &mut read);
+        let mut next = || receive_message(&mut partials, 100, &mut read);
         assert_eq!(payload(next().unwrap()), b"short one");
         assert!(matches!(
             next().unwrap(),
@@ -1018,33 +991,20 @@ mod tests {
     }
 
     #[test]
-    fn one_association_keeps_a_record_whose_pieces_come_from_two_peer_addresses() {
+    fn a_record_whose_pieces_come_from_two_peer_addresses_is_one() {
         let piece = |payload: &[u8], end_of_record, from: &str| {
-            let mut step = data(payload, end_of_record, None);
+            let mut step = data(payload, end_of_record, of(7));
             if let Step::Piece(_, piece) = &mut step {
                 piece.from = Some(from.parse().unwrap());
             }
             step
         };
-        let pieces = || {
-            vec![
-                piece(b"first", false, "192.0.2.1:38412"),
-                piece(b"last", true, "198.51.100.1:38412"),
-            ]
-        };
-        assert_eq!(
-            payload(
-                receive_message(&mut Partials::default(), 100, true, reader(pieces())).unwrap()
-            ),
-            b"firstlast"
-        );
-        // The address is all that tells the associations of a one-to-many socket apart.
-        assert_eq!(
-            payload(
-                receive_message(&mut Partials::default(), 100, false, reader(pieces())).unwrap()
-            ),
-            b"last"
-        );
+        let pieces = vec![
+            piece(b"first", false, "192.0.2.1:38412"),
+            piece(b"last", true, "198.51.100.1:38412"),
+        ];
+        let received = receive_message(&mut Partials::default(), 100, reader(pieces));
+        assert_eq!(payload(received.unwrap()), b"firstlast");
     }
 
     #[test]
@@ -1061,14 +1021,13 @@ mod tests {
                     len: raw.len(),
                     notification: true,
                     end_of_record: true,
-                    rcv_info: None,
-                    nxt_info: None,
+                    info: RcvInfoWire::default(),
                     from: None,
                 },
             ),
         ]);
         assert_eq!(
-            receive_message(&mut partial, 100, false, read).unwrap(),
+            receive_message(&mut partial, 100, read).unwrap(),
             Some(NotificationOrData::Notification(
                 crate::Notification::Unsupported {
                     kind: crate::Event::PartialDelivery as u16,
@@ -1080,23 +1039,20 @@ mod tests {
 
     #[test]
     fn unordered_continuation_does_not_depend_on_stream_sequence_number() {
-        let first = RcvInfo {
+        let first = RcvInfoWire {
             assoc_id: 7,
             sid: 2,
             flags: 1,
             ssn: 1,
             ..Default::default()
         };
-        let last = RcvInfo {
-            ssn: 99,
-            ..first.clone()
-        };
+        let last = RcvInfoWire { ssn: 99, ..first };
         let read = reader(vec![
             data(b"first", false, Some(first)),
             data(b"last", true, Some(last)),
         ]);
         assert_eq!(
-            payload(receive_message(&mut Partials::default(), 100, false, read).unwrap()),
+            payload(receive_message(&mut Partials::default(), 100, read).unwrap()),
             b"firstlast"
         );
     }
@@ -1105,10 +1061,7 @@ mod tests {
     fn eof_discards_the_incomplete_record() {
         let mut partial = Partials::default();
         let read = reader(vec![data(b"partial", false, None), data(b"", false, None)]);
-        assert_eq!(
-            receive_message(&mut partial, 100, false, read).unwrap(),
-            None
-        );
+        assert_eq!(receive_message(&mut partial, 100, read).unwrap(), None);
         assert!(partial.is_empty());
     }
 
@@ -1128,8 +1081,7 @@ mod tests {
                     len: octets.len(),
                     notification: true,
                     end_of_record,
-                    rcv_info: None,
-                    nxt_info: None,
+                    info: RcvInfoWire::default(),
                     from: None,
                 },
             )
@@ -1146,18 +1098,18 @@ mod tests {
             data(b"ok", true, None),
         ]);
         assert_eq!(
-            receive_message(&mut partial, 10, true, &mut read).unwrap(),
+            receive_message(&mut partial, 10, &mut read).unwrap(),
             expected
         );
         // A message of the peer over the limit is still discarded
         assert_eq!(
-            receive_message(&mut partial, 10, true, &mut read)
+            receive_message(&mut partial, 10, &mut read)
                 .unwrap_err()
                 .kind(),
             std::io::ErrorKind::InvalidData
         );
         assert_eq!(
-            payload(receive_message(&mut partial, 10, true, read).unwrap()),
+            payload(receive_message(&mut partial, 10, read).unwrap()),
             b"ok"
         );
     }
@@ -1174,7 +1126,7 @@ mod tests {
                 ..Default::default()
             });
             assert_eq!(
-                receive_message(&mut partial, limit, false, |buffer| {
+                receive_message(&mut partial, limit, |buffer| {
                     super::super::sys::sctp_recvmsg_once(socket.as_fd(), buffer)
                 })
                 .unwrap_err()
@@ -1208,8 +1160,7 @@ mod tests {
                 len: octets.len(),
                 notification: true,
                 end_of_record: true,
-                rcv_info: None,
-                nxt_info: None,
+                info: RcvInfoWire::default(),
                 from: None,
             },
         )
@@ -1225,10 +1176,10 @@ mod tests {
             Step::Error(std::io::ErrorKind::WouldBlock),
             data(b"last", true, None),
         ]);
-        let error = receive_message(&mut partials, 100, false, &mut read).unwrap_err();
+        let error = receive_message(&mut partials, 100, &mut read).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
         assert_eq!(partials.held, 5);
-        let received = receive_message(&mut partials, 100, false, read).unwrap();
+        let received = receive_message(&mut partials, 100, read).unwrap();
         assert_eq!(payload(received), b"firstlast");
         assert_eq!(partials.held, 0);
     }
@@ -1239,10 +1190,7 @@ mod tests {
         let mut partials = Partials::default();
         partials.set_interleaved(true);
         let read = reader(vec![data(b"part", false, of(7)), data(b"", false, None)]);
-        assert_eq!(
-            receive_message(&mut partials, 100, false, read).unwrap(),
-            None
-        );
+        assert_eq!(receive_message(&mut partials, 100, read).unwrap(), None);
         assert!(partials.is_empty());
         assert_eq!(partials.held, 0);
     }
@@ -1255,10 +1203,7 @@ mod tests {
             let mut partials = Partials::default();
             partials.set_interleaved(interleaved);
             let read = reader(vec![data(b"", false, None)]);
-            assert_eq!(
-                receive_message(&mut partials, 100, false, read).unwrap(),
-                None
-            );
+            assert_eq!(receive_message(&mut partials, 100, read).unwrap(), None);
             assert!(partials.is_empty());
         }
     }
@@ -1275,7 +1220,7 @@ mod tests {
             assoc_change(0, 7),
             data(b"message", true, of(7)),
         ]);
-        let mut next = || receive_message(&mut partials, 100, false, &mut read).unwrap();
+        let mut next = || receive_message(&mut partials, 100, &mut read).unwrap();
         assert!(matches!(next(), Some(NotificationOrData::Notification(_))));
         assert_eq!(payload(next()), b"kept message");
     }
@@ -1289,7 +1234,7 @@ mod tests {
             data(b"first", false, None),
             Step::Error(std::io::ErrorKind::ConnectionReset),
         ]);
-        let error = receive_message(&mut partials, 100, true, read).unwrap_err();
+        let error = receive_message(&mut partials, 100, read).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
         assert!(partials.is_empty());
     }
@@ -1301,7 +1246,7 @@ mod tests {
         let mut partials = Partials::default();
         partials.begin(PartialMessage::default());
         let read = reader(vec![Step::Error(std::io::ErrorKind::WouldBlock)]);
-        let error = receive_message(&mut partials, 100, true, read).unwrap_err();
+        let error = receive_message(&mut partials, 100, read).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
         assert!(partials.is_empty());
     }
@@ -1310,21 +1255,18 @@ mod tests {
     /// begins another message.
     #[test]
     fn the_parts_of_an_ordered_message_have_its_stream_sequence_number() {
-        let first = RcvInfo {
+        let first = RcvInfoWire {
             assoc_id: 7,
             sid: 2,
             ssn: 1,
             ..Default::default()
         };
-        let other = RcvInfo {
-            ssn: 2,
-            ..first.clone()
-        };
+        let other = RcvInfoWire { ssn: 2, ..first };
         let read = reader(vec![
             data(b"first", false, Some(first)),
             data(b"other", true, Some(other)),
         ]);
-        let received = receive_message(&mut Partials::default(), 100, false, read).unwrap();
+        let received = receive_message(&mut Partials::default(), 100, read).unwrap();
         assert_eq!(payload(received), b"other");
     }
 
@@ -1336,7 +1278,7 @@ mod tests {
             Step::Error(std::io::ErrorKind::Interrupted),
             data(b"whole", true, None),
         ]);
-        let received = receive_message(&mut Partials::default(), 100, false, read).unwrap();
+        let received = receive_message(&mut Partials::default(), 100, read).unwrap();
         assert_eq!(payload(received), b"whole");
 
         let mut partials = Partials::default();
@@ -1346,7 +1288,7 @@ mod tests {
             Step::Error(std::io::ErrorKind::Interrupted),
             data(b"last", true, of(7)),
         ]);
-        let received = receive_message(&mut partials, 100, false, read).unwrap();
+        let received = receive_message(&mut partials, 100, read).unwrap();
         assert_eq!(payload(received), b"first last");
     }
 
@@ -1355,7 +1297,7 @@ mod tests {
     #[test]
     fn a_part_of_another_message_drops_the_message_of_its_association() {
         let stream = |sid| {
-            Some(RcvInfo {
+            Some(RcvInfoWire {
                 assoc_id: 7,
                 sid,
                 ..Default::default()
@@ -1367,7 +1309,7 @@ mod tests {
             data(b"given up", false, stream(1)),
             data(b"new", true, stream(2)),
         ]);
-        let received = receive_message(&mut partials, 100, false, read).unwrap();
+        let received = receive_message(&mut partials, 100, read).unwrap();
         assert_eq!(payload(received), b"new");
         assert!(partials.is_empty());
     }
@@ -1381,7 +1323,7 @@ mod tests {
             data(b"01234", false, of(7)),
             data(b"56789", true, of(7)),
         ]);
-        let received = receive_message(&mut partials, 10, false, read).unwrap();
+        let received = receive_message(&mut partials, 10, read).unwrap();
         assert_eq!(payload(received), b"0123456789");
     }
 
@@ -1396,7 +1338,7 @@ mod tests {
                 data(part, false, of(7)),
                 Step::Error(std::io::ErrorKind::WouldBlock),
             ]);
-            let error = receive_message(&mut partials, 4, false, read).unwrap_err();
+            let error = receive_message(&mut partials, 4, read).unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
             assert_eq!(partials.held, held, "a first part of {} octets", part.len());
         }
@@ -1409,7 +1351,7 @@ mod tests {
         let message = PartialMessage {
             notification: false,
             payload: b"secret".to_vec(),
-            rcv_info: of(7),
+            info: of(7).unwrap(),
             from: Some("192.0.2.1:38412".parse().unwrap()),
             received: 6,
         };
@@ -1431,16 +1373,13 @@ mod tests {
     fn the_end_of_the_stream_ends_a_message() {
         let read = reader(vec![data(b"partial", false, None), data(b"", false, None)]);
         assert_eq!(
-            receive_message(&mut Partials::default(), 100, false, read).unwrap(),
+            receive_message(&mut Partials::default(), 100, read).unwrap(),
             None
         );
         let mut partials = Partials::default();
         partials.begin(PartialMessage::default());
         let read = reader(vec![data(b"", false, None)]);
-        assert_eq!(
-            receive_message(&mut partials, 100, false, read).unwrap(),
-            None
-        );
+        assert_eq!(receive_message(&mut partials, 100, read).unwrap(), None);
     }
 
     /// A message of which nothing was received is begun by the next part, from whatever
@@ -1453,7 +1392,7 @@ mod tests {
         if let Step::Piece(_, piece) = &mut piece {
             piece.from = Some("192.0.2.1:38412".parse().unwrap());
         }
-        let received = receive_message(&mut partials, 100, false, reader(vec![piece]));
+        let received = receive_message(&mut partials, 100, reader(vec![piece]));
         assert_eq!(payload(received.unwrap()), b"whole");
     }
 }

@@ -109,7 +109,11 @@ impl SndInfoWire {
     pub(crate) fn new(options: crate::SendOptions, assoc_id: AssociationId) -> Self {
         Self {
             sid: options.stream_id,
-            flags: u16::from(options.unordered),
+            flags: if options.unordered {
+                crate::consts::SCTP_UNORDERED
+            } else {
+                0
+            },
             ppid: options.ppid.to_be(),
             context: options.context,
             assoc_id,
@@ -126,9 +130,9 @@ impl SndInfoWire {
     }
 }
 
-// `struct sctp_rcvinfo`.
+// `struct sctp_rcvinfo`, with the payload protocol identifier in network byte order.
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RcvInfoWire {
     pub(crate) sid: u16,
     pub(crate) ssn: u16,
@@ -138,44 +142,6 @@ pub(crate) struct RcvInfoWire {
     pub(crate) cumtsn: u32,
     pub(crate) context: u32,
     pub(crate) assoc_id: AssociationId,
-}
-
-impl From<RcvInfoWire> for crate::RcvInfo {
-    fn from(wire: RcvInfoWire) -> Self {
-        Self {
-            sid: wire.sid,
-            ssn: wire.ssn,
-            flags: wire.flags,
-            ppid: u32::from_be(wire.ppid),
-            tsn: wire.tsn,
-            cumtsn: wire.cumtsn,
-            context: wire.context,
-            assoc_id: wire.assoc_id,
-        }
-    }
-}
-
-// `struct sctp_nxtinfo`.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub(crate) struct NxtInfoWire {
-    pub(crate) sid: u16,
-    pub(crate) flags: u16,
-    pub(crate) ppid: u32,
-    pub(crate) length: u32,
-    pub(crate) assoc_id: AssociationId,
-}
-
-impl From<NxtInfoWire> for crate::NxtInfo {
-    fn from(wire: NxtInfoWire) -> Self {
-        Self {
-            sid: wire.sid,
-            flags: wire.flags,
-            ppid: u32::from_be(wire.ppid),
-            length: wire.length,
-            assoc_id: wire.assoc_id,
-        }
-    }
 }
 
 // `struct sctp_rtoinfo`.
@@ -331,7 +297,6 @@ mod tests {
         assert_eq!(size_of::<RcvInfoWire>(), 28);
         assert_eq!(offset_of!(RcvInfoWire, ppid), 8);
         assert_eq!(offset_of!(RcvInfoWire, assoc_id), 24);
-        assert_eq!(size_of::<NxtInfoWire>(), 16);
         assert_eq!(size_of::<RtoInfoWire>(), 16);
         assert_eq!(size_of::<AssocParamsWire>(), 20);
         assert_eq!(offset_of!(AssocParamsWire, peer_rwnd), 8);

@@ -203,60 +203,20 @@ pub(crate) fn sctp_setup_init_params_internal(
     }
 }
 
-/// `SCTP_FRAGMENT_INTERLEAVE`: level 1 lets the parts of the messages of several
-/// associations come in turns, level 0 not.
-pub(crate) fn set_fragment_interleave_internal(
-    fd: BorrowedFd<'_>,
-    interleave: bool,
-) -> std::io::Result<()> {
+/// `SCTP_FRAGMENT_INTERLEAVE` level 1: the parts of the messages of several associations
+/// come in turns.
+pub(crate) fn set_fragment_interleave_internal(fd: BorrowedFd<'_>) -> std::io::Result<()> {
     setsockopt_internal(
         fd,
         SOL_SCTP,
         crate::consts::SCTP_FRAGMENT_INTERLEAVE,
-        &libc::c_int::from(interleave),
+        &libc::c_int::from(true),
     )
 }
 
-pub(crate) fn request_rcvinfo_internal(fd: BorrowedFd<'_>, on: bool) -> std::io::Result<()> {
-    let enable: libc::socklen_t = u32::from(on);
-    let enable_size = std::mem::size_of::<libc::socklen_t>();
-
-    unsafe {
-        let result = libc::setsockopt(
-            fd.as_raw_fd(),
-            SOL_SCTP,
-            SCTP_RECVRCVINFO,
-            &enable as *const _ as *const libc::c_void,
-            enable_size.try_into().unwrap(),
-        );
-
-        if result < 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
-}
-
-pub(crate) fn request_nxtinfo_internal(fd: BorrowedFd<'_>, on: bool) -> std::io::Result<()> {
-    let enable: libc::socklen_t = u32::from(on);
-    let enable_size = std::mem::size_of::<libc::socklen_t>();
-
-    unsafe {
-        let result = libc::setsockopt(
-            fd.as_raw_fd(),
-            SOL_SCTP,
-            SCTP_RECVNXTINFO,
-            &enable as *const _ as *const libc::c_void,
-            enable_size.try_into().unwrap(),
-        );
-
-        if result < 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
+/// `SCTP_RECVRCVINFO`: the receive information of each message.
+pub(crate) fn request_rcvinfo_internal(fd: BorrowedFd<'_>) -> std::io::Result<()> {
+    setsockopt_internal(fd, SOL_SCTP, SCTP_RECVRCVINFO, &libc::c_int::from(true))
 }
 
 pub(crate) fn sctp_set_nodelay_internal(fd: BorrowedFd<'_>, nodelay: bool) -> std::io::Result<()> {

@@ -117,9 +117,7 @@ async fn an_abort_of_an_endpoint_carries_its_reason() {
     let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() else {
         panic!("not a message");
     };
-    endpoint
-        .abort(message.assoc_id().unwrap(), b"going away")
-        .unwrap();
+    endpoint.abort(message.assoc_id, b"going away").unwrap();
     let lost = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             match client.recv().await {
@@ -210,7 +208,7 @@ async fn endpoint_and_peer() -> (OneToManyEndpoint, ConnectedSocket, Association
     let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() else {
         panic!("not the message of the peer")
     };
-    (endpoint, peer, message.assoc_id().unwrap())
+    (endpoint, peer, message.assoc_id)
 }
 
 /// What the associations of a socket start with is read back as it was set.

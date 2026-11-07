@@ -62,7 +62,7 @@ async fn a_writer_keeps_the_order_of_what_it_queues() {
         match tokio::time::timeout(WAIT, reader.recv()).await.unwrap() {
             Some(Ok(NotificationOrData::Data(message))) => {
                 assert_eq!(number(&message.payload), index);
-                assert_eq!(message.ppid(), Some(60));
+                assert_eq!(message.ppid, 60);
             }
             other => panic!("{other:?}"),
         }
@@ -97,7 +97,7 @@ async fn the_associations_of_an_endpoint_take_turns() {
         client.send(b"hello", SendOptions::new()).await.unwrap();
         let identity = loop {
             if let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() {
-                break message.assoc_id().unwrap();
+                break message.assoc_id;
             }
         };
         clients.push(client);
@@ -344,7 +344,7 @@ async fn endpoint_and_peer() -> (OneToManyEndpoint, ConnectedSocket, Association
     let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() else {
         panic!("not the message of the peer")
     };
-    (endpoint, peer, message.assoc_id().unwrap())
+    (endpoint, peer, message.assoc_id)
 }
 
 /// The data of the next item of `reader`.

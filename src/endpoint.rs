@@ -11,8 +11,8 @@ use std::task::{Context, Poll};
 
 /// A socket sharing I/O across multiple incoming and outgoing associations.
 ///
-/// Created by [`Socket::into_endpoint`][crate::Socket::into_endpoint]. Receive metadata is
-/// enabled by default so messages identify their association, including multihomed peers.
+/// Created by [`Socket::into_endpoint`][crate::Socket::into_endpoint]. Each message names its
+/// association ([`ReceivedData::assoc_id`][crate::ReceivedData::assoc_id]).
 /// Subscribe to association events before connecting to observe establishment and failure.
 /// Each association can be peeled into its own [`ConnectedSocket`]; this type never accepts.
 ///
@@ -30,8 +30,7 @@ use std::task::{Context, Poll};
 ///
 /// // Answer a message on the association it came from.
 /// if let NotificationOrData::Data(message) = endpoint.recv().await? {
-///     let assoc_id = message.assoc_id().unwrap();
-///     endpoint.send(assoc_id, b"answer", SendOptions::new()).await?;
+///     endpoint.send(message.assoc_id, b"answer", SendOptions::new()).await?;
 /// }
 /// # Ok(())
 /// # }
@@ -220,7 +219,7 @@ impl OneToManyEndpoint {
     ///
     /// // The association of the first message gets a socket of its own
     /// let NotificationOrData::Data(message) = endpoint.recv().await? else { unreachable!() };
-    /// let association = endpoint.peeloff(message.assoc_id().unwrap())?;
+    /// let association = endpoint.peeloff(message.assoc_id)?;
     /// association.send(b"pong", SendOptions::new()).await?;
     /// let Some(NotificationOrData::Data(answer)) = peer.recv().await? else { unreachable!() };
     /// assert_eq!(answer.payload, b"pong");

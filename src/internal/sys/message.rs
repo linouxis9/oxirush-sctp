@@ -1,8 +1,7 @@
 //! Individual message syscalls and their initialized ancillary buffers.
 use crate::consts::MSG_NOTIFICATION;
 use crate::internal::receive::Piece;
-use crate::types::internal::{NxtInfoWire, RcvInfoWire, SndInfoWire};
-use crate::{NxtInfo, RcvInfo};
+use crate::types::internal::{RcvInfoWire, SndInfoWire};
 use os_socketaddr::OsSocketAddr;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -37,7 +36,7 @@ pub(crate) fn sctp_recvmsg_once(fd: BorrowedFd<'_>, buffer: &mut [u8]) -> std::i
             return Err(std::io::Error::last_os_error());
         }
         let control_len = (recvmsg_header.msg_controllen as usize).min(msg_control.bytes.len());
-        let (rcv_info, nxt_info) = ancillary_info(&msg_control.bytes[..control_len]);
+        let info = ancillary_info(&msg_control.bytes[..control_len]).unwrap_or_default();
         let from = OsSocketAddr::copy_from_raw(
             std::ptr::addr_of!(from) as *const libc::sockaddr,
             recvmsg_header.msg_namelen,
@@ -47,16 +46,15 @@ pub(crate) fn sctp_recvmsg_once(fd: BorrowedFd<'_>, buffer: &mut [u8]) -> std::i
             len: result as usize,
             notification: recvmsg_header.msg_flags as u32 & MSG_NOTIFICATION != 0,
             end_of_record: recvmsg_header.msg_flags & libc::MSG_EOR != 0,
-            rcv_info,
-            nxt_info,
+            info,
             from,
         })
     }
 }
 
-pub(crate) fn ancillary_info(mut control: &[u8]) -> (Option<RcvInfo>, Option<NxtInfo>) {
-    let mut rcv_info = None;
-    let mut nxt_info = None;
+// The receive information among the control messages of a read, if they have it.
+pub(crate) fn ancillary_info(mut control: &[u8]) -> Option<RcvInfoWire> {
+    let mut info = None;
     // Native headers contain integers only. Reading them unaligned after validating their
     // complete byte range avoids walking pointers supplied by a header's claimed length.
     let header_len = unsafe { libc::CMSG_LEN(0) as usize };
@@ -74,16 +72,7 @@ pub(crate) fn ancillary_info(mut control: &[u8]) -> (Option<RcvInfo>, Option<Nxt
         {
             // Safety: the structure consists of integers, and its complete native layout is
             // present.
-            let wire = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<RcvInfoWire>()) };
-            rcv_info = Some(RcvInfo::from(wire));
-        } else if header.cmsg_level == libc::IPPROTO_SCTP
-            && header.cmsg_type == crate::consts::SCTP_NXTINFO
-            && data.len() >= std::mem::size_of::<NxtInfoWire>()
-        {
-            // Safety: the structure consists of integers, and its complete native layout is
-            // present.
-            let wire = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<NxtInfoWire>()) };
-            nxt_info = Some(NxtInfo::from(wire));
+            info = Some(unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<RcvInfoWire>()) });
         }
         // libc supplies the native alignment; CMSG_SPACE is only a size calculation. The
         // containing receive buffer is bounded, so its validated payload size fits c_uint.
@@ -93,7 +82,7 @@ pub(crate) fn ancillary_info(mut control: &[u8]) -> (Option<RcvInfo>, Option<Nxt
         }
         control = &control[next..];
     }
-    (rcv_info, nxt_info)
+    info
 }
 
 // Sends `payload` with its send information, to `to` or to the association that `info`
@@ -140,9 +129,8 @@ pub(crate) fn sctp_sendmsg_once(
     Ok(())
 }
 
-// Size of the buffer for control messages. It has room for those `recvmsg` can return for SCTP,
-// `SCTP_NXTINFO`, `SCTP_RCVINFO` and `SCTP_SNDRCV` (with the data I/O event), after `SOL_SOCKET`
-// ones enabled on the socket, such as timestamps.
+// Size of the buffer for control messages. It has room for `SCTP_RCVINFO` after the
+// `SOL_SOCKET` ones enabled on the socket, such as timestamps.
 const CMSG_BUFFER_SIZE: usize = 256;
 
 // A buffer for control messages, aligned for `cmsghdr`.
@@ -185,63 +173,38 @@ mod tests {
         bytes
     }
 
-    // The structures as the kernel lays them out, with the payload protocol identifier in
-    // network byte order.
-    fn rcv_bytes(info: &RcvInfo) -> Vec<u8> {
+    // The structure as the kernel lays it out.
+    fn rcv_bytes(info: &RcvInfoWire) -> Vec<u8> {
         let mut bytes = vec![0; std::mem::size_of::<RcvInfoWire>()];
         macro_rules! put {
-            ($field:ident, $value:expr) => {{
-                let value = $value.to_ne_bytes();
+            ($field:ident) => {{
+                let value = info.$field.to_ne_bytes();
                 let offset = std::mem::offset_of!(RcvInfoWire, $field);
                 bytes[offset..offset + value.len()].copy_from_slice(&value);
             }};
         }
-        put!(sid, info.sid);
-        put!(ssn, info.ssn);
-        put!(flags, info.flags);
-        put!(ppid, info.ppid.to_be());
-        put!(tsn, info.tsn);
-        put!(cumtsn, info.cumtsn);
-        put!(context, info.context);
-        put!(assoc_id, info.assoc_id);
-        bytes
-    }
-
-    fn nxt_bytes(info: &NxtInfo) -> Vec<u8> {
-        let mut bytes = vec![0; std::mem::size_of::<NxtInfoWire>()];
-        macro_rules! put {
-            ($field:ident, $value:expr) => {{
-                let value = $value.to_ne_bytes();
-                let offset = std::mem::offset_of!(NxtInfoWire, $field);
-                bytes[offset..offset + value.len()].copy_from_slice(&value);
-            }};
-        }
-        put!(sid, info.sid);
-        put!(flags, info.flags);
-        put!(ppid, info.ppid.to_be());
-        put!(length, info.length);
-        put!(assoc_id, info.assoc_id);
+        put!(sid);
+        put!(ssn);
+        put!(flags);
+        put!(ppid);
+        put!(tsn);
+        put!(cumtsn);
+        put!(context);
+        put!(assoc_id);
         bytes
     }
 
     #[test]
     fn ancillary_bytes_preserve_metadata_across_other_levels_and_unaligned_input() {
-        let rcv = RcvInfo {
+        let rcv = RcvInfoWire {
             sid: 2,
             ssn: 3,
             flags: 1,
-            ppid: 60,
+            ppid: 60_u32.to_be(),
             tsn: 4,
             cumtsn: 5,
             context: 6,
             assoc_id: 7,
-        };
-        let nxt = NxtInfo {
-            sid: 8,
-            flags: 1,
-            ppid: 18,
-            length: 10,
-            assoc_id: 11,
         };
         let mut bytes = vec![0xff]; // force an unaligned beginning for the checked parser
         bytes.extend(cmsg(libc::SOL_SOCKET, 999, &[1, 2, 3]));
@@ -251,21 +214,12 @@ mod tests {
             &rcv_bytes(&rcv),
         ));
         bytes.extend(cmsg(libc::IPPROTO_SCTP, 999, &[4]));
-        bytes.extend(cmsg(
-            libc::IPPROTO_SCTP,
-            crate::consts::SCTP_NXTINFO,
-            &nxt_bytes(&nxt),
-        ));
-        assert_eq!(
-            ancillary_info(&bytes[1..]),
-            (Some(rcv.clone()), Some(nxt.clone()))
-        );
-        assert_eq!(ancillary_info(&bytes[1..]), (Some(rcv), Some(nxt)));
+        assert_eq!(ancillary_info(&bytes[1..]), Some(rcv));
     }
 
     #[test]
     fn ancillary_bytes_stop_at_invalid_lengths_and_ignore_short_payloads() {
-        let rcv = RcvInfo {
+        let rcv = RcvInfoWire {
             assoc_id: 7,
             ..Default::default()
         };
@@ -278,14 +232,7 @@ mod tests {
             let parsed = ancillary_info(&valid[..len]);
             let required =
                 unsafe { libc::CMSG_LEN(std::mem::size_of::<RcvInfoWire>() as u32) as usize };
-            assert_eq!(
-                parsed,
-                if len >= required {
-                    (Some(rcv.clone()), None)
-                } else {
-                    (None, None)
-                }
-            );
+            assert_eq!(parsed, (len >= required).then_some(rcv));
         }
         for claimed in [0_usize, 1, usize::MAX] {
             let mut invalid = valid.clone();
@@ -296,59 +243,45 @@ mod tests {
             unsafe {
                 std::ptr::write_unaligned(invalid.as_mut_ptr().cast::<libc::cmsghdr>(), header);
             }
-            assert_eq!(ancillary_info(&invalid), (None, None));
+            assert_eq!(ancillary_info(&invalid), None);
         }
         let mut bytes = cmsg(libc::IPPROTO_SCTP, crate::consts::SCTP_RCVINFO, &[0; 3]);
         bytes.extend(valid);
-        assert_eq!(ancillary_info(&bytes), (Some(rcv), None));
+        assert_eq!(ancillary_info(&bytes), Some(rcv));
     }
 
     /// A control message of a header alone is skipped, and so is one of another level or
     /// type, however long: neither ends the walk nor is taken for SCTP's.
     #[test]
     fn ancillary_bytes_skip_empty_and_foreign_control_messages() {
-        let rcv = RcvInfo {
+        let rcv = RcvInfoWire {
             assoc_id: 7,
-            ..Default::default()
-        };
-        let nxt = NxtInfo {
-            assoc_id: 8,
             ..Default::default()
         };
         let mut bytes = cmsg(libc::IPPROTO_SCTP, crate::consts::SCTP_RCVINFO, &[]);
         bytes.extend(cmsg(libc::SOL_SOCKET, 1, &[0x5a; 40]));
         bytes.extend(cmsg(libc::IPPROTO_SCTP, 999, &[0x5a; 40]));
-        assert_eq!(ancillary_info(&bytes), (None, None));
+        assert_eq!(ancillary_info(&bytes), None);
         bytes.extend(cmsg(
             libc::IPPROTO_SCTP,
             crate::consts::SCTP_RCVINFO,
             &rcv_bytes(&rcv),
         ));
-        bytes.extend(cmsg(
-            libc::IPPROTO_SCTP,
-            crate::consts::SCTP_NXTINFO,
-            &nxt_bytes(&nxt),
-        ));
-        assert_eq!(ancillary_info(&bytes), (Some(rcv), Some(nxt)));
+        assert_eq!(ancillary_info(&bytes), Some(rcv));
     }
 
     /// Control messages that the kernel truncated give what they have.
     #[test]
     fn truncated_control_messages_give_what_they_have() {
-        assert_eq!(ancillary_info(&[]), (None, None));
+        assert_eq!(ancillary_info(&[]), None);
     }
 
     #[test]
     fn cmsg_buffer_holds_the_sctp_control_messages() {
         // Safety: `CMSG_SPACE` only computes a size.
-        let sctp_cmsgs = unsafe {
-            libc::CMSG_SPACE(std::mem::size_of::<NxtInfoWire>() as u32)
-                + libc::CMSG_SPACE(std::mem::size_of::<RcvInfoWire>() as u32)
-                // `struct sctp_sndrcvinfo`
-                + libc::CMSG_SPACE(32)
-        };
-        // Half of the buffer is left for `SOL_SOCKET` control messages.
-        assert!((sctp_cmsgs as usize) <= CMSG_BUFFER_SIZE / 2);
+        let sctp_cmsgs = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RcvInfoWire>() as u32) };
+        // Most of the buffer is left for `SOL_SOCKET` control messages.
+        assert!((sctp_cmsgs as usize) <= CMSG_BUFFER_SIZE / 4);
         assert_eq!(
             std::mem::align_of::<CmsgBuffer>(),
             std::mem::align_of::<libc::cmsghdr>()

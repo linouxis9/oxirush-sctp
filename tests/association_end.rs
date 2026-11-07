@@ -599,7 +599,7 @@ async fn closing_or_aborting_an_association_that_the_peer_aborted() {
     let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() else {
         panic!("not the message of the client")
     };
-    let peeled = endpoint.peeloff(message.assoc_id().unwrap()).unwrap();
+    let peeled = endpoint.peeloff(message.assoc_id).unwrap();
     client.abort(b"").unwrap();
     assert_eq!(error_number(recv(&peeled).await), Some(libc::ECONNRESET));
     let error = peeled.abort(b"too late").unwrap_err();

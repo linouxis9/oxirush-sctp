@@ -49,8 +49,8 @@ async fn messages_go_both_ways_through_the_polls() {
         panic!("not data");
     };
     assert_eq!(
-        (message.payload.as_slice(), message.ppid()),
-        (&b"request"[..], Some(60))
+        (message.payload.as_slice(), message.ppid),
+        (&b"request"[..], 60)
     );
     poll_fn(|cx| peer.poll_send(cx, b"answer", options))
         .await
@@ -201,7 +201,7 @@ async fn an_endpoint_sends_and_receives_through_the_polls() {
         panic!("not data");
     };
     assert_eq!(answer.payload, b"answer");
-    let association = answer.assoc_id().unwrap();
+    let association = answer.assoc_id;
     poll_fn(|cx| endpoint.poll_send(cx, association, b"again", options))
         .await
         .unwrap();

@@ -5,172 +5,24 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 #[allow(unused)]
 use oxirush_sctp::*;
 
+/// A message that an endpoint receives has the association, the stream and the payload
+/// protocol identifier that it came with.
 #[tokio::test]
-async fn socket_connect_basic_send_recv_req_info_on_and_off() {
+async fn an_endpoint_receives_the_association_of_each_message() {
     let client_socket = create_client_socket(SocketToAssociation::OneToMany, true);
-
-    client_socket
-        .options()
-        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Current)
-        .unwrap();
-
-    // Request Receive Info on client socket
-    client_socket.options().request_rcvinfo(true).unwrap();
-
     let (listener, bindaddr) = create_endpoint_bind_and_listen(true);
-
     let (connected, assoc_id) = connect_endpoint(client_socket, &[bindaddr]).await.unwrap();
-    eprintln!("assoc_id: {assoc_id}");
-
-    let laddrs = connected.local_addrs(assoc_id).unwrap();
-
-    let client_addr = laddrs[0];
-
+    let client_addr = connected.local_addrs(assoc_id).unwrap()[0];
+    let options = SendOptions::new().stream(1).ppid(60);
     listener
-        .send_to(client_addr, b"hello world!", SendOptions::new())
+        .send_to(client_addr, b"hello world!", options)
         .await
         .unwrap();
-
-    let data = connected.recv().await.unwrap();
-    assert!(
-        matches!(data, NotificationOrData::Data(ReceivedData { .. })),
-        "{data:#?}"
-    );
-
-    if let NotificationOrData::Data(ReceivedData {
-        payload,
-        rcv_info,
-        nxt_info,
-        ..
-    }) = data
-    {
-        assert!(
-            payload == b"hello world!".to_vec(),
-            "received_payload: {payload:?}",
-        );
-        assert!(rcv_info.is_some());
-        let rcv_info = rcv_info.unwrap();
-        assert_eq!(
-            rcv_info.assoc_id, assoc_id,
-            "rcv_info.assoc_id: {}, assoc_id: {}",
-            rcv_info.assoc_id, assoc_id
-        );
-        assert!(nxt_info.is_none(), "{:#?}", nxt_info.unwrap());
-    } else {
-        panic!("Should never come here!: {data:#?}");
+    let NotificationOrData::Data(data) = connected.recv().await.unwrap() else {
+        panic!("not data");
     };
-
-    // Now turn off Request Receive Info on client socket
-    connected.options().request_rcvinfo(false).unwrap();
-
-    // Again send the data to client
-    listener
-        .send_to(client_addr, b"hello world!", SendOptions::new())
-        .await
-        .unwrap();
-
-    let data = connected.recv().await.unwrap();
-    assert!(
-        matches!(data, NotificationOrData::Data(ReceivedData { .. })),
-        "{data:#?}"
-    );
-
-    if let NotificationOrData::Data(ReceivedData {
-        payload,
-        rcv_info,
-        nxt_info,
-        ..
-    }) = data
-    {
-        assert!(
-            payload == b"hello world!".to_vec(),
-            "received_payload: {payload:?}",
-        );
-        assert!(rcv_info.is_none(), "{:#?}", rcv_info.unwrap());
-        assert!(nxt_info.is_none(), "{:#?}", nxt_info.unwrap());
-    } else {
-        panic!("Should never come here!: {data:#?}");
-    };
-}
-
-#[tokio::test]
-async fn socket_send_recv_nxtinfo_test() {
-    let client_socket = create_client_socket(SocketToAssociation::OneToMany, true);
-    client_socket
-        .options()
-        .subscribe_events(&[Event::Association], SubscribeEventAssocId::Current)
-        .unwrap();
-
-    // Request Receive Info on client socket
-    client_socket.options().request_nxtinfo(true).unwrap();
-
-    let (listener, bindaddr) = create_endpoint_bind_and_listen(true);
-
-    let (connected, assoc_id) = connect_endpoint(client_socket, &[bindaddr]).await.unwrap();
-    connected.options().request_rcvinfo(false).unwrap();
-
-    let laddrs = connected.local_addrs(assoc_id).unwrap();
-
-    let client_addr = laddrs[0];
-
-    listener
-        .send_to(client_addr, b"hello world!", SendOptions::new())
-        .await
-        .unwrap();
-
-    // Send again
-    listener
-        .send_to(client_addr, b"hello world!", SendOptions::new())
-        .await
-        .unwrap();
-
-    // First Receive nxtinfo should not be none.
-    let data = connected.recv().await.unwrap();
-    assert!(
-        matches!(data, NotificationOrData::Data(ReceivedData { .. })),
-        "{data:#?}"
-    );
-
-    if let NotificationOrData::Data(ReceivedData {
-        payload,
-        rcv_info,
-        nxt_info,
-        ..
-    }) = data
-    {
-        assert!(
-            payload == b"hello world!".to_vec(),
-            "received_payload: {payload:?}",
-        );
-        assert!(rcv_info.is_none(), "{:#?}", rcv_info.unwrap());
-        assert!(nxt_info.is_some());
-    } else {
-        panic!("Should never come here!: {data:#?}");
-    };
-
-    // First Receive nxtinfo should not be none.
-    let data = connected.recv().await.unwrap();
-    assert!(
-        matches!(data, NotificationOrData::Data(ReceivedData { .. })),
-        "{data:#?}"
-    );
-
-    if let NotificationOrData::Data(ReceivedData {
-        payload,
-        rcv_info,
-        nxt_info,
-        ..
-    }) = data
-    {
-        assert!(
-            payload == b"hello world!".to_vec(),
-            "received_payload: {payload:?}",
-        );
-        assert!(rcv_info.is_none(), "{:#?}", rcv_info.unwrap());
-        assert!(nxt_info.is_none(), "{:#?}", nxt_info.unwrap());
-    } else {
-        panic!("Should never come here!: {data:#?}");
-    };
+    assert_eq!(data.payload, b"hello world!");
+    assert_eq!((data.assoc_id, data.stream, data.ppid), (assoc_id, 1, 60));
 }
 
 #[tokio::test]
@@ -220,15 +72,6 @@ async fn socket_init_params_set_ostreams_success() {
     } else {
         panic!("Should never come here!: {notification:#?}");
     };
-}
-
-#[tokio::test]
-async fn socket_sctp_req_recv_info_success() {
-    let one2one_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    one2one_socket.options().request_rcvinfo(true).unwrap();
-
-    let one2many_socket = create_client_socket(SocketToAssociation::OneToMany, true);
-    one2many_socket.options().request_rcvinfo(true).unwrap();
 }
 
 #[tokio::test]

@@ -29,7 +29,7 @@ use std::task::{Context, Poll};
 /// match peer.recv().await? {
 ///     None => println!("closed"),
 ///     Some(NotificationOrData::Data(message)) => {
-///         assert_eq!((message.stream_id(), message.ppid()), (Some(1), Some(60)));
+///         assert_eq!((message.stream, message.ppid), (1, 60));
 ///     }
 ///     Some(other) => println!("{other:?}"),
 /// }
@@ -59,8 +59,8 @@ impl std::fmt::Debug for ConnectedSocket {
 
 /// An established nonblocking `SOCK_STREAM` SCTP descriptor. A peeled-off `SOCK_SEQPACKET`
 /// descriptor is refused: [`OneToManyEndpoint::peeloff`][crate::OneToManyEndpoint::peeloff]
-/// gives those. The descriptor is closed on failure. Its options stay as they are: receive
-/// metadata is off unless the descriptor has it on.
+/// gives those. The descriptor is closed on failure. It is given the receive information
+/// (`SCTP_RECVRCVINFO`), and its other options stay as they are.
 impl TryFrom<OwnedFd> for ConnectedSocket {
     type Error = std::io::Error;
 
@@ -182,10 +182,10 @@ impl ConnectedSocket {
     /// let mut messages = Vec::new();
     /// while let Some(received) = server.recv().await? {
     ///     if let NotificationOrData::Data(message) = received {
-    ///         messages.push((message.stream_id(), message.ppid(), message.payload));
+    ///         messages.push((message.stream, message.ppid, message.payload));
     ///     }
     /// }
-    /// assert_eq!(messages, [(Some(1), Some(60), b"ping".to_vec())]);
+    /// assert_eq!(messages, [(1, 60, b"ping".to_vec())]);
     /// # Ok(())
     /// # }
     /// ```

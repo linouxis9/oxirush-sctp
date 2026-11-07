@@ -93,22 +93,6 @@ impl SocketOptions<'_> {
         sys::sctp_init_params_internal(self.core.as_fd())
     }
 
-    /// Enable receive metadata: the stream, payload protocol and association of each message.
-    /// Enabled by default. On a [`OneToManyEndpoint`][crate::OneToManyEndpoint], disabling it
-    /// loses the association's identity, and the parts of the messages of several
-    /// associations, which the endpoint can then not tell apart, come one message after the
-    /// other (`SCTP_FRAGMENT_INTERLEAVE` 0): a long message holds back the others. It is
-    /// `InvalidInput` to disable it while the endpoint assembles messages, whose parts it
-    /// could then not tell apart: do it before the endpoint has associations.
-    pub fn request_rcvinfo(&self, on: bool) -> std::io::Result<()> {
-        self.core.request_rcvinfo(on)
-    }
-
-    /// Enable metadata describing the next queued message (`SCTP_NXTINFO`).
-    pub fn request_nxtinfo(&self, on: bool) -> std::io::Result<()> {
-        sys::request_nxtinfo_internal(self.core.as_fd(), on)
-    }
-
     /// Send small messages as soon as congestion permits, without Nagle-like bundling delays.
     /// Linux accepted and peeled-off sockets inherit this setting.
     pub fn set_nodelay(&self, on: bool) -> std::io::Result<()> {

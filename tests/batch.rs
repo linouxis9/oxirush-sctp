@@ -80,7 +80,7 @@ async fn a_batch_keeps_each_message_with_its_stream_and_its_order() {
     for stream in 0..3 {
         let of_stream: Vec<u64> = got
             .iter()
-            .filter(|message| message.stream_id() == Some(stream))
+            .filter(|message| message.stream == stream)
             .map(|message| u64::from_be_bytes(message.payload[..8].try_into().unwrap()))
             .collect();
         let expected: Vec<u64> = (0..300).filter(|i| i % 3 == stream as u64).collect();
@@ -89,7 +89,7 @@ async fn a_batch_keeps_each_message_with_its_stream_and_its_order() {
     for message in &got {
         let index = u64::from_be_bytes(message.payload[..8].try_into().unwrap()) as usize;
         assert_eq!(message.payload, payloads[index]);
-        assert_eq!(message.ppid(), Some(60 + (index % 2) as u32));
+        assert_eq!(message.ppid, 60 + (index % 2) as u32);
     }
     assert!(calls < messages.len(), "one message a call: {calls}");
 }
@@ -348,7 +348,7 @@ async fn an_endpoint_sends_and_receives_the_batches_of_several_associations() {
             .unwrap();
         for item in &out {
             if let NotificationOrData::Data(message) = item {
-                associations.push(message.assoc_id().unwrap());
+                associations.push(message.assoc_id);
             }
         }
     }
@@ -462,7 +462,7 @@ async fn the_streams_of_each_association_of_an_endpoint_are_its_own() {
         let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() else {
             panic!("not the message of the peer")
         };
-        peers.push((peer, message.assoc_id().unwrap()));
+        peers.push((peer, message.assoc_id));
     }
     let (wide, narrow) = (peers[0].1, peers[1].1);
     assert_eq!(endpoint.status(narrow).unwrap().outstreams, 2);

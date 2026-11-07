@@ -239,7 +239,7 @@ pub(crate) fn sctp_recvmmsg_once(
         // `msg_controllen` is not a `usize` on every target.
         #[allow(clippy::unnecessary_cast)]
         let control_len = (message.msg_controllen as usize).min(256);
-        let (rcv_info, nxt_info) = ancillary_info(&slots.controls[index].bytes[..control_len]);
+        let info = ancillary_info(&slots.controls[index].bytes[..control_len]).unwrap_or_default();
         // Safety: the kernel wrote `msg_namelen` octets of an address into the storage, which
         // has room for every address.
         let from = unsafe {
@@ -253,8 +253,7 @@ pub(crate) fn sctp_recvmmsg_once(
             len: header.msg_len as usize,
             notification: message.msg_flags as u32 & MSG_NOTIFICATION != 0,
             end_of_record: message.msg_flags & libc::MSG_EOR != 0,
-            rcv_info,
-            nxt_info,
+            info,
             from,
         });
     }

@@ -274,7 +274,7 @@ fn endpoint_and_clients(
             client.send(b"hello", SendOptions::new()).await.unwrap();
             let identity = loop {
                 if let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() {
-                    break message.assoc_id().unwrap();
+                    break message.assoc_id;
                 }
             };
             clients.push(client);

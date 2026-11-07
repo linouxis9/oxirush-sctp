@@ -75,7 +75,6 @@ pub enum SocketToAssociation {
 /// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum NotificationOrData {
     /// SCTP Notification received by a `recv` call.
     Notification(Notification),
@@ -84,9 +83,9 @@ pub enum NotificationOrData {
     Data(ReceivedData),
 }
 
-/// A message that `recv` returned: its payload, its sender and the ancillary data of the
-/// system call that received it. `Debug` prints the payload as its length and its octets in
-/// hexadecimal.
+/// A message that `recv` returned: its payload, its sender and its receive information
+/// (`SCTP_RCVINFO`), which every socket requests. `Debug` prints the payload as its length
+/// and its octets in hexadecimal.
 ///
 /// ```
 /// # #[tokio::main(flavor = "current_thread")]
@@ -104,7 +103,7 @@ pub enum NotificationOrData {
 /// peer.send(b"NG SETUP REQUEST", SendOptions::new().stream(0).ppid(60)).await?;
 /// if let Some(NotificationOrData::Data(message)) = association.recv().await? {
 ///     assert_eq!(message.payload, b"NG SETUP REQUEST");
-///     assert_eq!((message.stream_id(), message.ppid()), (Some(0), Some(60)));
+///     assert_eq!((message.stream, message.ppid, message.unordered), (0, 60, false));
 /// }
 /// # Ok(())
 /// # }
@@ -115,46 +114,35 @@ pub struct ReceivedData {
     /// Received Message Payload.
     pub payload: Vec<u8>,
 
-    /// Address of the peer that sent the message, which tells the associations of a One-to-many
-    /// socket apart. `None` when the kernel gives no address.
+    /// The stream the message arrived on.
+    pub stream: u16,
+
+    /// Payload protocol identifier, as [`SendOptions::ppid`] takes it: 60 for NGAP.
+    pub ppid: u32,
+
+    /// Association the message arrived on, which
+    /// [`OneToManyEndpoint::send`][crate::OneToManyEndpoint::send] takes to answer on a
+    /// one-to-many socket.
+    pub assoc_id: AssociationId,
+
+    /// Whether the message was sent unordered ([`SendOptions::unordered`]).
+    pub unordered: bool,
+
+    /// Address of the peer that sent the message: one of the addresses of a multihomed peer.
+    /// `None` when the kernel gives no address.
     pub from: Option<std::net::SocketAddr>,
-
-    /// Ancillary information about the received payload. `None` when
-    /// [`request_rcvinfo`][crate::SocketOptions::request_rcvinfo] turned it off.
-    pub rcv_info: Option<RcvInfo>,
-
-    /// Optional ancillary information about the next call to `recv`.
-    pub nxt_info: Option<NxtInfo>,
 }
 
 impl std::fmt::Debug for ReceivedData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReceivedData")
             .field("payload", &Octets(&self.payload))
+            .field("stream", &self.stream)
+            .field("ppid", &self.ppid)
+            .field("assoc_id", &self.assoc_id)
+            .field("unordered", &self.unordered)
             .field("from", &self.from)
-            .field("rcv_info", &self.rcv_info)
-            .field("nxt_info", &self.nxt_info)
             .finish()
-    }
-}
-
-impl ReceivedData {
-    /// Stream the message arrived on. `None` without receive information.
-    pub fn stream_id(&self) -> Option<u16> {
-        self.rcv_info.as_ref().map(|info| info.sid)
-    }
-
-    /// Payload protocol identifier, as [`SendOptions::ppid`] takes it: 60 for NGAP. `None`
-    /// without receive information.
-    pub fn ppid(&self) -> Option<u32> {
-        self.rcv_info.as_ref().map(|info| info.ppid)
-    }
-
-    /// Association the message arrived on, which
-    /// [`OneToManyEndpoint::send`][crate::OneToManyEndpoint::send] takes to answer on a
-    /// one-to-many socket. `None` without receive information.
-    pub fn assoc_id(&self) -> Option<AssociationId> {
-        self.rcv_info.as_ref().map(|info| info.assoc_id)
     }
 }
 
@@ -436,55 +424,6 @@ pub struct SackInfo {
     /// Number of packets after which an acknowledgement is sent without waiting: 1 turns
     /// the delay off. When setting, 0 leaves it unchanged.
     pub frequency: u32,
-}
-
-/// Ancillary receive information (Section 5.3.5 of RFC 6458).
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct RcvInfo {
-    /// Stream ID on which the data is received.
-    pub sid: u16,
-
-    /// Stream Sequence Number received in the data.
-    pub ssn: u16,
-
-    /// Flags for the received data.
-    pub flags: u16,
-
-    /// Payload protocol identifier that the sender gave, as a number: 60 for NGAP.
-    pub ppid: u32,
-
-    /// Transaction sequence number.
-    pub tsn: u32,
-
-    /// Cumulative sequence number.
-    pub cumtsn: u32,
-
-    /// Opaque context.
-    pub context: u32,
-
-    /// SCTP Association ID.
-    pub assoc_id: AssociationId,
-}
-
-/// Ancillary information about the next message (Section 5.3.6 of RFC 6458).
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct NxtInfo {
-    /// Stream ID for the next received data.
-    pub sid: u16,
-
-    /// Flags for the next received data.
-    pub flags: u16,
-
-    /// Payload protocol identifier of the next message, as a number.
-    pub ppid: u32,
-
-    /// Length of the message to be used in the next `recv` call.
-    pub length: u32,
-
-    /// SCTP Association ID.
-    pub assoc_id: AssociationId,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -795,8 +734,7 @@ pub struct Shutdown {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Event {
-    /// The deprecated `SCTP_SNDRCV` ancillary data, which this crate does not parse: see
-    /// [`request_rcvinfo`][crate::SocketOptions::request_rcvinfo].
+    /// The deprecated `SCTP_SNDRCV` ancillary data, which this crate does not parse.
     DataIo = (1 << 15),
 
     /// Event related to association change.
@@ -1065,14 +1003,16 @@ mod tests {
     fn debug_prints_octets_in_hexadecimal() {
         let message = ReceivedData {
             payload: b"\x00\x15ping".to_vec(),
+            stream: 1,
+            ppid: 60,
+            assoc_id: 7,
+            unordered: false,
             from: None,
-            rcv_info: None,
-            nxt_info: None,
         };
         assert_eq!(
             format!("{message:?}"),
-            "ReceivedData { payload: 6 octets 001570696e67, from: None, rcv_info: None, \
-             nxt_info: None }"
+            "ReceivedData { payload: 6 octets 001570696e67, stream: 1, ppid: 60, assoc_id: 7, \
+             unordered: false, from: None }"
         );
         let unsupported = Notification::Unsupported {
             kind: 0x8010,

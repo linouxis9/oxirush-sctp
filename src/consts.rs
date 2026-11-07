@@ -35,11 +35,9 @@ pub(crate) const SCTP_NODELAY: libc::c_int = 3;
 // sends and reads
 pub(crate) const SCTP_SNDINFO: libc::c_int = 2;
 pub(crate) const SCTP_RCVINFO: libc::c_int = 3;
-pub(crate) const SCTP_NXTINFO: libc::c_int = 4;
 
-// Receving RCVINFO and NXTINFO
+// Receiving RCVINFO
 pub(crate) const SCTP_RECVRCVINFO: libc::c_int = 32;
-pub(crate) const SCTP_RECVNXTINFO: libc::c_int = 33;
 
 // Get SCTP Status
 pub(crate) const SCTP_STATUS: libc::c_int = 14;
@@ -60,6 +58,8 @@ pub(crate) const SCTP_GET_ASSOC_STATS: libc::c_int = 112;
 pub(crate) const SCTP_PRIMARY_ADDR: libc::c_int = 6;
 pub(crate) const SCTP_DELAYED_SACK: libc::c_int = 16;
 
+// Flag of a message delivered without ordering relative to the others of its stream
+pub(crate) const SCTP_UNORDERED: u16 = 1;
 // Flag of a send that aborts the association, with the message as the reason
 pub(crate) const SCTP_ABORT: u16 = 1 << 2;
 // Flag of a send without a message that shuts the association down (`MSG_FIN`)

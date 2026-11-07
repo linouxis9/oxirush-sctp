@@ -2,69 +2,31 @@ use oxirush_sctp::*;
 
 use crate::{create_client_socket, create_socket_bind_and_listen};
 
+/// A message comes with the stream, the payload protocol identifier and the order that it was
+/// sent with, and with its association.
 #[tokio::test]
-async fn connected_send_some_sendinfo_success() {
+async fn a_message_comes_with_what_it_was_sent_with() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
-
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    client_socket.options().request_rcvinfo(true).unwrap();
-
     let connected = client_socket.connectx(&[bindaddr]).await.unwrap();
-
     let assoc_id = connected.status().unwrap().assoc_id;
-
     let (accepted, _client_addr) = listener.accept().await.unwrap();
 
-    let sid = 5;
-    let ppid = 0x1234;
-    let options = SendOptions::new().stream(sid).ppid(ppid).unordered(true);
+    let options = SendOptions::new().stream(5).ppid(0x1234).unordered(true);
     accepted.send(b"hello world!", options).await.unwrap();
-
-    let data = connected.recv().await.unwrap();
-    assert!(
-        matches!(data, Some(NotificationOrData::Data(ReceivedData { .. }))),
-        "{data:#?}"
-    );
-
-    if let Some(NotificationOrData::Data(ReceivedData {
-        payload,
-        rcv_info,
-        nxt_info,
-        ..
-    })) = data
-    {
-        assert!(
-            payload == b"hello world!".to_vec(),
-            "received_payload: {payload:?}",
-        );
-        assert!(rcv_info.is_some());
-        let rcv_info = rcv_info.unwrap();
-        assert_eq!(
-            rcv_info.assoc_id, assoc_id,
-            "rcv_info.assoc_id: {}, assoc_id: {}",
-            rcv_info.assoc_id, assoc_id
-        );
-        assert_eq!(
-            rcv_info.sid, sid,
-            "rcv_info.sid: {}, sid: {}, {:#?}",
-            rcv_info.sid, sid, rcv_info
-        );
-        assert_eq!(
-            rcv_info.ppid, ppid,
-            "rcv_info.ppid: {:x}, ppid: {:x}",
-            rcv_info.ppid, ppid
-        );
-        assert!(nxt_info.is_none(), "{:#?}", nxt_info.unwrap());
-    } else {
-        panic!("Should never come here!: {data:#?}");
+    let Some(NotificationOrData::Data(data)) = connected.recv().await.unwrap() else {
+        panic!("not data");
     };
+    assert_eq!(data.payload, b"hello world!");
+    let info = (data.assoc_id, data.stream, data.ppid, data.unordered);
+    assert_eq!(info, (assoc_id, 5, 0x1234, true));
 }
+
 #[tokio::test]
 async fn test_shutdown_event() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
 
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    client_socket.options().request_rcvinfo(true).unwrap();
 
     let connected = client_socket.connectx(&[bindaddr]).await.unwrap();
 
@@ -143,7 +105,6 @@ async fn test_get_status() {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
 
     let client_socket = create_client_socket(SocketToAssociation::OneToOne, true);
-    client_socket.options().request_rcvinfo(true).unwrap();
 
     let connected = client_socket.connectx(&[bindaddr]).await.unwrap();
 
@@ -292,12 +253,10 @@ async fn send_after_peer_closed_fails_without_sigpipe() {
     assert!(!raised, "`sctp_send` raised SIGPIPE");
 }
 
-/// A connected pair whose receiving end requests `RcvInfo` and `NxtInfo`.
-async fn pair_receiving_rcvinfo_and_nxtinfo() -> (ConnectedSocket, ConnectedSocket) {
+/// A connected pair: the sending end, then the receiving one.
+async fn sending_and_receiving() -> (ConnectedSocket, ConnectedSocket) {
     let (listener, bindaddr) = create_socket_bind_and_listen(SocketToAssociation::OneToOne, true);
     let client = create_client_socket(SocketToAssociation::OneToOne, true);
-    client.options().request_rcvinfo(true).unwrap();
-    client.options().request_nxtinfo(true).unwrap();
     let receiving = client.connectx(&[bindaddr]).await.unwrap();
     let (sending, _) = listener.accept().await.unwrap();
     (sending, receiving)
@@ -310,29 +269,26 @@ async fn send_two_messages(sending: &ConnectedSocket) {
     }
 }
 
-fn assert_first_with_infos(received: NotificationOrData) {
+fn assert_first(received: NotificationOrData) {
     match received {
         NotificationOrData::Data(data) => {
             assert_eq!(data.payload, b"first");
-            let rcv_info = data.rcv_info.expect("no RcvInfo");
-            assert_eq!((rcv_info.sid, rcv_info.ppid), (1, 60));
-            let nxt_info = data.nxt_info.expect("no NxtInfo");
-            assert_eq!((nxt_info.sid, nxt_info.length), (2, 14));
+            assert_eq!((data.stream, data.ppid), (1, 60));
         }
         other => panic!("not data: {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn recv_returns_rcvinfo_and_nxtinfo_together() {
-    let (sending, receiving) = pair_receiving_rcvinfo_and_nxtinfo().await;
+async fn recv_reads_the_receive_information_beside_another_control_message() {
+    let (sending, receiving) = sending_and_receiving().await;
     // The data I/O event adds an `SCTP_SNDRCV` control message.
     receiving
         .options()
         .subscribe_events(&[Event::DataIo], SubscribeEventAssocId::All)
         .unwrap();
     send_two_messages(&sending).await;
-    assert_first_with_infos(receiving.recv().await.unwrap().unwrap());
+    assert_first(receiving.recv().await.unwrap().unwrap());
 }
 
 #[cfg(target_os = "linux")]
@@ -348,7 +304,7 @@ fn recv_skips_control_messages_of_other_levels() {
             .build()
             .unwrap();
         let received = runtime.block_on(async {
-            let (sending, receiving) = pair_receiving_rcvinfo_and_nxtinfo().await;
+            let (sending, receiving) = sending_and_receiving().await;
             // Timestamps come as `SOL_SOCKET` control messages, before the SCTP ones.
             let on: libc::c_int = 1;
             // Safety: `on` outlives the call, which only reads it.
@@ -370,7 +326,7 @@ fn recv_skips_control_messages_of_other_levels() {
     let received = received_rx
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("`sctp_recv` did not return");
-    assert_first_with_infos(received.unwrap().unwrap());
+    assert_first(received.unwrap().unwrap());
 }
 
 fn set_int_option(socket: &impl std::os::unix::io::AsRawFd, level: i32, name: i32, value: i32) {

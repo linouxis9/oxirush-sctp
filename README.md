@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (association, _peer) = listener.accept().await?;
         if let Some(NotificationOrData::Data(message)) = association.recv().await? {
             let text = String::from_utf8_lossy(&message.payload);
-            let (stream, ppid) = (message.stream_id(), message.ppid());
+            let (stream, ppid) = (message.stream, message.ppid);
             println!("server: {text:?} on stream {stream:?} with PPID {ppid:?}");
             association.send(b"pong", options).await?;
         }
@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 ```text
-server: "ping" on stream Some(1) with PPID Some(60)
+server: "ping" on stream 1 with PPID 60
 client: "pong"
 ```
 
@@ -119,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut streams = [0; 4];
     for _ in 0..1001 {
         if let Some(Ok(NotificationOrData::Data(message))) = amf_reader.recv().await {
-            streams[usize::from(message.stream_id().ok_or("no stream")?)] += 1;
+            streams[usize::from(message.stream)] += 1;
         }
     }
     println!("AMF: {streams:?} messages on streams 0 to 3");
@@ -392,8 +392,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A message comes with its association, which the answer names
     if let NotificationOrData::Data(message) = endpoint.recv().await? {
         println!("endpoint: {:?}", String::from_utf8_lossy(&message.payload));
-        let assoc_id = message.assoc_id().ok_or("no association")?;
-        endpoint.send(assoc_id, b"pong", SendOptions::new()).await?;
+        endpoint.send(message.assoc_id, b"pong", SendOptions::new()).await?;
     }
     if let Some(NotificationOrData::Data(message)) = peer.recv().await? {
         println!("peer: {:?}", String::from_utf8_lossy(&message.payload));
@@ -449,7 +448,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for item in &received {
         if let NotificationOrData::Data(message) = item {
             let text = String::from_utf8_lossy(&message.payload);
-            println!("{text:?} on stream {:?}", message.stream_id());
+            println!("{text:?} on stream {}", message.stream);
         }
     }
     Ok(())
@@ -457,9 +456,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 ```text
-"one" on stream Some(0)
-"two" on stream Some(1)
-"three" on stream Some(1)
+"one" on stream 0
+"two" on stream 1
+"three" on stream 1
 ```
 
 ## Limits

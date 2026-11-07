@@ -132,44 +132,38 @@ async fn positive_linger_is_rejected_without_changing_close_behavior() {
 
 #[tokio::test]
 async fn aborted_partial_delivery_does_not_contaminate_another_sender() {
-    for rcvinfo in [false, true] {
-        let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
-        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        set_int(&socket, libc::SO_RCVBUF, 8192);
-        socket.options().request_rcvinfo(rcvinfo).unwrap();
-        let listener = socket.into_endpoint(2).unwrap();
-        listener.options().request_rcvinfo(rcvinfo).unwrap();
-        let address = listener.local_addrs(0).unwrap()[0];
-        let a = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-        set_int(&a, libc::SO_SNDBUF, 1 << 20);
-        let a = a.connect(address).await.unwrap();
-        a.send(&[0xaa; 300_000], SendOptions::new()).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(
-            tokio::time::timeout(Duration::from_millis(1), listener.recv())
-                .await
-                .is_err()
-        );
-        a.options().set_linger(Some(Duration::ZERO)).unwrap();
-        drop(a);
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let b = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
-        let b = b.connect(address).await.unwrap();
-        let b_address = b.local_addrs().unwrap()[0];
-        b.send(b"hello from B", SendOptions::new()).await.unwrap();
-        match tokio::time::timeout(Duration::from_secs(2), listener.recv())
+    let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    set_int(&socket, libc::SO_RCVBUF, 8192);
+    let listener = socket.into_endpoint(2).unwrap();
+    let address = listener.local_addrs(0).unwrap()[0];
+    let a = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
+    set_int(&a, libc::SO_SNDBUF, 1 << 20);
+    let a = a.connect(address).await.unwrap();
+    a.send(&[0xaa; 300_000], SendOptions::new()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), listener.recv())
             .await
-            .unwrap()
-            .unwrap()
-        {
-            NotificationOrData::Data(data) => {
-                assert_eq!(data.payload.len(), b"hello from B".len());
-                assert!(data.payload == b"hello from B");
-                assert_eq!(data.from, Some(b_address));
-                assert_eq!(data.rcv_info.is_some(), rcvinfo);
-            }
-            other => panic!("not B's message: {other:?}"),
+            .is_err()
+    );
+    a.options().set_linger(Some(Duration::ZERO)).unwrap();
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let b = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
+    let b = b.connect(address).await.unwrap();
+    let b_address = b.local_addrs().unwrap()[0];
+    b.send(b"hello from B", SendOptions::new()).await.unwrap();
+    match tokio::time::timeout(Duration::from_secs(2), listener.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        NotificationOrData::Data(data) => {
+            assert!(data.payload == b"hello from B");
+            assert_eq!(data.from, Some(b_address));
         }
+        other => panic!("not B's message: {other:?}"),
     }
 }
 

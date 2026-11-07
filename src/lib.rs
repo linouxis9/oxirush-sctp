@@ -21,7 +21,7 @@
 //!         let (association, _peer) = listener.accept().await?;
 //!         if let Some(NotificationOrData::Data(message)) = association.recv().await? {
 //!             let text = String::from_utf8_lossy(&message.payload);
-//!             let (stream, ppid) = (message.stream_id(), message.ppid());
+//!             let (stream, ppid) = (message.stream, message.ppid);
 //!             println!("server: {text:?} on stream {stream:?} with PPID {ppid:?}");
 //!             association.send(b"pong", options).await?;
 //!         }
@@ -42,7 +42,7 @@
 //! ```
 //!
 //! ```text
-//! server: "ping" on stream Some(1) with PPID Some(60)
+//! server: "ping" on stream 1 with PPID 60
 //! client: "pong"
 //! ```
 //!
@@ -124,9 +124,9 @@
 //! - A sent message must fit in the send buffer (`SO_SNDBUF`): a longer one
 //!   is `InvalidInput`, as are an empty one and a stream that the
 //!   association does not have: the error says which.
-//! - `ReceivedData::stream_id`, `ppid` and `assoc_id` read the receive
-//!   information (`SCTP_RCVINFO`) that every socket requests. They return
-//!   `None` after `options().request_rcvinfo(false)`.
+//! - A [`ReceivedData`] has the stream, the payload protocol identifier and
+//!   the association of its message, from the receive information
+//!   (`SCTP_RCVINFO`) that every socket requests.
 //!
 //! # The end of an association
 //!
@@ -175,8 +175,8 @@
 //! # Payload protocol identifiers
 //!
 //! A payload protocol identifier is a plain number in every call and in every
-//! value: 60 is NGAP, in `SendOptions::ppid`, `SendFailure::ppid`,
-//! `ReceivedData::ppid`, `RcvInfo::ppid` and `NxtInfo::ppid`. The crate converts
+//! value: 60 is NGAP, in `SendOptions::ppid`, `SendFailure::ppid` and
+//! `ReceivedData::ppid`. The crate converts
 //! it to the network byte order that the kernel carries.
 //!
 //! # Addresses
@@ -214,7 +214,7 @@
 //! | --- | --- |
 //! | 3.1, 4.1: socket, bind, listen, accept, connect, send, receive, shutdown, close | the socket types; a dropped socket is closed |
 //! | 5.3.4 `SCTP_SNDINFO` | `SendOptions` |
-//! | 5.3.5 `SCTP_RCVINFO`, 5.3.6 `SCTP_NXTINFO` | `ReceivedData::rcv_info`, `nxt_info` |
+//! | 5.3.5 `SCTP_RCVINFO` | the fields of `ReceivedData` |
 //! | 6.1.1 `SCTP_ASSOC_CHANGE` | `Notification::AssociationChange` |
 //! | 6.1.2 `SCTP_PEER_ADDR_CHANGE` | `Notification::PeerAddressChange` |
 //! | 6.1.5 `SCTP_SHUTDOWN_EVENT` | `Notification::Shutdown` |
@@ -233,7 +233,7 @@
 //! | `SO_SNDBUF`, `SO_RCVBUF`, `IP_TOS`, `IPV6_TCLASS` | `set_send_buffer_size`, `set_recv_buffer_size`, `set_dscp` and their getters |
 //! | 8.1.12 `SCTP_PEER_ADDR_PARAMS` | `peer_address_params`, `set_peer_address_params`, `request_heartbeat`: heartbeat and retransmission limit |
 //! | 8.1.28 `SCTP_EVENT` | `subscribe_events`, `unsubscribe_events` |
-//! | 8.1.29 `SCTP_RECVRCVINFO`, 8.1.30 `SCTP_RECVNXTINFO` | `request_rcvinfo`, `request_nxtinfo` |
+//! | 8.1.29 `SCTP_RECVRCVINFO` | on for every socket |
 //! | 8.2.1 `SCTP_STATUS` | `status` |
 //! | 8.2.2 `SCTP_GET_PEER_ADDR_INFO` | `paths`, `peer_address_info`: the state, window, round trip, timeout and MTU of each path |
 //! | 8.2.6 `SCTP_GET_ASSOC_STATS` | `association_stats`: the retransmitted chunks, gaps, duplicates, packets and SACKs of an association |
@@ -311,9 +311,9 @@ mod types;
 pub use types::{
     AssocChangeState, AssociationChange, AssociationId, AssociationParams, AssociationStats,
     BindxFlags, ConnState, ConnStatus, Event, EventSubscriptionError, InitParams, Notification,
-    NotificationOrData, NxtInfo, PartialDelivery, PathState, PeerAddress, PeerAddressChange,
-    PeerAddressParams, PeerAddressState, RcvInfo, ReceivedData, RemoteError, RtoInfo, SackInfo,
-    SendFailure, SendOptions, Shutdown, SocketToAssociation, SubscribeEventAssocId,
+    NotificationOrData, PartialDelivery, PathState, PeerAddress, PeerAddressChange,
+    PeerAddressParams, PeerAddressState, ReceivedData, RemoteError, RtoInfo, SackInfo, SendFailure,
+    SendOptions, Shutdown, SocketToAssociation, SubscribeEventAssocId,
 };
 
 /// The blocks of the README, which are compiled, and run unless they say

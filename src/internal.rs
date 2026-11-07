@@ -117,10 +117,10 @@ impl SocketCore {
         let fd = sys::sctp_socket_internal(domain, style)?;
         // The stream, payload protocol and association of each message. Accepted and
         // peeled-off sockets inherit the setting.
-        sys::request_rcvinfo_internal(fd.as_fd(), true)?;
+        sys::request_rcvinfo_internal(fd.as_fd())?;
         let core = Self::register(fd, style)?;
         match style {
-            SocketToAssociation::OneToMany => core.interleave(true)?,
+            SocketToAssociation::OneToMany => core.interleave()?,
             // Listeners, the associations that they accept and those that connect.
             SocketToAssociation::OneToOne => core.hear_of_the_end()?,
         }
@@ -137,42 +137,19 @@ impl SocketCore {
         Ok(())
     }
 
-    // On an endpoint, whether the parts of the messages of several associations come in
-    // turns, which their receive information tells apart: a long message of one association
-    // then holds back none of the others. The parts of a message whose delivery is given up
-    // are dropped with the notification of it, which is subscribed for that.
-    fn interleave(&self, on: bool) -> std::io::Result<()> {
-        sys::set_fragment_interleave_internal(self.as_fd(), on)?;
-        if on && !sys::sctp_event_subscribed_internal(self.as_fd(), Event::PartialDelivery)? {
+    // On an endpoint, the parts of the messages of several associations come in turns,
+    // which their receive information tells apart: a long message of one association then
+    // holds back none of the others. The parts of a message whose delivery is given up are
+    // dropped with the notification of it, which is subscribed for that.
+    fn interleave(&self) -> std::io::Result<()> {
+        sys::set_fragment_interleave_internal(self.as_fd())?;
+        if !sys::sctp_event_subscribed_internal(self.as_fd(), Event::PartialDelivery)? {
             self.subscribe_quietly(Event::PartialDelivery)?;
         }
         self.partials
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .set_interleaved(on);
-        Ok(())
-    }
-
-    // Receive the receive information of each message, or not: an endpoint without it cannot
-    // tell the parts of messages of several associations apart, which then come one message
-    // after the other.
-    pub(crate) fn request_rcvinfo(&self, on: bool) -> std::io::Result<()> {
-        let assembling = !self
-            .partials
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .is_empty();
-        if self.style == SocketToAssociation::OneToMany && !on && assembling {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "the endpoint assembles messages, whose parts it could no longer tell apart \
-                 without the receive information",
-            ));
-        }
-        sys::request_rcvinfo_internal(self.as_fd(), on)?;
-        if self.style == SocketToAssociation::OneToMany {
-            self.interleave(on)?;
-        }
+            .set_interleaved(true);
         Ok(())
     }
 
@@ -231,6 +208,7 @@ impl SocketCore {
 
     // A descriptor of one association that the crate did not make.
     pub(crate) fn import(fd: OwnedFd) -> std::io::Result<Self> {
+        sys::request_rcvinfo_internal(fd.as_fd())?;
         let core = Self::from_association(fd)?;
         core.hear_of_the_end()?;
         Ok(core)
@@ -419,12 +397,9 @@ impl SocketCore {
 
     fn receive_once(&self, fd: BorrowedFd<'_>) -> std::io::Result<Option<NotificationOrData>> {
         let mut partials = self.partials.lock().unwrap_or_else(PoisonError::into_inner);
-        let received = receive::receive_message(
-            &mut partials,
-            self.max_message_size(),
-            self.style == SocketToAssociation::OneToOne,
-            |buffer| sys::sctp_recvmsg_once(fd, buffer),
-        );
+        let received = receive::receive_message(&mut partials, self.max_message_size(), |buffer| {
+            sys::sctp_recvmsg_once(fd, buffer)
+        });
         Self::abort_past_the_limit(fd, &mut partials);
         received
     }
@@ -528,7 +503,6 @@ impl SocketCore {
             receive::receive_batch(
                 &mut partials,
                 self.max_message_size(),
-                self.style == SocketToAssociation::OneToOne,
                 slots
                     .pieces()
                     .iter()
@@ -1029,36 +1003,17 @@ impl AsRawFd for SocketCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use receive::PartialMessage;
+    use crate::types::internal::RcvInfoWire;
 
-    /// Without the receive information, an endpoint could not tell apart the parts of the
-    /// messages that it assembles: it keeps it while it has some.
-    #[tokio::test]
-    async fn an_endpoint_that_assembles_keeps_the_receive_information() {
-        let core = SocketCore::new(libc::AF_INET, SocketToAssociation::OneToMany).unwrap();
-        core.partials
-            .lock()
-            .unwrap()
-            .begin(PartialMessage::default());
-        let error = core.request_rcvinfo(false).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(core.partials.lock().unwrap().interleaved());
-        let mut partials = Partials::default();
-        partials.set_interleaved(true);
-        *core.partials.lock().unwrap() = partials;
-        core.request_rcvinfo(false).unwrap();
-        assert!(!core.partials.lock().unwrap().interleaved());
-        core.request_rcvinfo(true).unwrap();
-        assert!(core.partials.lock().unwrap().interleaved());
-    }
-
+    /// A message in assembly of an association, or a notification, which may be of any,
+    /// keeps the association from being peeled off.
     #[tokio::test]
     async fn peeloff_rejects_partial_record_ownership_before_touching_the_kernel() {
-        for identity in [Some(7), None] {
+        for notification in [false, true] {
             let core = SocketCore::new(libc::AF_INET, SocketToAssociation::OneToMany).unwrap();
             let mut partials = Partials::default();
             let mut first = true;
-            let error = receive::receive_message(&mut partials, 100, false, |buffer| {
+            let error = receive::receive_message(&mut partials, 100, |buffer| {
                 if !first {
                     return Err(std::io::ErrorKind::WouldBlock.into());
                 }
@@ -1066,13 +1021,12 @@ mod tests {
                 buffer[..7].copy_from_slice(b"partial");
                 Ok(receive::Piece {
                     len: 7,
-                    notification: false,
+                    notification,
                     end_of_record: false,
-                    rcv_info: identity.map(|assoc_id| crate::RcvInfo {
-                        assoc_id,
+                    info: RcvInfoWire {
+                        assoc_id: if notification { 0 } else { 7 },
                         ..Default::default()
-                    }),
-                    nxt_info: None,
+                    },
                     from: None,
                 })
             })
@@ -1083,7 +1037,7 @@ mod tests {
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
             assert_eq!(error.raw_os_error(), None, "peeloff reached the kernel");
             assert!(!core.partials.lock().unwrap().is_empty());
-            if identity.is_some() {
+            if !notification {
                 // The kernel's `EINVAL`, said in words: the endpoint has no association 8
                 let error = core.peeloff(8).unwrap_err();
                 assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
@@ -1108,53 +1062,6 @@ mod tests {
         let peer = peer.connect(address).await.unwrap();
         peer.send(message, crate::SendOptions::new()).await.unwrap();
         peer
-    }
-
-    /// The first part of a message, from `from`, without its receive information.
-    fn first_part(octets: &[u8], from: Option<SocketAddr>) -> PartialMessage {
-        PartialMessage::begun(
-            octets,
-            &receive::Piece {
-                len: octets.len(),
-                notification: false,
-                end_of_record: false,
-                rcv_info: None,
-                nxt_info: None,
-                from,
-            },
-        )
-    }
-
-    fn payload(received: Option<NotificationOrData>) -> Vec<u8> {
-        match received {
-            Some(NotificationOrData::Data(message)) => message.payload,
-            other => panic!("{other:?}"),
-        }
-    }
-
-    /// Without the receive information, an endpoint tells the senders of the parts of a
-    /// message apart by their addresses: a message from another address is not taken for the
-    /// next part of one in assembly, by `recv` and by `recv_many`.
-    #[tokio::test]
-    async fn without_the_receive_information_an_endpoint_tells_senders_apart_by_address() {
-        for many in [false, true] {
-            let (core, address) = listening(SocketToAssociation::OneToMany);
-            core.request_rcvinfo(false).unwrap();
-            let elsewhere = Some("192.0.2.1:38412".parse().unwrap());
-            core.partials
-                .lock()
-                .unwrap()
-                .begin(first_part(b"partial ", elsewhere));
-            let _peer = peer_that_sent(address, b"whole").await;
-            let received = if many {
-                let mut out = Vec::new();
-                assert_eq!(core.recv_many(&mut out, 8).await.unwrap(), 1);
-                out.pop()
-            } else {
-                core.recv().await.unwrap()
-            };
-            assert_eq!(payload(received), b"whole", "recv_many: {many}");
-        }
     }
 
     /// A socket of one association that has an event subscribed for the crate alone, as a
@@ -1212,23 +1119,5 @@ mod tests {
         let sent = SocketCore::send_flagged(peer.as_fd(), &messages, &mut flags);
         assert_eq!(sent.unwrap(), 2);
         assert_eq!(flags, [true, false, false]);
-    }
-
-    /// An endpoint that no longer interleaves the messages of its associations subscribes to
-    /// nothing for itself when its receive information is turned off again.
-    #[tokio::test]
-    async fn turning_interleaving_off_subscribes_to_nothing() {
-        let core = SocketCore::new(libc::AF_INET, SocketToAssociation::OneToMany).unwrap();
-        let subscribed =
-            || sys::sctp_event_subscribed_internal(core.as_fd(), Event::PartialDelivery).unwrap();
-        assert!(subscribed());
-        core.request_rcvinfo(false).unwrap();
-        core.subscribe_events(&[Event::PartialDelivery], SubscribeEventAssocId::All, false)
-            .unwrap();
-        assert!(!subscribed());
-        core.request_rcvinfo(false).unwrap();
-        assert!(!subscribed());
-        core.request_rcvinfo(true).unwrap();
-        assert!(subscribed());
     }
 }

@@ -143,12 +143,12 @@ async fn connected_and_accepted_sockets_report_stream_and_ppid_by_default() {
     let NotificationOrData::Data(data) = peer.recv().await.unwrap().unwrap() else {
         panic!("not data")
     };
-    assert_eq!((data.stream_id(), data.ppid()), (Some(3), Some(60)));
+    assert_eq!((data.stream, data.ppid), (3, 60));
     let NotificationOrData::Data(data) = client.recv().await.unwrap().unwrap() else {
         panic!("not data")
     };
-    assert_eq!((data.stream_id(), data.ppid()), (Some(3), Some(60)));
-    assert_eq!(data.assoc_id(), Some(assoc_id));
+    assert_eq!((data.stream, data.ppid), (3, 60));
+    assert_eq!(data.assoc_id, assoc_id);
 }
 
 #[tokio::test]
@@ -171,7 +171,7 @@ async fn endpoint_defaults_identify_associations_and_peeloff_preserves_configura
     let NotificationOrData::Data(data) = endpoint.recv().await.unwrap() else {
         panic!("not data")
     };
-    let assoc_id = data.rcv_info.unwrap().assoc_id;
+    let assoc_id = data.assoc_id;
     assert_ne!(assoc_id, 0);
     let peer = endpoint.peeloff(assoc_id).unwrap();
     assert_eq!(peer.options().max_message_size(), 100);
@@ -199,9 +199,22 @@ async fn raw_stream_import_transfers_ownership_of_an_established_association() {
         .await
         .unwrap();
     let (peer, _) = listener.accept().await.unwrap();
-    // A duplicate of the descriptor, nonblocking as the original is
+    // A duplicate of the descriptor, nonblocking as the original is, without the receive
+    // information (`SCTP_RECVRCVINFO`), which the import turns on
     let owned = client.as_fd().try_clone_to_owned().unwrap();
     drop(client);
+    let off: libc::c_int = 0;
+    // Safety: `off` outlives the call, which only reads it.
+    let result = unsafe {
+        libc::setsockopt(
+            owned.as_raw_fd(),
+            libc::IPPROTO_SCTP,
+            32,
+            std::ptr::from_ref(&off).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(result, 0, "{}", std::io::Error::last_os_error());
     let imported = ConnectedSocket::try_from(owned).unwrap();
     imported
         .send(b"imported", SendOptions::new())
@@ -211,6 +224,17 @@ async fn raw_stream_import_transfers_ownership_of_an_established_association() {
         panic!("not data")
     };
     assert_eq!(data.payload, b"imported");
+    peer.send(b"answer", SendOptions::new().stream(1).ppid(60))
+        .await
+        .unwrap();
+    // The association changes of the original socket are the caller's: it came up first
+    let data = loop {
+        match imported.recv().await.unwrap().unwrap() {
+            NotificationOrData::Data(data) => break data,
+            NotificationOrData::Notification(notification) => println!("{notification:?}"),
+        }
+    };
+    assert_eq!((data.stream, data.ppid), (1, 60));
     drop(imported);
     let closed = tokio::time::timeout(std::time::Duration::from_secs(2), peer.recv())
         .await
@@ -321,21 +345,6 @@ async fn a_long_message_of_one_association_holds_back_none_of_the_others_on_an_e
 }
 
 const BUFFER: usize = 64 << 10;
-
-/// Without the receive information, an endpoint cannot tell the parts of messages of two
-/// associations apart: they come one message after the other, as Linux has it by default,
-/// and a long one holds back the others. A `Listener` gives each association a socket.
-#[tokio::test]
-async fn without_the_receive_information_a_long_message_holds_back_the_others() {
-    const LONG: usize = 512 << 10;
-    let Some((endpoint, slow, quick)) = endpoint_with_two_clients(BUFFER, LONG).await else {
-        return;
-    };
-    endpoint.options().request_rcvinfo(false).unwrap();
-    let (lengths, short) = long_and_short(endpoint, slow, quick, LONG).await;
-    eprintln!("{lengths:?}, the short message in {short:?}");
-    assert_eq!(lengths, [LONG, 15]);
-}
 
 /// A peer that aborts in the middle of a long message leaves nothing of it to the endpoint:
 /// the parts go with the notification that the kernel gave up their delivery, which the

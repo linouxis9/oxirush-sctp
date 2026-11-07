@@ -733,7 +733,7 @@ impl Reader {
 /// let Some(Ok(NotificationOrData::Data(message))) = reader.recv().await else {
 ///     unreachable!()
 /// };
-/// assert_eq!(message.ppid(), Some(60));
+/// assert_eq!(message.ppid, 60);
 /// # Ok(())
 /// # }
 /// ```

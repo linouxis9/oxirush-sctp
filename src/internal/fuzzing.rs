@@ -1,16 +1,17 @@
 //! Entry points for the fuzz targets of `fuzz/`.
 use super::receive::{Partials, Piece, receive_message};
 use super::{notifications, sys};
-use crate::{Notification, NotificationOrData, NxtInfo, RcvInfo};
+use crate::types::internal::RcvInfoWire;
+use crate::{Notification, NotificationOrData};
 
 /// A notification of any octets.
 pub fn notification(octets: &[u8]) -> Notification {
     notifications::notification_from_message(octets)
 }
 
-/// The receive information of any control messages.
-pub fn ancillary(control: &[u8]) -> (Option<RcvInfo>, Option<NxtInfo>) {
-    sys::ancillary_info(control)
+/// The receive information of any control messages, as `Debug` prints it.
+pub fn ancillary(control: &[u8]) -> String {
+    format!("{:?}", sys::ancillary_info(control))
 }
 
 /// Assembles messages from the parts that `script` describes, as `recv` does from what
@@ -25,7 +26,7 @@ pub fn receive(script: &[u8]) {
     partial.set_max_assembly(3 * LIMIT);
     // Every call consumes a step, so the loop ends with the script.
     while !script.is_empty() {
-        let received = receive_message(&mut partial, LIMIT, script[0] & 0x80 != 0, |buffer| {
+        let received = receive_message(&mut partial, LIMIT, |buffer| {
             let [flags, length, rest @ ..] = script else {
                 script = &[];
                 return Err(std::io::ErrorKind::WouldBlock.into());
@@ -44,11 +45,11 @@ pub fn receive(script: &[u8]) {
                 len: length,
                 notification: flags & 0x08 != 0,
                 end_of_record: flags & 0x10 != 0,
-                rcv_info: (flags & 0x20 != 0).then(|| RcvInfo {
+                info: RcvInfoWire {
+                    sid: u16::from(flags >> 5 & 1),
                     assoc_id: i32::from(flags >> 6),
                     ..Default::default()
-                }),
-                nxt_info: None,
+                },
                 from: None,
             })
         });
