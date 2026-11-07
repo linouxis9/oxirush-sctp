@@ -299,15 +299,6 @@ impl ConnectedSocket {
         self.core.send_many(messages).await
     }
 
-    /// [`send_many`][Self::send_many] as a poll.
-    pub fn poll_send_many(
-        &self,
-        cx: &mut Context<'_>,
-        messages: &[(&[u8], SendOptions)],
-    ) -> Poll<std::io::Result<usize>> {
-        self.core.poll_send_many(cx, messages)
-    }
-
     /// Receive the messages and notifications that the kernel holds, up to `limit`, in one
     /// system call, and append them to `out`, waiting for the first: how many were
     /// appended. They are whole, as [`recv`][Self::recv] returns them; a message that came
@@ -319,16 +310,6 @@ impl ConnectedSocket {
         limit: usize,
     ) -> std::io::Result<usize> {
         self.core.recv_many(out, limit).await
-    }
-
-    /// [`recv_many`][Self::recv_many] as a poll.
-    pub fn poll_recv_many(
-        &self,
-        cx: &mut Context<'_>,
-        out: &mut Vec<NotificationOrData>,
-        limit: usize,
-    ) -> Poll<std::io::Result<usize>> {
-        self.core.poll_recv_many(cx, out, limit)
     }
 
     /// Close the association without losing what was sent: shut it down for writing, then

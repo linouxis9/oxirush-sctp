@@ -149,15 +149,6 @@ impl OneToManyEndpoint {
         self.core.send_many(messages).await
     }
 
-    /// [`send_many`][Self::send_many] as a poll.
-    pub fn poll_send_many(
-        &self,
-        cx: &mut Context<'_>,
-        messages: &[(AssociationId, &[u8], SendOptions)],
-    ) -> Poll<std::io::Result<usize>> {
-        self.core.poll_send_many(cx, messages)
-    }
-
     /// Receive the messages and notifications that the kernel holds of every association,
     /// up to `limit`, in one system call, and append them to `out`, waiting for the first:
     /// how many were appended. They are whole, as [`recv`][Self::recv] returns them.
@@ -166,20 +157,10 @@ impl OneToManyEndpoint {
         out: &mut Vec<NotificationOrData>,
         limit: usize,
     ) -> std::io::Result<usize> {
-        std::future::poll_fn(|cx| self.poll_recv_many(cx, out, limit)).await
-    }
-
-    /// [`recv_many`][Self::recv_many] as a poll.
-    pub fn poll_recv_many(
-        &self,
-        cx: &mut Context<'_>,
-        out: &mut Vec<NotificationOrData>,
-        limit: usize,
-    ) -> Poll<std::io::Result<usize>> {
-        match self.core.poll_recv_many(cx, out, limit) {
+        match self.core.recv_many(out, limit).await {
             // A one-to-many socket has no end of stream: its associations end in
             // notifications
-            Poll::Ready(Ok(0)) if limit > 0 => Poll::Ready(Err(shut_down())),
+            Ok(0) if limit > 0 => Err(shut_down()),
             other => other,
         }
     }

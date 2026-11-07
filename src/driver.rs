@@ -59,102 +59,41 @@
 //! [`Writer::overload`] has the state, the shortest sojourn and the 50th and 99th percentiles
 //! of the last interval, from a histogram of powers of two, and the counters.
 
-use crate::{
-    AssociationId, ConnectedSocket, NotificationOrData, OneToManyEndpoint, SendOptions,
-    SocketOptions,
-};
+use crate::{AssociationId, ConnectedSocket, NotificationOrData, OneToManyEndpoint, SendOptions};
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::task::{Context, Poll};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 use tokio::sync::{Notify, Semaphore, mpsc};
 
 /// The sockets that a driver drives: [`ConnectedSocket`] and [`OneToManyEndpoint`].
-pub trait Batched: Send + Sync + 'static + sealed::Sealed {
-    #[doc(hidden)]
-    fn poll_send_batch(
-        &self,
-        cx: &mut Context<'_>,
-        messages: &[(AssociationId, &[u8], SendOptions)],
-    ) -> Poll<std::io::Result<usize>>;
+pub trait Batched: sealed::Sealed + Send + Sync + 'static {}
 
-    #[doc(hidden)]
-    fn poll_recv_batch(
-        &self,
-        cx: &mut Context<'_>,
-        out: &mut Vec<NotificationOrData>,
-        limit: usize,
-    ) -> Poll<std::io::Result<usize>>;
-
-    #[doc(hidden)]
-    fn one_association(&self) -> bool;
-
-    #[doc(hidden)]
-    fn options(&self) -> SocketOptions<'_>;
-}
+impl Batched for ConnectedSocket {}
+impl Batched for OneToManyEndpoint {}
 
 mod sealed {
-    pub trait Sealed {}
-    impl Sealed for crate::ConnectedSocket {}
-    impl Sealed for crate::OneToManyEndpoint {}
-}
-
-impl Batched for ConnectedSocket {
-    fn poll_send_batch(
-        &self,
-        cx: &mut Context<'_>,
-        messages: &[(AssociationId, &[u8], SendOptions)],
-    ) -> Poll<std::io::Result<usize>> {
-        // The association of each is 0, which a one-to-one socket ignores
-        ConnectedSocket::options(self)
-            .core
-            .poll_send_many(cx, messages)
+    // What a driver takes of its socket: its options, which reach the socket itself, and
+    // whether it has one association.
+    pub trait Sealed {
+        const ONE_ASSOCIATION: bool;
+        fn options(&self) -> crate::SocketOptions<'_>;
     }
 
-    fn poll_recv_batch(
-        &self,
-        cx: &mut Context<'_>,
-        out: &mut Vec<NotificationOrData>,
-        limit: usize,
-    ) -> Poll<std::io::Result<usize>> {
-        self.poll_recv_many(cx, out, limit)
+    impl Sealed for crate::ConnectedSocket {
+        const ONE_ASSOCIATION: bool = true;
+        fn options(&self) -> crate::SocketOptions<'_> {
+            crate::ConnectedSocket::options(self)
+        }
     }
 
-    fn one_association(&self) -> bool {
-        true
-    }
-
-    fn options(&self) -> SocketOptions<'_> {
-        ConnectedSocket::options(self)
-    }
-}
-
-impl Batched for OneToManyEndpoint {
-    fn poll_send_batch(
-        &self,
-        cx: &mut Context<'_>,
-        messages: &[(AssociationId, &[u8], SendOptions)],
-    ) -> Poll<std::io::Result<usize>> {
-        self.poll_send_many(cx, messages)
-    }
-
-    fn poll_recv_batch(
-        &self,
-        cx: &mut Context<'_>,
-        out: &mut Vec<NotificationOrData>,
-        limit: usize,
-    ) -> Poll<std::io::Result<usize>> {
-        self.poll_recv_many(cx, out, limit)
-    }
-
-    fn one_association(&self) -> bool {
-        false
-    }
-
-    fn options(&self) -> SocketOptions<'_> {
-        OneToManyEndpoint::options(self)
+    impl Sealed for crate::OneToManyEndpoint {
+        const ONE_ASSOCIATION: bool = false;
+        fn options(&self) -> crate::SocketOptions<'_> {
+            crate::OneToManyEndpoint::options(self)
+        }
     }
 }
 
@@ -317,6 +256,39 @@ struct Shared {
     /// Why the writer stopped.
     closed: Mutex<Option<(std::io::ErrorKind, String)>>,
     writers: AtomicUsize,
+}
+
+impl Shared {
+    fn new(config: DriverConfig) -> Self {
+        Self {
+            config,
+            queue: Mutex::new(VecDeque::new()),
+            queued: Notify::new(),
+            room: Semaphore::new(config.max_queued.clamp(1, Semaphore::MAX_PERMITS)),
+            relieved: Notify::new(),
+            overloaded: AtomicBool::new(false),
+            length: AtomicUsize::new(0),
+            octets: AtomicUsize::new(0),
+            sent: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
+            refused_octets: AtomicU64::new(0),
+            failed: AtomicU64::new(0),
+            window: Mutex::new(Window::default()),
+            closed: Mutex::new(None),
+            writers: AtomicUsize::new(1),
+        }
+    }
+
+    // `sent` messages of `octets` sent and those `lost` have left the queue, and give their
+    // room back.
+    fn left(&self, sent: usize, octets: usize, lost: &[Queued]) {
+        let octets = octets + lost.iter().map(|message| message.permits).sum::<usize>();
+        self.sent.fetch_add(sent as u64, Ordering::Relaxed);
+        self.failed.fetch_add(lost.len() as u64, Ordering::Relaxed);
+        self.length.fetch_sub(sent + lost.len(), Ordering::AcqRel);
+        self.octets.fetch_sub(octets, Ordering::Relaxed);
+        self.room.add_permits(octets);
+    }
 }
 
 struct Queued {
@@ -701,7 +673,8 @@ impl Reader {
 /// Start the writer's task and the reader's task of `socket`, on the current Tokio runtime,
 /// which needs its time driver for the overload.
 ///
-/// It turns Nagle's algorithm off on the socket ([`SocketOptions::set_nodelay`]): the
+/// It turns Nagle's algorithm off on the socket
+/// ([`SocketOptions::set_nodelay`][crate::SocketOptions::set_nodelay]): the
 /// writer bundles what is queued itself, and Nagle's algorithm would hold a batch back for
 /// the acknowledgement of the last one, which a peer may delay by 200 ms.
 ///
@@ -741,23 +714,7 @@ pub fn spawn<S: Batched>(socket: S, config: DriverConfig) -> std::io::Result<(Wr
     assert!(config.batch > 0, "a batch of 0 messages");
     socket.options().set_nodelay(true)?;
     let socket = Arc::new(socket);
-    let shared = Arc::new(Shared {
-        config,
-        queue: Mutex::new(VecDeque::new()),
-        queued: Notify::new(),
-        room: Semaphore::new(config.max_queued.clamp(1, Semaphore::MAX_PERMITS)),
-        relieved: Notify::new(),
-        overloaded: AtomicBool::new(false),
-        length: AtomicUsize::new(0),
-        octets: AtomicUsize::new(0),
-        sent: AtomicU64::new(0),
-        refused: AtomicU64::new(0),
-        refused_octets: AtomicU64::new(0),
-        failed: AtomicU64::new(0),
-        window: Mutex::new(Window::default()),
-        closed: Mutex::new(None),
-        writers: AtomicUsize::new(1),
-    });
+    let shared = Arc::new(Shared::new(config));
     let (tx, rx) = mpsc::channel(config.reader_capacity.max(1));
     tokio::spawn(read(socket.clone(), tx, config.batch));
     tokio::spawn(write(socket, shared.clone()));
@@ -783,7 +740,8 @@ async fn read<S: Batched>(
                 if closed.as_mut().poll(cx).is_ready() {
                     return Poll::Ready(None);
                 }
-                socket.poll_recv_batch(cx, &mut out, batch).map(Some)
+                let core = socket.options().core;
+                core.poll_recv_many(cx, &mut out, batch).map(Some)
             })
             .await
         };
@@ -957,7 +915,8 @@ async fn write<S: Batched>(socket: Arc<S>, shared: Arc<Shared>) {
                     )
                 })
                 .collect();
-            let send = std::future::poll_fn(|cx| socket.poll_send_batch(cx, &messages));
+            let core = socket.options().core;
+            let send = std::future::poll_fn(|cx| core.poll_send_many(cx, &messages));
             let left = config
                 .interval
                 .saturating_sub(interval.start.elapsed())
@@ -981,12 +940,11 @@ async fn write<S: Batched>(socket: Arc<S>, shared: Arc<Shared>) {
             Err(error) => (0, Some(error)),
         };
         let mut rest = batch.split_off(count);
-        let mut done = 0;
+        let mut octets = 0;
         for (_, message) in batch.drain(..) {
             interval.record(now.saturating_duration_since(message.since));
-            done += message.permits;
+            octets += message.permits;
         }
-        shared.sent.fetch_add(count as u64, Ordering::Relaxed);
         let mut lost: Vec<Queued> = Vec::new();
         if let Some(error) = failure {
             let (key, _) = rest[0];
@@ -994,7 +952,7 @@ async fn write<S: Batched>(socket: Arc<S>, shared: Arc<Shared>) {
                 // This message alone: a stream that the association does not have, or a
                 // message longer than the send buffer.
                 lost.push(rest.remove(0).1);
-            } else if socket.one_association() {
+            } else if S::ONE_ASSOCIATION {
                 // The association is done: what is left fails, and so do later sends.
                 lost.extend(rest.drain(..).map(|(_, message)| message));
                 lost.extend(pending.drain());
@@ -1011,15 +969,7 @@ async fn write<S: Batched>(socket: Arc<S>, shared: Arc<Shared>) {
         for (key, message) in rest.into_iter().rev() {
             pending.push_front(key, message);
         }
-        shared
-            .failed
-            .fetch_add(lost.len() as u64, Ordering::Relaxed);
-        done += lost.iter().map(|message| message.permits).sum::<usize>();
-        let finished = count + lost.len();
-        let octets_done: usize = done;
-        shared.length.fetch_sub(finished, Ordering::AcqRel);
-        shared.octets.fetch_sub(octets_done, Ordering::Relaxed);
-        shared.room.add_permits(octets_done);
+        shared.left(count, octets, &lost);
         if interval.start.elapsed() >= config.interval {
             close_interval(&shared, &mut interval, Instant::now(), false);
         }
@@ -1034,14 +984,9 @@ async fn write<S: Batched>(socket: Arc<S>, shared: Arc<Shared>) {
             .is_some()
         {
             // What was queued meanwhile fails too.
-            let late =
+            let mut late =
                 std::mem::take(&mut *shared.queue.lock().unwrap_or_else(PoisonError::into_inner));
-            shared
-                .failed
-                .fetch_add(late.len() as u64, Ordering::Relaxed);
-            shared.length.fetch_sub(late.len(), Ordering::AcqRel);
-            let octets: usize = late.iter().map(|message| message.permits).sum();
-            shared.octets.fetch_sub(octets, Ordering::Relaxed);
+            shared.left(0, 0, late.make_contiguous());
             shared.room.close();
             set_overload(&shared, false);
             return;
@@ -1088,30 +1033,9 @@ fn set_overload(shared: &Shared, overloaded: bool) {
 mod tests {
     use super::*;
 
-    /// What a driver's tasks and writers share, as `spawn` makes it.
-    fn shared(config: DriverConfig) -> Shared {
-        Shared {
-            config,
-            queue: Mutex::new(VecDeque::new()),
-            queued: Notify::new(),
-            room: Semaphore::new(config.max_queued.clamp(1, Semaphore::MAX_PERMITS)),
-            relieved: Notify::new(),
-            overloaded: AtomicBool::new(false),
-            length: AtomicUsize::new(0),
-            octets: AtomicUsize::new(0),
-            sent: AtomicU64::new(0),
-            refused: AtomicU64::new(0),
-            refused_octets: AtomicU64::new(0),
-            failed: AtomicU64::new(0),
-            window: Mutex::new(Window::default()),
-            closed: Mutex::new(None),
-            writers: AtomicUsize::new(1),
-        }
-    }
-
     fn writer(config: DriverConfig) -> Writer<ConnectedSocket> {
         Writer {
-            shared: Arc::new(shared(config)),
+            shared: Arc::new(Shared::new(config)),
             socket: PhantomData,
         }
     }
@@ -1157,7 +1081,7 @@ mod tests {
     /// and not when it is at it or under it; an empty queue is in overload no more.
     #[test]
     fn the_shortest_sojourn_above_the_target_is_an_overload() {
-        let shared = shared(DriverConfig::default());
+        let shared = Shared::new(DriverConfig::default());
         for (min, empty, overloaded) in [
             (Duration::from_millis(1), false, false),
             (Duration::from_millis(5), false, false),
@@ -1179,7 +1103,7 @@ mod tests {
     /// `ceiling_intervals` intervals in a row.
     #[test]
     fn the_99th_percentile_above_the_ceiling_for_intervals_in_a_row_is_an_overload() {
-        let shared = shared(DriverConfig {
+        let shared = Shared::new(DriverConfig {
             target: Duration::from_secs(1),
             ceiling: micros(131_072),
             ceiling_intervals: 3,
@@ -1213,7 +1137,7 @@ mod tests {
     /// stands; it ends the overload of one that is empty.
     #[test]
     fn an_interval_without_sojourns_leaves_the_window() {
-        let shared = shared(DriverConfig::default());
+        let shared = Shared::new(DriverConfig::default());
         shared.overloaded.store(true, Ordering::Release);
         let mut interval = Interval::new(Instant::now());
         close_interval(&shared, &mut interval, Instant::now(), false);
@@ -1232,11 +1156,11 @@ mod tests {
     /// The writers that wait are woken when the overload ends, and only then.
     #[test]
     fn the_end_of_the_overload_alone_wakes_the_waiters() {
-        let shared = shared(DriverConfig::default());
+        let shared = Shared::new(DriverConfig::default());
         let woken = |overloaded| {
             let notified = std::pin::pin!(shared.relieved.notified());
             set_overload(&shared, overloaded);
-            let mut cx = Context::from_waker(std::task::Waker::noop());
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
             notified.poll(&mut cx).is_ready()
         };
         assert!(!woken(false), "no overload ends");
