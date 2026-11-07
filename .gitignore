@@ -6,3 +6,5 @@ src/internal/tests.rs
 # The comparison of benches/ has its program in C
 !benches/compare/sctp.c
 /mutants.out*/
+/readme/target
+/readme/Cargo.lock

@@ -147,68 +147,9 @@ gNB: "NG SETUP RESPONSE"
 gNB writer: 1001 sent, 0 refused, in overload false
 ```
 
-`cargo run --example driver` runs this program, and `examples/` has the
-other programs of this page, except the next one. `examples/server.rs` serves
-several associations, each in a task of its own.
-
-## NG SETUP over SCTP
-
-An association carries the messages of its protocol: here the NG SETUP of
-[oxirush-ngap](https://github.com/linouxis9/oxirush-ngap), on stream 0,
-with the payload protocol identifier of NGAP, 60 (TS 38.412).
-
-```rust,ignore
-use oxirush_ngap::helpers::{global_gnb_id, guami, plmn, s_nssai};
-use oxirush_ngap::{build_ngap, ngap::*};
-use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
-
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ngap = SendOptions::new().stream(0).ppid(60);
-    let socket = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    socket.bind("127.0.0.1:0".parse()?)?;
-    let listener = socket.listen(5)?;
-    let gnb = Socket::new_v4(SocketToAssociation::OneToOne)?;
-    let (gnb, _) = gnb.connect(listener.local_addr()?).await?;
-    let (amf, _) = listener.accept().await?;
-
-    // The gNB: NG SETUP REQUEST, its identity and the slices of its tracking area
-    let network = plmn("208", "93")?;
-    let slices = || SliceSupportList(vec![SliceSupportItem::new(s_nssai(1, None), None)]);
-    let plmns = BroadcastPLMNList(vec![BroadcastPLMNItem::new(network, slices(), None)]);
-    let area = SupportedTAItem::new(TAC([0, 0, 1]), plmns, None);
-    let request = build_ngap!(InitiatingMessage, NGSetup, NGSetupRequest,
-        GlobalRANNodeID(GlobalRANNodeID::globalGNB_ID(global_gnb_id(network, 0x123456, 24)?)),
-        SupportedTAList(SupportedTAList(vec![area])),
-        DefaultPagingDRX(PagingDRX::v128),
-    )?;
-    gnb.send(&request.encode()?, ngap).await?;
-
-    // The AMF: the PDU of each message, and an answer on the same stream
-    if let Some(NotificationOrData::Data(message)) = amf.recv().await? {
-        let pdu = NGAP_PDU::decode(&message.payload)?;
-        let (stream, ppid) = (message.stream_id(), message.ppid());
-        println!("AMF: {:?} on stream {stream:?}, PPID {ppid:?}", pdu.kind());
-        let served = ServedGUAMIItem::new(guami(network, 1, 1, 0)?, None, None);
-        let response = build_ngap!(SuccessfulOutcome, NGSetup, NGSetupResponse,
-            AMFName("amf-1"),
-            ServedGUAMIList(ServedGUAMIList(vec![served])),
-            RelativeAMFCapacity(RelativeAMFCapacity(255)),
-            PLMNSupportList(PLMNSupportList(vec![PLMNSupportItem::new(network, slices(), None)])),
-        )?;
-        amf.send(&response.encode()?, ngap).await?;
-    }
-    if let Some(NotificationOrData::Data(message)) = gnb.recv().await? {
-        println!("gNB: {:?}", NGAP_PDU::decode(&message.payload)?.kind());
-    }
-    Ok(())
-}
-```
-
-```text
-AMF: Initiating_NGSetup on stream Some(0), PPID Some(60)
-gNB: Successful_NGSetup
-```
+An association carries the messages of its protocol, such as NGAP on the
+streams and with the payload protocol identifier 60 of TS 38.412.
+`examples/server.rs` serves several associations, each in a task of its own.
 
 ## Notifications
 
@@ -592,9 +533,7 @@ cargo test
 The tests open associations over the loopback interface. CI runs three
 `cargo fuzz` targets for a minute each: what the kernel hands over is read
 without a panic. Each Rust block of this page is checked with what it prints
-([`tests/readme.rs`](tests/readme.rs)). The block that uses another crate of
-the family runs in the package of [`family/`](family/), which takes that
-crate at the version that its manifest names.
+([`readme/`](readme/build.rs) says how).
 
 [The documentation](https://docs.rs/oxirush-sctp) has the terms, the
 sections of RFC 6458 that the crate covers, the socket types, and the rules

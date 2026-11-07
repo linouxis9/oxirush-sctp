@@ -61,20 +61,6 @@
 //! | One socket for many associations | [`Socket::into_endpoint`], [`OneToManyEndpoint`], [`OneToManyEndpoint::peeloff`] |
 //! | Many messages a call | [`ConnectedSocket::send_many`], [`ConnectedSocket::recv_many`] |
 //!
-//! # Requirements
-//!
-//! - Linux 5.0 or later with SCTP. `sudo modprobe sctp` loads the kernel
-//!   module, which some distributions ship in a separate package of extra
-//!   kernel modules. Without it, creating a socket fails with
-//!   `EPROTONOSUPPORT`, or `ESOCKTNOSUPPORT` for a one-to-many socket.
-//! - A Tokio runtime with the I/O driver (`#[tokio::main]`, or `enable_io` on
-//!   a runtime builder). Sockets register with it when they are created, and
-//!   panic without it.
-//! - Rust 1.88 or later.
-//!
-//! The crate makes the system calls itself, without `libsctp`, and reports
-//! through its errors and notifications: it logs nothing.
-//!
 //! # Socket types
 //!
 //! | Type | Comes from | Does |
@@ -258,16 +244,6 @@
 //! | 9.2 `sctp_peeloff` | `OneToManyEndpoint::peeloff` |
 //! | 9.3 `sctp_getpaddrs`, 9.5 `sctp_getladdrs` | `peer_addrs`, `local_addrs` |
 //!
-//! # Limits
-//!
-//! | Subject | Limit |
-//! | --- | --- |
-//! | SCTP itself | The protocol runs in the Linux kernel: the crate is not an SCTP implementation. |
-//! | Other systems | Linux only. |
-//! | SCTP over DTLS | The data channels of WebRTC are another stack: not served. |
-//! | Many associations on one socket | On a [`OneToManyEndpoint`], the parts of the messages of several associations come in turns (`SCTP_FRAGMENT_INTERLEAVE` 1) and are assembled apart: a long message of one association holds back none of the others. Each association has one message in assembly at most, of `max_message_size()` at most, until it ends, and all of them together hold `max_assembly()` octets at most, 64 MiB by default: past it the endpoint aborts the association whose message is the longest. The associations share the receive buffer of the socket (Linux's `net.sctp.rcvbuf_policy` 0): one that fills it makes the others wait for room, and their peers send again after a time-out; `net.sctp.rcvbuf_policy` 1, or a [`Listener`], gives each its own. They share its send buffer too (`net.sctp.sndbuf_policy` 0): Linux wakes the socket once for each association when one of them has data acknowledged, and a message to one of 100 associations took 34 µs of CPU on loopback, where one to a single association took 11 (the README's figures, at ea7c778). After `request_rcvinfo(false)` the parts come one message after the other, and a long message holds back the others. |
-//! | The rest of RFC 6458 | Not wrapped: among others authentication, partial reliability and stream reconfiguration. The sockets implement `AsFd` and `AsRawFd` for them. The interfaces that the RFC deprecates are left out on purpose. |
-//!
 //! # Terms
 //!
 //! | Term | Meaning |
@@ -280,19 +256,6 @@
 //! | One-to-many socket | A socket with many associations, which is used like a UDP socket |
 //! | Multihoming | An association between several addresses of each side: when a path fails, another carries it |
 //! | Notification | A message of the kernel about an association, which `recv` returns in the place of data when it is subscribed |
-//!
-//! # Tests
-//!
-//! The tests open SCTP associations over loopback, so the kernel's `sctp`
-//! module must be available. The tests of a connection that times out and
-//! of a peer that is lost need `unshare` and `ip`, and the tests of long
-//! messages need `net.core.wmem_max` and `net.core.rmem_max` large enough;
-//! each skips otherwise.
-//!
-//! `fuzz/` has three `cargo fuzz` targets for what the kernel hands over, which
-//! CI runs for a minute each: a notification of any octets, the control
-//! messages of a `recvmsg`, and the assembly of messages from any sequence of
-//! parts.
 //!
 //! # The OxiRush family
 //!
@@ -356,3 +319,9 @@ pub use types::{
     SackInfo, SendData, SendFailure, SendInfo, SendOptions, Shutdown, SocketToAssociation,
     SubscribeEventAssocId,
 };
+
+/// The blocks of the README, which are compiled, and run unless they say
+/// otherwise, with the documentation tests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct _Readme;
