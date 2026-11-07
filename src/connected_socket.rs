@@ -1,7 +1,8 @@
 //! A socket owning one SCTP association.
 use crate::internal::{SocketCore, sys};
+use crate::types::internal::SndInfoWire;
 use crate::{
-    BindxFlags, ConnStatus, NotificationOrData, PeerAddress, ReceivedData, SendData, SendOptions,
+    BindxFlags, ConnStatus, NotificationOrData, PeerAddress, ReceivedData, SendOptions,
     SocketOptions,
 };
 use std::net::SocketAddr;
@@ -213,27 +214,15 @@ impl ConnectedSocket {
         payload: &[u8],
         options: SendOptions,
     ) -> Poll<std::io::Result<()>> {
-        if options.assoc_id() != 0 {
-            return Poll::Ready(Err(Self::not_one_to_many()));
-        }
-        let info = options.info();
-        self.core.poll_send(cx, None, payload, Some(&info))
-    }
-
-    fn not_one_to_many() -> std::io::Error {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "a connected socket has one association: `SendOptions::association` is for a \
-             one-to-many endpoint",
-        )
+        self.core.poll_send(cx, None, 0, payload, options)
     }
 
     /// Send a message, waiting for room in the send buffer. Dropping the future before
     /// completion sends no part of it.
     ///
-    /// An empty payload, a stream the association does not have ([`ConnStatus::outstreams`]),
-    /// [`SendOptions::association`] with another value than 0 and a message longer than the
-    /// send buffer (`SO_SNDBUF`) are `InvalidInput`, with a text that says which. After the
+    /// An empty payload, a stream the association does not have ([`ConnStatus::outstreams`])
+    /// and a message longer than the send buffer (`SO_SNDBUF`) are `InvalidInput`, with a
+    /// text that says which. After the
     /// end of the association, every call returns at once: `BrokenPipe` for an association
     /// that was shut down, and the error of one that was aborted or lost, such as
     /// `ConnectionReset`.
@@ -261,11 +250,7 @@ impl ConnectedSocket {
     /// # }
     /// ```
     pub async fn send(&self, payload: &[u8], options: SendOptions) -> std::io::Result<()> {
-        if options.assoc_id() != 0 {
-            return Err(Self::not_one_to_many());
-        }
-        let info = options.info();
-        self.core.send(None, payload, Some(&info)).await
+        self.core.send(None, 0, payload, options).await
     }
 
     /// Send several messages, each with its options, in one or two system calls: a prefix of
@@ -311,7 +296,6 @@ impl ConnectedSocket {
     /// # }
     /// ```
     pub async fn send_many(&self, messages: &[(&[u8], SendOptions)]) -> std::io::Result<usize> {
-        Self::one_association(messages)?;
         self.core.send_many(messages).await
     }
 
@@ -321,18 +305,7 @@ impl ConnectedSocket {
         cx: &mut Context<'_>,
         messages: &[(&[u8], SendOptions)],
     ) -> Poll<std::io::Result<usize>> {
-        match Self::one_association(messages) {
-            Ok(()) => self.core.poll_send_many(cx, messages),
-            Err(error) => Poll::Ready(Err(error)),
-        }
-    }
-
-    // The options of a connected socket name no association.
-    fn one_association(messages: &[(&[u8], SendOptions)]) -> std::io::Result<()> {
-        if messages.iter().any(|(_, options)| options.assoc_id() != 0) {
-            return Err(Self::not_one_to_many());
-        }
-        Ok(())
+        self.core.poll_send_many(cx, messages)
     }
 
     /// Receive the messages and notifications that the kernel holds, up to `limit`, in one
@@ -356,14 +329,6 @@ impl ConnectedSocket {
         limit: usize,
     ) -> Poll<std::io::Result<usize>> {
         self.core.poll_recv_many(cx, out, limit)
-    }
-
-    /// Send an owned message with optional low-level `SendInfo`, whose flags give the
-    /// controls of the kernel that `SendOptions` does not have.
-    pub async fn send_data(&self, data: SendData) -> std::io::Result<()> {
-        self.core
-            .send(None, &data.payload, data.snd_info.as_ref())
-            .await
     }
 
     /// Close the association without losing what was sent: shut it down for writing, then
@@ -432,11 +397,8 @@ impl ConnectedSocket {
     /// socket that was peeled off an endpoint. Linux refuses to carry one on a socket that
     /// was connected or accepted: the association is then aborted without it.
     pub fn abort(self, reason: &[u8]) -> std::io::Result<()> {
-        let info = crate::SendInfo {
-            flags: crate::consts::SCTP_ABORT,
-            ..Default::default()
-        };
-        match sys::sctp_sendmsg_once(self.as_fd(), None, reason, Some(&info)) {
+        let info = SndInfoWire::control(crate::consts::SCTP_ABORT, 0);
+        match sys::sctp_sendmsg_once(self.as_fd(), None, reason, info) {
             Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {
                 // Closing a socket with a linger of zero aborts its association
                 sys::set_linger_internal(self.as_fd(), Some(std::time::Duration::ZERO))

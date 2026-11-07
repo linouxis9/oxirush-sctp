@@ -159,7 +159,7 @@ async fn third_message_lag(nodelay: bool) -> std::time::Duration {
     client.options().set_nodelay(nodelay).unwrap();
     let connected = client.connectx(&[bindaddr]).await.unwrap();
     let (accepted, _) = listener.accept().await.unwrap();
-    let send = |payload: &[u8]| connected.send_data(SendData::new(payload.to_vec()));
+    let send = |payload: &'static [u8]| connected.send(payload, SendOptions::new());
 
     // Linux acknowledges the first DATA chunk of an association at once, then every second
     // packet or when its delayed SACK timer (200 ms by default) expires.

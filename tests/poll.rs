@@ -60,12 +60,6 @@ async fn messages_go_both_ways_through_the_polls() {
         panic!("{received:?}");
     };
     assert_eq!(answer.payload, b"answer");
-    // A connected socket has one association.
-    let elsewhere = SendOptions::new().association(7);
-    let error = poll_fn(|cx| client.poll_send(cx, b"x", elsewhere))
-        .await
-        .unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     // The peer shuts down: the end, at each call.
     peer.shutdown(std::net::Shutdown::Both).unwrap();
     let ended = tokio::time::timeout(WAIT, until_the_end(&client)).await;
@@ -208,7 +202,7 @@ async fn an_endpoint_sends_and_receives_through_the_polls() {
     };
     assert_eq!(answer.payload, b"answer");
     let association = answer.assoc_id().unwrap();
-    poll_fn(|cx| endpoint.poll_send(cx, b"again", options.association(association)))
+    poll_fn(|cx| endpoint.poll_send(cx, association, b"again", options))
         .await
         .unwrap();
     peer.send(b"last", SendOptions::new()).await.unwrap();
@@ -221,9 +215,4 @@ async fn an_endpoint_sends_and_receives_through_the_polls() {
         panic!("not data");
     };
     assert_eq!(again.payload, b"again");
-    // A send of an endpoint names its association.
-    let error = poll_fn(|cx| endpoint.poll_send(cx, b"x", SendOptions::new()))
-        .await
-        .unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }

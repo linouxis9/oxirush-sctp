@@ -1,8 +1,9 @@
 //! One-to-many SCTP association endpoint.
 use crate::internal::{SocketCore, sys};
+use crate::types::internal::SndInfoWire;
 use crate::{
-    AssociationId, BindxFlags, ConnStatus, ConnectedSocket, NotificationOrData, SendData,
-    SendOptions, SocketOptions,
+    AssociationId, BindxFlags, ConnStatus, ConnectedSocket, NotificationOrData, SendOptions,
+    SocketOptions,
 };
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
@@ -29,8 +30,8 @@ use std::task::{Context, Poll};
 ///
 /// // Answer a message on the association it came from.
 /// if let NotificationOrData::Data(message) = endpoint.recv().await? {
-///     let options = SendOptions::new().association(message.assoc_id().unwrap());
-///     endpoint.send(b"answer", options).await?;
+///     let assoc_id = message.assoc_id().unwrap();
+///     endpoint.send(assoc_id, b"answer", SendOptions::new()).await?;
 /// }
 /// # Ok(())
 /// # }
@@ -96,14 +97,11 @@ impl OneToManyEndpoint {
     pub fn poll_send(
         &self,
         cx: &mut Context<'_>,
+        assoc_id: AssociationId,
         payload: &[u8],
         options: SendOptions,
     ) -> Poll<std::io::Result<()>> {
-        if options.assoc_id() == 0 {
-            return Poll::Ready(Err(no_association()));
-        }
-        let info = options.info();
-        self.core.poll_send(cx, None, payload, Some(&info))
+        self.core.poll_send(cx, None, assoc_id, payload, options)
     }
 
     /// [`send_to`][Self::send_to] as a poll, as [`poll_send`][Self::poll_send] is.
@@ -114,21 +112,22 @@ impl OneToManyEndpoint {
         payload: &[u8],
         options: SendOptions,
     ) -> Poll<std::io::Result<()>> {
-        let info = options.info();
-        self.core.poll_send(cx, Some(address), payload, Some(&info))
+        self.core.poll_send(cx, Some(address), 0, payload, options)
     }
 
-    /// Send a complete borrowed record to `options.assoc_id`. A zero association ID without a
-    /// destination is rejected. PPID is in host byte order; waits for send-buffer capacity.
-    pub async fn send(&self, payload: &[u8], options: SendOptions) -> std::io::Result<()> {
-        if options.assoc_id() == 0 {
-            return Err(no_association());
-        }
-        let info = options.info();
-        self.core.send(None, payload, Some(&info)).await
+    /// Send a message on association `assoc_id`, waiting for room in the send buffer. An
+    /// association that the endpoint does not have is the error of the kernel, `EPIPE`.
+    /// Dropping the future before completion sends no part of the message.
+    pub async fn send(
+        &self,
+        assoc_id: AssociationId,
+        payload: &[u8],
+        options: SendOptions,
+    ) -> std::io::Result<()> {
+        self.core.send(None, assoc_id, payload, options).await
     }
 
-    /// Send a borrowed record to a peer address. A new association may be created by the kernel
+    /// Send a message to a peer address. A new association may be created by the kernel
     /// when no existing association matches. Cancellation before completion sends no fragment.
     pub async fn send_to(
         &self,
@@ -136,18 +135,18 @@ impl OneToManyEndpoint {
         payload: &[u8],
         options: SendOptions,
     ) -> std::io::Result<()> {
-        let info = options.info();
-        self.core.send(Some(address), payload, Some(&info)).await
+        self.core.send(Some(address), 0, payload, options).await
     }
 
-    /// Send several messages, each to the association of its options, in a few system calls:
-    /// a prefix of `messages`, which is all of them unless the send buffer filled, after
-    /// waiting for room for the first. The number sent. Each needs an association, as
-    /// [`send`][Self::send] does. The messages of an association that follow one another in
-    /// `messages` are bundled, as
+    /// Send several messages, each on its association, in a few system calls: a prefix of
+    /// `messages`, which is all of them unless the send buffer filled, after waiting for room
+    /// for the first. The number sent. The messages of an association that follow one
+    /// another in `messages` are bundled, as
     /// [`ConnectedSocket::send_many`][crate::ConnectedSocket::send_many] has it.
-    pub async fn send_many(&self, messages: &[(&[u8], SendOptions)]) -> std::io::Result<usize> {
-        with_associations(messages)?;
+    pub async fn send_many(
+        &self,
+        messages: &[(AssociationId, &[u8], SendOptions)],
+    ) -> std::io::Result<usize> {
         self.core.send_many(messages).await
     }
 
@@ -155,12 +154,9 @@ impl OneToManyEndpoint {
     pub fn poll_send_many(
         &self,
         cx: &mut Context<'_>,
-        messages: &[(&[u8], SendOptions)],
+        messages: &[(AssociationId, &[u8], SendOptions)],
     ) -> Poll<std::io::Result<usize>> {
-        match with_associations(messages) {
-            Ok(()) => self.core.poll_send_many(cx, messages),
-            Err(error) => Poll::Ready(Err(error)),
-        }
+        self.core.poll_send_many(cx, messages)
     }
 
     /// Receive the messages and notifications that the kernel holds of every association,
@@ -189,23 +185,19 @@ impl OneToManyEndpoint {
         }
     }
 
-    /// Send an owned record with wire-order low-level ancillary data. `to` may be `None` when
-    /// `data.snd_info` selects an association (including SCTP EOF/ABORT controls).
-    pub async fn send_data(&self, to: Option<SocketAddr>, data: SendData) -> std::io::Result<()> {
-        self.core
-            .send(to, &data.payload, data.snd_info.as_ref())
-            .await
+    /// Shut one association down: what was sent is delivered first, and the peer then learns
+    /// of the end. Subscribe to [`Event::Association`][crate::Event::Association] to learn
+    /// when it is complete.
+    pub fn shutdown(&self, assoc_id: AssociationId) -> std::io::Result<()> {
+        let info = SndInfoWire::control(crate::consts::SCTP_EOF, assoc_id);
+        sys::sctp_sendmsg_once(self.as_fd(), None, &[], info)
     }
 
     /// Abort one association: its peer learns of it at once, with `reason` as the reason of
     /// a user-initiated abort, and what was not delivered is lost on both sides.
     pub fn abort(&self, assoc_id: AssociationId, reason: &[u8]) -> std::io::Result<()> {
-        let info = crate::SendInfo {
-            flags: crate::consts::SCTP_ABORT,
-            assoc_id,
-            ..Default::default()
-        };
-        sys::sctp_sendmsg_once(self.as_fd(), None, reason, Some(&info))
+        let info = SndInfoWire::control(crate::consts::SCTP_ABORT, assoc_id);
+        sys::sctp_sendmsg_once(self.as_fd(), None, reason, info)
     }
 
     /// Move an association and its queued messages into a separate one-to-one socket.
@@ -285,23 +277,6 @@ fn shut_down() -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::UnexpectedEof,
         "the socket was shut down for reading",
-    )
-}
-
-// The messages of a batch, each with its association.
-// The options of each message of a batch of an endpoint name its association.
-fn with_associations(messages: &[(&[u8], SendOptions)]) -> std::io::Result<()> {
-    if messages.iter().any(|(_, options)| options.assoc_id() == 0) {
-        return Err(no_association());
-    }
-    Ok(())
-}
-
-// What a send without an association returns.
-fn no_association() -> std::io::Error {
-    std::io::Error::new(
-        std::io::ErrorKind::InvalidInput,
-        "a destination association is required",
     )
 }
 

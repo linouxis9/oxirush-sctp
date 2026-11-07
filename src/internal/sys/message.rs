@@ -2,9 +2,8 @@
 use crate::consts::MSG_NOTIFICATION;
 use crate::internal::receive::Piece;
 use crate::types::internal::{NxtInfoWire, RcvInfoWire, SndInfoWire};
-use crate::{NxtInfo, RcvInfo, SendInfo};
+use crate::{NxtInfo, RcvInfo};
 use os_socketaddr::OsSocketAddr;
-use std::convert::TryInto;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, BorrowedFd};
 
@@ -97,88 +96,48 @@ pub(crate) fn ancillary_info(mut control: &[u8]) -> (Option<RcvInfo>, Option<Nxt
     (rcv_info, nxt_info)
 }
 
+// Sends `payload` with its send information, to `to` or to the association that `info`
+// names.
 pub(crate) fn sctp_sendmsg_once(
     fd: BorrowedFd<'_>,
     to: Option<SocketAddr>,
     payload: &[u8],
-    snd_info: Option<&SendInfo>,
+    info: SndInfoWire,
 ) -> std::io::Result<()> {
-    // Safety: All the pointers are valid because they are within the current scope.
-    // Also, this is just a wrapper over `libc` call.
+    let mut send_iov = libc::iovec {
+        iov_base: payload.as_ptr() as *mut libc::c_void,
+        iov_len: payload.len(),
+    };
+    let to = to.map(OsSocketAddr::from);
+    let mut control = CmsgBuffer::new();
+    // Safety: every pointer of the header points to a value of this scope, with the length
+    // given beside it; the control buffer has room for the header and the send information.
     unsafe {
-        let mut send_iov = libc::iovec {
-            iov_base: payload.as_ptr() as *mut libc::c_void,
-            iov_len: payload.len(),
-        };
-
-        // We have to create this `os_sockaddr` outside the `if let ...`
-        // Else it will go out of scope and we'll be using it's raw pointer.
-        let os_sockaddr: OsSocketAddr;
-        let (to_buffer, to_buffer_len) = if let Some(addr) = to {
-            os_sockaddr = addr.into();
-            let slice: &[u8] = os_sockaddr.as_ref();
-            (slice.as_ptr() as *mut _, os_sockaddr.len())
-        } else {
-            (std::ptr::null::<OsSocketAddr>() as *mut libc::c_void, 0)
-        };
-        // TODO: Support copy and other send info as well.
-        let mut msg_control_buffer = CmsgBuffer::new();
-
-        let (msg_control, msg_control_size) = if snd_info.is_some() {
-            // Safety: wrapper over `libc` call. the size of the structures are wellknown.
-
-            (
-                msg_control_buffer.as_mut_ptr(),
-                libc::CMSG_SPACE(std::mem::size_of::<SndInfoWire>() as u32) as usize,
-            )
-        } else {
-            (
-                std::ptr::null::<libc::cmsghdr>() as *mut libc::c_void,
-                0_usize,
-            )
-        };
-
         // Some platforms have private fields in `msghdr`.
-        let mut sendmsg_header: libc::msghdr = std::mem::zeroed();
-        sendmsg_header.msg_name = to_buffer;
-        sendmsg_header.msg_namelen = to_buffer_len;
-        sendmsg_header.msg_iov = &mut send_iov;
-        sendmsg_header.msg_iovlen = 1;
-        sendmsg_header.msg_control = msg_control;
-        sendmsg_header.msg_controllen = msg_control_size as _;
-
-        let cmsg_hdr = libc::CMSG_FIRSTHDR(&sendmsg_header);
-        if !cmsg_hdr.is_null() {
-            (*cmsg_hdr).cmsg_level = libc::IPPROTO_SCTP;
-            (*cmsg_hdr).cmsg_type = crate::consts::SCTP_SNDINFO;
-            (*cmsg_hdr).cmsg_len =
-                libc::CMSG_LEN(std::mem::size_of::<SndInfoWire>().try_into().unwrap())
-                    .try_into()
-                    .unwrap();
-
-            // The payload protocol identifier goes in network byte order
-            let snd_info = SndInfoWire::from(snd_info.unwrap());
-            std::ptr::copy(
-                &snd_info as *const SndInfoWire as *const u8,
-                libc::CMSG_DATA(cmsg_hdr),
-                std::mem::size_of::<SndInfoWire>(),
-            );
+        let mut header: libc::msghdr = std::mem::zeroed();
+        if let Some(to) = &to {
+            header.msg_name = to.as_ptr() as *mut libc::c_void;
+            header.msg_namelen = to.len();
         }
-
-        // Report a closed association as `EPIPE` without raising `SIGPIPE`.
-        let flags = libc::MSG_NOSIGNAL;
-
-        let result = libc::sendmsg(
-            fd.as_raw_fd(),
-            &mut sendmsg_header as *mut libc::msghdr,
-            flags,
+        header.msg_iov = &mut send_iov;
+        header.msg_iovlen = 1;
+        header.msg_control = control.as_mut_ptr();
+        header.msg_controllen = libc::CMSG_SPACE(std::mem::size_of::<SndInfoWire>() as u32) as _;
+        let cmsg = libc::CMSG_FIRSTHDR(&header);
+        (*cmsg).cmsg_level = libc::IPPROTO_SCTP;
+        (*cmsg).cmsg_type = crate::consts::SCTP_SNDINFO;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<SndInfoWire>() as u32) as _;
+        std::ptr::copy_nonoverlapping(
+            std::ptr::addr_of!(info).cast::<u8>(),
+            libc::CMSG_DATA(cmsg),
+            std::mem::size_of::<SndInfoWire>(),
         );
-        if result < 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(())
+        // Report a closed association as `EPIPE` without raising `SIGPIPE`.
+        if libc::sendmsg(fd.as_raw_fd(), &header, libc::MSG_NOSIGNAL) < 0 {
+            return Err(std::io::Error::last_os_error());
         }
     }
+    Ok(())
 }
 
 // Size of the buffer for control messages. It has room for those `recvmsg` can return for SCTP,

@@ -143,9 +143,7 @@ async fn aborted_partial_delivery_does_not_contaminate_another_sender() {
         let a = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
         set_int(&a, libc::SO_SNDBUF, 1 << 20);
         let a = a.connect(address).await.unwrap();
-        a.send_data(SendData::new(vec![0xaa; 300_000]))
-            .await
-            .unwrap();
+        a.send(&[0xaa; 300_000], SendOptions::new()).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(
             tokio::time::timeout(Duration::from_millis(1), listener.recv())
@@ -158,9 +156,7 @@ async fn aborted_partial_delivery_does_not_contaminate_another_sender() {
         let b = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
         let b = b.connect(address).await.unwrap();
         let b_address = b.local_addrs().unwrap()[0];
-        b.send_data(SendData::new(b"hello from B".to_vec()))
-            .await
-            .unwrap();
+        b.send(b"hello from B", SendOptions::new()).await.unwrap();
         match tokio::time::timeout(Duration::from_secs(2), listener.recv())
             .await
             .unwrap()

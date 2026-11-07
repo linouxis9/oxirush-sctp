@@ -150,49 +150,11 @@ impl ReceivedData {
         self.rcv_info.as_ref().map(|info| info.ppid)
     }
 
-    /// Association the message arrived on, which [`SendOptions::association`] takes to answer
-    /// on a one-to-many socket. `None` without receive information.
+    /// Association the message arrived on, which
+    /// [`OneToManyEndpoint::send`][crate::OneToManyEndpoint::send] takes to answer on a
+    /// one-to-many socket. `None` without receive information.
     pub fn assoc_id(&self) -> Option<AssociationId> {
         self.rcv_info.as_ref().map(|info| info.assoc_id)
-    }
-}
-
-/// Structure Representing Data to be Sent.
-///
-/// This structure contains actual payload and optional ancillary data.
-#[derive(Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct SendData {
-    /// Message payload.
-    pub payload: Vec<u8>,
-
-    /// Optional ancillary information used to send the data.
-    pub snd_info: Option<SendInfo>,
-}
-
-impl std::fmt::Debug for SendData {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SendData")
-            .field("payload", &Octets(&self.payload))
-            .field("snd_info", &self.snd_info)
-            .finish()
-    }
-}
-
-impl SendData {
-    /// A message without ancillary information: the defaults of the socket apply.
-    pub fn new(payload: Vec<u8>) -> Self {
-        Self {
-            payload,
-            snd_info: None,
-        }
-    }
-
-    /// The message with this ancillary information.
-    #[must_use]
-    pub fn with_info(mut self, info: SendInfo) -> Self {
-        self.snd_info = Some(info);
-        self
     }
 }
 
@@ -210,11 +172,10 @@ impl SendData {
 /// ```
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SendOptions {
-    stream_id: u16,
+    pub(crate) stream_id: u16,
     ppid: u32,
     unordered: bool,
     context: u32,
-    assoc_id: AssociationId,
 }
 
 impl SendOptions {
@@ -225,7 +186,6 @@ impl SendOptions {
             ppid: 0,
             unordered: false,
             context: 0,
-            assoc_id: 0,
         }
     }
 
@@ -255,29 +215,6 @@ impl SendOptions {
     pub const fn context(mut self, context: u32) -> Self {
         self.context = context;
         self
-    }
-
-    /// The association to send on, for a one-to-many endpoint. A
-    /// [`ConnectedSocket`][crate::ConnectedSocket] has one association, and refuses another
-    /// value than 0.
-    #[must_use]
-    pub const fn association(mut self, assoc_id: AssociationId) -> Self {
-        self.assoc_id = assoc_id;
-        self
-    }
-
-    pub(crate) fn assoc_id(&self) -> AssociationId {
-        self.assoc_id
-    }
-
-    pub(crate) fn info(self) -> SendInfo {
-        SendInfo {
-            sid: self.stream_id,
-            flags: u16::from(self.unordered),
-            ppid: self.ppid,
-            context: self.context,
-            assoc_id: self.assoc_id,
-        }
     }
 }
 
@@ -353,69 +290,6 @@ impl PeerAddressParams {
             heartbeat_interval: std::time::Duration::from_secs(30),
             path_max_retrans: 0,
         }
-    }
-}
-
-/// Ancillary send information (Section 5.3.4 of RFC 6458): `struct sctp_sndinfo`, whose
-/// fields the RFC fixes.
-///
-/// ```
-/// use oxirush_sctp::SendInfo;
-///
-/// // An unordered message of NGAP on stream 1
-/// let info = SendInfo { sid: 1, ppid: 60, flags: SendInfo::UNORDERED, ..Default::default() };
-/// assert_eq!(info.assoc_id, 0);
-/// ```
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct SendInfo {
-    /// Stream ID of the stream to send the data on.
-    pub sid: u16,
-
-    /// Flags of the send, `enum sctp_sinfo_flags`, among them [`UNORDERED`][Self::UNORDERED],
-    /// [`ABORT`][Self::ABORT] and [`EOF`][Self::EOF], which can be combined with `|`.
-    pub flags: u16,
-
-    /// Payload protocol identifier, as a number: 60 for NGAP. The crate converts it to the
-    /// network byte order that the kernel carries.
-    pub ppid: u32,
-
-    /// Opaque context to be used while sending the data.
-    pub context: u32,
-
-    /// Association ID of the SCTP Association to be used while sending the data.
-    pub assoc_id: AssociationId,
-}
-
-impl SendInfo {
-    /// Deliver without ordering relative to the other messages of the stream
-    /// (`SCTP_UNORDERED`).
-    pub const UNORDERED: u16 = 1;
-
-    /// Send to the address of the send, a peer address of the association, rather than to its
-    /// primary path (`SCTP_ADDR_OVER`).
-    pub const ADDR_OVER: u16 = 1 << 1;
-
-    /// Abort the association, with the payload as the reason of a user-initiated abort
-    /// (`SCTP_ABORT`). A one-to-many socket alone takes it: `ConnectedSocket::abort` does it
-    /// on a one-to-one socket.
-    pub const ABORT: u16 = 1 << 2;
-
-    /// Ask the peer to acknowledge this message at once (`SCTP_SACK_IMMEDIATELY`).
-    pub const SACK_IMMEDIATELY: u16 = 1 << 3;
-
-    /// Send the message on every association of a one-to-many socket (`SCTP_SENDALL`).
-    pub const SENDALL: u16 = 1 << 6;
-
-    /// Shut the association down gracefully, with an empty payload (`SCTP_EOF`). A
-    /// one-to-many socket alone takes it: `ConnectedSocket::shutdown` does it on a one-to-one
-    /// socket.
-    pub const EOF: u16 = 0x200;
-}
-
-impl From<SendOptions> for SendInfo {
-    /// The send information of these options, to which flags can be added.
-    fn from(options: SendOptions) -> Self {
-        options.info()
     }
 }
 
@@ -787,8 +661,14 @@ pub struct SendFailure {
     /// after the peer's application aborted the association. 0 when Linux gives none.
     pub cause: u16,
 
-    /// What the message was sent with.
-    pub snd_info: SendInfo,
+    /// The stream of the message.
+    pub stream: u16,
+
+    /// Its payload protocol identifier, as a number: 60 for NGAP.
+    pub ppid: u32,
+
+    /// The number that [`SendOptions::context`] gave it.
+    pub context: u32,
 
     /// Association whose message failed; can be 0 if establishment failed before an ID was assigned.
     pub assoc_id: AssociationId,
@@ -802,7 +682,9 @@ impl std::fmt::Debug for SendFailure {
         f.debug_struct("SendFailure")
             .field("sent", &self.sent)
             .field("cause", &self.cause)
-            .field("snd_info", &self.snd_info)
+            .field("stream", &self.stream)
+            .field("ppid", &self.ppid)
+            .field("context", &self.context)
             .field("assoc_id", &self.assoc_id)
             .field("payload", &Octets(&self.payload))
             .finish()
@@ -1202,53 +1084,23 @@ mod tests {
         );
     }
 
-    /// The flags of a send are named, and a value of the structure is written as a literal.
+    /// A failed send, an error of the peer and a change of an association print their
+    /// fields, with their octets in hexadecimal.
     #[test]
-    fn the_flags_of_a_send_have_names() {
-        let info = SendInfo {
-            flags: SendInfo::UNORDERED | SendInfo::SACK_IMMEDIATELY,
-            ..Default::default()
-        };
-        assert_eq!(info.flags, 9);
-        assert_eq!(
-            (SendInfo::ABORT, SendInfo::EOF),
-            (crate::consts::SCTP_ABORT, crate::consts::SCTP_EOF)
-        );
-        assert_eq!(
-            SendInfo::from(SendOptions::new().unordered(true)).flags,
-            SendInfo::UNORDERED
-        );
-        // The values of linux/sctp.h, which the kernel reads
-        assert_eq!(
-            [SendInfo::UNORDERED, SendInfo::ADDR_OVER, SendInfo::ABORT],
-            [1, 2, 4]
-        );
-        assert_eq!(
-            [SendInfo::SACK_IMMEDIATELY, SendInfo::SENDALL, SendInfo::EOF],
-            [8, 64, 512]
-        );
-    }
-
-    /// What is sent, a failed send, an error of the peer and a change of an association print
-    /// their fields, with their octets in hexadecimal.
-    #[test]
-    fn debug_prints_the_fields_of_sends_and_notifications() {
-        let data = SendData::new(b"ab".to_vec());
-        assert_eq!(
-            format!("{data:?}"),
-            "SendData { payload: 2 octets 6162, snd_info: None }"
-        );
+    fn debug_prints_the_fields_of_notifications() {
         let failure = SendFailure {
             sent: true,
             cause: 1,
-            snd_info: SendInfo::default(),
+            stream: 2,
+            ppid: 60,
+            context: 3,
             assoc_id: 7,
             payload: vec![0xab],
         };
         assert_eq!(
             format!("{failure:?}"),
-            "SendFailure { sent: true, cause: 1, snd_info: SendInfo { sid: 0, flags: 0, ppid: 0, \
-             context: 0, assoc_id: 0 }, assoc_id: 7, payload: 1 octets ab }"
+            "SendFailure { sent: true, cause: 1, stream: 2, ppid: 60, context: 3, assoc_id: 7, \
+             payload: 1 octets ab }"
         );
         let remote = RemoteError {
             cause: 2,

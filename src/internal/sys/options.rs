@@ -3,12 +3,11 @@ use super::SOL_SCTP;
 use crate::consts::*;
 use crate::types::internal::{
     AssocParamsWire, AssocStatsWire, ConnStatusInternal, InitMsg, PeerAddrInternal,
-    PeerAddressParamsInternal, PrimaryAddressWire, RtoInfoWire, SackInfoWire, SndInfoWire,
-    SubscribeEvent,
+    PeerAddressParamsInternal, PrimaryAddressWire, RtoInfoWire, SackInfoWire, SubscribeEvent,
 };
 use crate::{
     AssociationId, AssociationParams, AssociationStats, ConnStatus, Event, EventSubscriptionError,
-    InitParams, PeerAddress, PeerAddressParams, RtoInfo, SackInfo, SendInfo, SubscribeEventAssocId,
+    InitParams, PeerAddress, PeerAddressParams, RtoInfo, SackInfo, SubscribeEventAssocId,
 };
 use os_socketaddr::OsSocketAddr;
 use std::convert::TryInto;
@@ -18,18 +17,6 @@ use std::os::fd::{AsRawFd, BorrowedFd};
 pub(crate) fn socket_error(fd: BorrowedFd<'_>) -> std::io::Result<libc::c_int> {
     // Safety: every bit pattern is a valid c_int.
     unsafe { getsockopt_internal(fd, libc::SOL_SOCKET, libc::SO_ERROR, 0) }
-}
-
-pub(crate) fn sctp_set_default_sendinfo_internal(
-    fd: BorrowedFd<'_>,
-    sendinfo: SendInfo,
-) -> std::io::Result<()> {
-    setsockopt_internal(
-        fd,
-        SOL_SCTP,
-        SCTP_DEFAULT_SNDINFO,
-        &SndInfoWire::from(&sendinfo),
-    )
 }
 
 pub(crate) fn sctp_subscribe_event_internal(

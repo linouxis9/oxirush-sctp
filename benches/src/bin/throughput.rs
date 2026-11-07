@@ -362,33 +362,31 @@ fn from_endpoint(run: &Run) -> (f64, f64) {
             .collect();
         let payload = vec![0x5a; octets];
         // Message `i` goes to association `i % associations`.
-        let options: Vec<SendOptions> = identities
-            .iter()
-            .map(|identity| SendOptions::new().ppid(60).association(*identity))
-            .collect();
+        let options = SendOptions::new().ppid(60);
         if batch == 0 {
             let (writer, _) = driver::spawn(endpoint, driver_config()).unwrap();
             for index in 0..count {
                 window.wait(index).await;
-                let options = options[index % associations];
-                writer.send(payload.clone(), options).await.unwrap();
+                let assoc_id = identities[index % associations];
+                writer
+                    .send(assoc_id, payload.clone(), options)
+                    .await
+                    .unwrap();
             }
         } else if batch == 1 {
             for index in 0..count {
                 window.wait(index).await;
-                endpoint
-                    .send(&payload, options[index % associations])
-                    .await
-                    .unwrap();
+                let assoc_id = identities[index % associations];
+                endpoint.send(assoc_id, &payload, options).await.unwrap();
             }
         } else {
             let mut sent = 0;
-            let mut messages: Vec<(&[u8], SendOptions)> = Vec::with_capacity(batch);
+            let mut messages: Vec<(i32, &[u8], SendOptions)> = Vec::with_capacity(batch);
             while sent < count {
                 window.wait(sent).await;
                 messages.clear();
                 for index in sent..(sent + batch).min(count) {
-                    messages.push((&payload, options[index % associations]));
+                    messages.push((identities[index % associations], &payload, options));
                 }
                 sent += endpoint.send_many(&messages).await.unwrap();
             }

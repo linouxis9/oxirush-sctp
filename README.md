@@ -392,8 +392,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A message comes with its association, which the answer names
     if let NotificationOrData::Data(message) = endpoint.recv().await? {
         println!("endpoint: {:?}", String::from_utf8_lossy(&message.payload));
-        let options = SendOptions::new().association(message.assoc_id().ok_or("no association")?);
-        endpoint.send(b"pong", options).await?;
+        let assoc_id = message.assoc_id().ok_or("no association")?;
+        endpoint.send(assoc_id, b"pong", SendOptions::new()).await?;
     }
     if let Some(NotificationOrData::Data(message)) = peer.recv().await? {
         println!("peer: {:?}", String::from_utf8_lossy(&message.payload));

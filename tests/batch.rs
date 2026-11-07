@@ -2,8 +2,8 @@
 //! `recvmmsg`, on a connected socket and on an endpoint.
 
 use oxirush_sctp::{
-    ConnectedSocket, NotificationOrData, OneToManyEndpoint, ReceivedData, SendOptions, Socket,
-    SocketToAssociation,
+    AssociationId, ConnectedSocket, NotificationOrData, OneToManyEndpoint, ReceivedData,
+    SendOptions, Socket, SocketToAssociation,
 };
 use std::time::Duration;
 
@@ -359,11 +359,11 @@ async fn an_endpoint_sends_and_receives_the_batches_of_several_associations() {
             (association, payload(index, 150))
         })
         .collect();
-    let messages: Vec<(&[u8], SendOptions)> = payloads
+    let messages: Vec<(AssociationId, &[u8], SendOptions)> = payloads
         .iter()
         .map(|(association, payload)| {
-            let options = SendOptions::new().association(associations[*association]);
-            (payload.as_slice(), options)
+            let assoc_id = associations[*association];
+            (assoc_id, payload.as_slice(), SendOptions::new())
         })
         .collect();
     let mut sent = 0;
@@ -383,12 +383,12 @@ async fn an_endpoint_sends_and_receives_the_batches_of_several_associations() {
             .collect();
         assert_eq!(got, expected, "association {association}");
     }
-    // Each message needs its association.
+    // An association that the endpoint does not have
     let error = endpoint
-        .send_many(&[(b"nowhere", SendOptions::new())])
+        .send_many(&[(0, b"nowhere", SendOptions::new())])
         .await
         .unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(error.raw_os_error(), Some(libc::EPIPE));
 }
 
 /// The packets that the association of `socket` has sent.
@@ -467,9 +467,9 @@ async fn the_streams_of_each_association_of_an_endpoint_are_its_own() {
     let (wide, narrow) = (peers[0].1, peers[1].1);
     assert_eq!(endpoint.status(narrow).unwrap().outstreams, 2);
     let messages = [
-        (&b"wide"[..], SendOptions::new().association(wide).stream(5)),
-        (b"narrow", SendOptions::new().association(narrow)),
-        (b"refused", SendOptions::new().association(narrow).stream(3)),
+        (wide, &b"wide"[..], SendOptions::new().stream(5)),
+        (narrow, b"narrow", SendOptions::new()),
+        (narrow, b"refused", SendOptions::new().stream(3)),
     ];
     assert_eq!(endpoint.send_many(&messages).await.unwrap(), 2);
     for ((peer, _), expected) in peers.iter().zip([&b"wide"[..], b"narrow"]) {

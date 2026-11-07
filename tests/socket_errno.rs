@@ -36,9 +36,4 @@ async fn a_refused_argument_is_named() {
         .await
         .unwrap_err();
     assert!(message(error).contains("outbound streams"));
-    let error = client
-        .send(b"data", SendOptions::new().association(12345))
-        .await
-        .unwrap_err();
-    assert!(message(error).contains("one association"));
 }

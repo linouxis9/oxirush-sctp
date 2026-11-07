@@ -137,7 +137,7 @@ async fn one_to_many_recv_reports_the_sender_address() {
     let client = client_socket.connectx(&[bindaddr]).await.unwrap();
     let client_addresses = client.local_addrs().unwrap();
     client
-        .send_data(SendData::new(b"from the client".to_vec()))
+        .send(b"from the client", SendOptions::new())
         .await
         .unwrap();
 

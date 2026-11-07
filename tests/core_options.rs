@@ -433,42 +433,41 @@ async fn recv_many_of_an_endpoint_with_a_limit_of_0_returns_0() {
     assert!(out.is_empty());
 }
 
-/// The options of a batch of a connected socket name no association.
-#[tokio::test]
-async fn a_batch_of_a_connected_socket_names_no_association() {
-    let (client, _peer) = pair().await;
-    let messages = [(&b"x"[..], SendOptions::new().association(5))];
-    let error = client.send_many(&messages).await.unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-}
-
 /// A send of an endpoint to an association that it does not have fails, and leaves its
 /// other associations as they were.
 #[tokio::test]
 async fn a_send_to_an_association_that_an_endpoint_lacks_fails_alone() {
     let (endpoint, peer, assoc_id) = endpoint_and_peer().await;
-    let lacking = SendOptions::new().association(assoc_id + 100);
-    let error = endpoint.send(b"lost", lacking).await.unwrap_err();
-    assert!(error.raw_os_error().is_some(), "{error}");
-    let options = SendOptions::new().association(assoc_id);
-    endpoint.send(b"kept", options).await.unwrap();
+    let options = SendOptions::new();
+    let error = endpoint.send(assoc_id + 100, b"lost", options).await;
+    assert_eq!(error.unwrap_err().raw_os_error(), Some(libc::EPIPE));
+    endpoint.send(assoc_id, b"kept", options).await.unwrap();
     match tokio::time::timeout(Duration::from_secs(2), peer.recv()).await {
         Ok(Ok(Some(NotificationOrData::Data(message)))) => assert_eq!(message.payload, b"kept"),
         other => panic!("{other:?}"),
     }
 }
 
-/// An endpoint shuts an association down with a send of no message and the flag `EOF`.
+/// An endpoint shuts one association down: the peer receives what was sent, then the end.
 #[tokio::test]
-async fn an_endpoint_shuts_an_association_down_with_an_empty_send() {
+async fn an_endpoint_shuts_an_association_down() {
     let (endpoint, peer, assoc_id) = endpoint_and_peer().await;
-    let info = SendInfo {
-        flags: SendInfo::EOF,
-        assoc_id,
-        ..Default::default()
-    };
-    let data = SendData::new(Vec::new()).with_info(info);
-    endpoint.send_data(None, data).await.unwrap();
-    let end = tokio::time::timeout(Duration::from_secs(2), peer.recv()).await;
-    assert!(matches!(end, Ok(Ok(None))), "{end:?}");
+    endpoint
+        .send(assoc_id, b"last", SendOptions::new())
+        .await
+        .unwrap();
+    endpoint.shutdown(assoc_id).unwrap();
+    let mut received = Vec::new();
+    let end = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(NotificationOrData::Data(message)) = peer.recv().await? {
+            received.push(message.payload);
+        }
+        std::io::Result::Ok(())
+    })
+    .await;
+    assert!(matches!(end, Ok(Ok(()))), "{end:?}");
+    assert_eq!(received, [b"last"]);
+    // An association that the endpoint does not have
+    let error = endpoint.shutdown(assoc_id + 100).unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::EPIPE));
 }

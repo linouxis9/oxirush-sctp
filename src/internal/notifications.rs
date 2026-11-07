@@ -2,7 +2,7 @@
 
 use crate::{
     AssocChangeState, AssociationChange, Event, Notification, PartialDelivery, PeerAddressChange,
-    PeerAddressState, RemoteError, SendFailure, SendInfo, Shutdown,
+    PeerAddressState, RemoteError, SendFailure, Shutdown,
 };
 use os_socketaddr::OsSocketAddr;
 use std::convert::TryInto;
@@ -51,13 +51,11 @@ pub(crate) fn notification_from_message(data: &[u8]) -> Notification {
                 // The cause code of SCTP, which Linux stores in network byte order in a
                 // number of 32 bits
                 cause: u16::from_be(u32_at(8) as u16),
-                snd_info: SendInfo {
-                    sid: u16_at(12),
-                    flags: u16_at(14),
-                    ppid: u32::from_be(u32_at(16)),
-                    context: u32_at(20),
-                    assoc_id: i32_at(24),
-                },
+                // `struct sctp_sndinfo`, of which the flags and the association are not kept:
+                // the association is the notification's
+                stream: u16_at(12),
+                ppid: u32::from_be(u32_at(16)),
+                context: u32_at(20),
                 assoc_id: i32_at(28),
                 payload: data[32..].to_vec(),
             })
@@ -211,13 +209,9 @@ mod tests {
             Notification::SendFailure(SendFailure {
                 sent: true,
                 cause: 12,
-                snd_info: SendInfo {
-                    sid: 3,
-                    ppid: 60,
-                    context: 42,
-                    assoc_id: 7,
-                    ..Default::default()
-                },
+                stream: 3,
+                ppid: 60,
+                context: 42,
                 assoc_id: 7,
                 payload: b"pdu".to_vec(),
             })
@@ -308,21 +302,6 @@ mod tests {
             notification_from_message(&bytes),
             Notification::SenderDry { assoc_id: 7 }
         );
-    }
-
-    #[test]
-    fn send_options_give_the_send_information_of_a_message() {
-        let info = crate::SendOptions::new()
-            .stream(5)
-            .ppid(60)
-            .unordered(true)
-            .context(42)
-            .association(7)
-            .info();
-        let mut expected = SendInfo::default();
-        (expected.sid, expected.ppid, expected.flags) = (5, 60, 1);
-        (expected.context, expected.assoc_id) = (42, 7);
-        assert_eq!(info, expected);
     }
 
     #[test]

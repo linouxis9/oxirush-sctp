@@ -175,7 +175,7 @@
 //! # Payload protocol identifiers
 //!
 //! A payload protocol identifier is a plain number in every call and in every
-//! value: 60 is NGAP, in `SendOptions::ppid`, `SendInfo::ppid`,
+//! value: 60 is NGAP, in `SendOptions::ppid`, `SendFailure::ppid`,
 //! `ReceivedData::ppid`, `RcvInfo::ppid` and `NxtInfo::ppid`. The crate converts
 //! it to the network byte order that the kernel carries.
 //!
@@ -213,7 +213,7 @@
 //! | RFC 6458 | Provided by |
 //! | --- | --- |
 //! | 3.1, 4.1: socket, bind, listen, accept, connect, send, receive, shutdown, close | the socket types; a dropped socket is closed |
-//! | 5.3.4 `SCTP_SNDINFO` | `SendOptions`, `SendInfo` |
+//! | 5.3.4 `SCTP_SNDINFO` | `SendOptions` |
 //! | 5.3.5 `SCTP_RCVINFO`, 5.3.6 `SCTP_NXTINFO` | `ReceivedData::rcv_info`, `nxt_info` |
 //! | 6.1.1 `SCTP_ASSOC_CHANGE` | `Notification::AssociationChange` |
 //! | 6.1.2 `SCTP_PEER_ADDR_CHANGE` | `Notification::PeerAddressChange` |
@@ -234,7 +234,6 @@
 //! | 8.1.12 `SCTP_PEER_ADDR_PARAMS` | `peer_address_params`, `set_peer_address_params`, `request_heartbeat`: heartbeat and retransmission limit |
 //! | 8.1.28 `SCTP_EVENT` | `subscribe_events`, `unsubscribe_events` |
 //! | 8.1.29 `SCTP_RECVRCVINFO`, 8.1.30 `SCTP_RECVNXTINFO` | `request_rcvinfo`, `request_nxtinfo` |
-//! | 8.1.31 `SCTP_DEFAULT_SNDINFO` | `set_default_sendinfo` |
 //! | 8.2.1 `SCTP_STATUS` | `status` |
 //! | 8.2.2 `SCTP_GET_PEER_ADDR_INFO` | `paths`, `peer_address_info`: the state, window, round trip, timeout and MTU of each path |
 //! | 8.2.6 `SCTP_GET_ASSOC_STATS` | `association_stats`: the retransmitted chunks, gaps, duplicates, packets and SACKs of an association |
@@ -314,8 +313,7 @@ pub use types::{
     BindxFlags, ConnState, ConnStatus, Event, EventSubscriptionError, InitParams, Notification,
     NotificationOrData, NxtInfo, PartialDelivery, PathState, PeerAddress, PeerAddressChange,
     PeerAddressParams, PeerAddressState, RcvInfo, ReceivedData, RemoteError, RtoInfo, SackInfo,
-    SendData, SendFailure, SendInfo, SendOptions, Shutdown, SocketToAssociation,
-    SubscribeEventAssocId,
+    SendFailure, SendOptions, Shutdown, SocketToAssociation, SubscribeEventAssocId,
 };
 
 /// The blocks of the README, which are compiled, and run unless they say

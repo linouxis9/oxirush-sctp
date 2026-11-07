@@ -1,8 +1,7 @@
 //! Messages sent and received several at a time: `sendmmsg` and `recvmmsg`.
 use super::message::ancillary_info;
-use crate::SendOptions;
 use crate::consts::MSG_NOTIFICATION;
-use crate::internal::receive::Piece;
+use crate::internal::{Outgoing, receive::Piece};
 use crate::types::internal::SndInfoWire;
 use os_socketaddr::OsSocketAddr;
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -49,7 +48,7 @@ std::thread_local! {
 /// messages that the kernel took, from the first; the error of the first otherwise.
 pub(crate) fn sctp_sendmmsg_once(
     fd: BorrowedFd<'_>,
-    messages: &[(&[u8], SendOptions)],
+    messages: &[impl Outgoing],
     more: bool,
 ) -> std::io::Result<usize> {
     SEND_SLOTS.with_borrow_mut(|slots| send_from(fd, messages, more, slots))
@@ -57,7 +56,7 @@ pub(crate) fn sctp_sendmmsg_once(
 
 fn send_from(
     fd: BorrowedFd<'_>,
-    messages: &[(&[u8], SendOptions)],
+    messages: &[impl Outgoing],
     more: bool,
     slots: &mut SendSlots,
 ) -> std::io::Result<usize> {
@@ -71,7 +70,8 @@ fn send_from(
     slots.iovecs.clear();
     slots.controls.clear();
     slots.headers.clear();
-    for (payload, options) in &messages[..count] {
+    for message in &messages[..count] {
+        let (assoc_id, payload, options) = message.parts();
         slots.iovecs.push(libc::iovec {
             iov_base: payload.as_ptr() as *mut libc::c_void,
             iov_len: payload.len(),
@@ -89,7 +89,7 @@ fn send_from(
             header.cmsg_len = length as _;
             std::ptr::write(control.bytes.as_mut_ptr().cast::<libc::cmsghdr>(), header);
             // The payload protocol identifier goes in network byte order
-            let wire = SndInfoWire::from(&options.info());
+            let wire = SndInfoWire::new(options, assoc_id);
             let data = control.bytes.as_mut_ptr().add(libc::CMSG_LEN(0) as usize);
             std::ptr::copy_nonoverlapping(
                 std::ptr::addr_of!(wire).cast::<u8>(),

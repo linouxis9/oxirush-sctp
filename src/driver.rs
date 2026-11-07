@@ -59,8 +59,12 @@
 //! [`Writer::overload`] has the state, the shortest sojourn and the 50th and 99th percentiles
 //! of the last interval, from a histogram of powers of two, and the counters.
 
-use crate::{ConnectedSocket, NotificationOrData, OneToManyEndpoint, SendOptions, SocketOptions};
+use crate::{
+    AssociationId, ConnectedSocket, NotificationOrData, OneToManyEndpoint, SendOptions,
+    SocketOptions,
+};
 use std::collections::{HashMap, VecDeque};
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll};
@@ -73,7 +77,7 @@ pub trait Batched: Send + Sync + 'static + sealed::Sealed {
     fn poll_send_batch(
         &self,
         cx: &mut Context<'_>,
-        messages: &[(&[u8], SendOptions)],
+        messages: &[(AssociationId, &[u8], SendOptions)],
     ) -> Poll<std::io::Result<usize>>;
 
     #[doc(hidden)]
@@ -101,9 +105,12 @@ impl Batched for ConnectedSocket {
     fn poll_send_batch(
         &self,
         cx: &mut Context<'_>,
-        messages: &[(&[u8], SendOptions)],
+        messages: &[(AssociationId, &[u8], SendOptions)],
     ) -> Poll<std::io::Result<usize>> {
-        self.poll_send_many(cx, messages)
+        // The association of each is 0, which a one-to-one socket ignores
+        ConnectedSocket::options(self)
+            .core
+            .poll_send_many(cx, messages)
     }
 
     fn poll_recv_batch(
@@ -128,7 +135,7 @@ impl Batched for OneToManyEndpoint {
     fn poll_send_batch(
         &self,
         cx: &mut Context<'_>,
-        messages: &[(&[u8], SendOptions)],
+        messages: &[(AssociationId, &[u8], SendOptions)],
     ) -> Poll<std::io::Result<usize>> {
         self.poll_send_many(cx, messages)
     }
@@ -313,6 +320,8 @@ struct Shared {
 }
 
 struct Queued {
+    /// 0 on a connected socket.
+    assoc_id: AssociationId,
     payload: Vec<u8>,
     options: SendOptions,
     since: Instant,
@@ -327,22 +336,26 @@ struct Window {
     p99: Duration,
 }
 
-/// The queue of the messages of a socket, which a task of its own writes in batches. Clones
-/// share it; the task ends, after the queue is empty, when the last clone is dropped.
-pub struct Writer {
+/// The queue of the messages of a socket of type `S`, which a task of its own writes in
+/// batches. Clones share it; the task ends, after the queue is empty, when the last clone is
+/// dropped. The writer of a [`OneToManyEndpoint`] names the association of each message, as
+/// the endpoint's `send` does.
+pub struct Writer<S> {
     shared: Arc<Shared>,
+    socket: PhantomData<fn() -> S>,
 }
 
-impl Clone for Writer {
+impl<S> Clone for Writer<S> {
     fn clone(&self) -> Self {
         self.shared.writers.fetch_add(1, Ordering::AcqRel);
         Self {
             shared: self.shared.clone(),
+            socket: PhantomData,
         }
     }
 }
 
-impl Drop for Writer {
+impl<S> Drop for Writer<S> {
     fn drop(&mut self) {
         if self.shared.writers.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.shared.queued.notify_one();
@@ -350,7 +363,7 @@ impl Drop for Writer {
     }
 }
 
-impl std::fmt::Debug for Writer {
+impl<S> std::fmt::Debug for Writer<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Writer")
             .field("overload", &self.overload())
@@ -358,10 +371,10 @@ impl std::fmt::Debug for Writer {
     }
 }
 
-impl Writer {
+impl Writer<ConnectedSocket> {
     /// Queue a message: at once, unless the queue is in overload, where it fails with
     /// [`SendError::Overloaded`] or waits, as [`DriverConfig::on_overload`] says, or full,
-    /// where it waits for room. On an endpoint, `options` names the association.
+    /// where it waits for room.
     ///
     /// ```
     /// # use oxirush_sctp::{Socket, SocketToAssociation};
@@ -390,6 +403,48 @@ impl Writer {
     /// # }
     /// ```
     pub async fn send(&self, payload: Vec<u8>, options: SendOptions) -> Result<(), SendError> {
+        self.queue(0, payload, options).await
+    }
+
+    /// Queue a message without waiting: [`SendError::Full`] where [`send`][Self::send] would
+    /// wait for room, and [`SendError::Overloaded`] in overload, whatever
+    /// [`DriverConfig::on_overload`] says.
+    pub fn try_send(&self, payload: Vec<u8>, options: SendOptions) -> Result<(), SendError> {
+        self.try_queue(0, payload, options)
+    }
+}
+
+impl Writer<OneToManyEndpoint> {
+    /// Queue a message for association `assoc_id`, as the writer of a connected socket queues
+    /// one.
+    pub async fn send(
+        &self,
+        assoc_id: AssociationId,
+        payload: Vec<u8>,
+        options: SendOptions,
+    ) -> Result<(), SendError> {
+        self.queue(assoc_id, payload, options).await
+    }
+
+    /// Queue a message for association `assoc_id` without waiting, as the writer of a
+    /// connected socket queues one.
+    pub fn try_send(
+        &self,
+        assoc_id: AssociationId,
+        payload: Vec<u8>,
+        options: SendOptions,
+    ) -> Result<(), SendError> {
+        self.try_queue(assoc_id, payload, options)
+    }
+}
+
+impl<S> Writer<S> {
+    async fn queue(
+        &self,
+        assoc_id: AssociationId,
+        payload: Vec<u8>,
+        options: SendOptions,
+    ) -> Result<(), SendError> {
         if payload.is_empty() {
             return Err(SendError::Empty);
         }
@@ -417,14 +472,16 @@ impl Writer {
             .await
             .map_err(|_| self.closed_error())?;
         permit.forget();
-        self.enqueue(payload, options, permits);
+        self.enqueue(assoc_id, payload, options, permits);
         Ok(())
     }
 
-    /// Queue a message without waiting: [`SendError::Full`] where [`send`][Self::send] would
-    /// wait for room, and [`SendError::Overloaded`] in overload, whatever
-    /// [`DriverConfig::on_overload`] says.
-    pub fn try_send(&self, payload: Vec<u8>, options: SendOptions) -> Result<(), SendError> {
+    fn try_queue(
+        &self,
+        assoc_id: AssociationId,
+        payload: Vec<u8>,
+        options: SendOptions,
+    ) -> Result<(), SendError> {
         self.check_closed()?;
         if payload.is_empty() {
             return Err(SendError::Empty);
@@ -438,7 +495,7 @@ impl Writer {
             Err(tokio::sync::TryAcquireError::NoPermits) => return Err(SendError::Full),
             Err(tokio::sync::TryAcquireError::Closed) => return Err(self.closed_error()),
         }
-        self.enqueue(payload, options, permits);
+        self.enqueue(assoc_id, payload, options, permits);
         Ok(())
     }
 
@@ -508,7 +565,13 @@ impl Writer {
         u32::try_from(octets.clamp(1, most)).unwrap_or(u32::MAX)
     }
 
-    fn enqueue(&self, payload: Vec<u8>, options: SendOptions, permits: u32) {
+    fn enqueue(
+        &self,
+        assoc_id: AssociationId,
+        payload: Vec<u8>,
+        options: SendOptions,
+        permits: u32,
+    ) {
         let shared = &self.shared;
         shared.octets.fetch_add(permits as usize, Ordering::Relaxed);
         shared
@@ -516,6 +579,7 @@ impl Writer {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push_back(Queued {
+                assoc_id,
                 payload,
                 options,
                 since: Instant::now(),
@@ -673,7 +737,7 @@ impl Reader {
 /// # Ok(())
 /// # }
 /// ```
-pub fn spawn<S: Batched>(socket: S, config: DriverConfig) -> std::io::Result<(Writer, Reader)> {
+pub fn spawn<S: Batched>(socket: S, config: DriverConfig) -> std::io::Result<(Writer<S>, Reader)> {
     assert!(config.batch > 0, "a batch of 0 messages");
     socket.options().set_nodelay(true)?;
     let socket = Arc::new(socket);
@@ -697,7 +761,11 @@ pub fn spawn<S: Batched>(socket: S, config: DriverConfig) -> std::io::Result<(Wr
     let (tx, rx) = mpsc::channel(config.reader_capacity.max(1));
     tokio::spawn(read(socket.clone(), tx, config.batch));
     tokio::spawn(write(socket, shared.clone()));
-    Ok((Writer { shared }, Reader { received: rx }))
+    let writer = Writer {
+        shared,
+        socket: PhantomData,
+    };
+    Ok((writer, Reader { received: rx }))
 }
 
 async fn read<S: Batched>(
@@ -742,7 +810,7 @@ async fn read<S: Batched>(
 }
 
 /// The key of the association of a message: all one on a connected socket.
-type Key = i32;
+type Key = AssociationId;
 
 /// Sojourns in powers of two of microseconds, from under 1 µs to over 2^39 µs.
 const BUCKETS: usize = 40;
@@ -863,12 +931,7 @@ async fn write<S: Batched>(socket: Arc<S>, shared: Arc<Shared>) {
         let taken =
             std::mem::take(&mut *shared.queue.lock().unwrap_or_else(PoisonError::into_inner));
         for message in taken {
-            let key = if socket.one_association() {
-                0
-            } else {
-                message.options.assoc_id()
-            };
-            pending.push_back(key, message);
+            pending.push_back(message.assoc_id, message);
         }
         if pending.turns.is_empty() {
             close_interval(&shared, &mut interval, Instant::now(), true);
@@ -884,9 +947,15 @@ async fn write<S: Batched>(socket: Arc<S>, shared: Arc<Shared>) {
         batch.clear();
         pending.batch(&config, &mut batch);
         let sent = loop {
-            let messages: Vec<(&[u8], SendOptions)> = batch
+            let messages: Vec<(AssociationId, &[u8], SendOptions)> = batch
                 .iter()
-                .map(|(_, message)| (message.payload.as_slice(), message.options))
+                .map(|(_, message)| {
+                    (
+                        message.assoc_id,
+                        message.payload.as_slice(),
+                        message.options,
+                    )
+                })
                 .collect();
             let send = std::future::poll_fn(|cx| socket.poll_send_batch(cx, &messages));
             let left = config
@@ -1040,14 +1109,16 @@ mod tests {
         }
     }
 
-    fn writer(config: DriverConfig) -> Writer {
+    fn writer(config: DriverConfig) -> Writer<ConnectedSocket> {
         Writer {
             shared: Arc::new(shared(config)),
+            socket: PhantomData,
         }
     }
 
     fn queued(byte: u8) -> Queued {
         Queued {
+            assoc_id: 0,
             payload: vec![byte],
             options: SendOptions::new(),
             since: Instant::now(),

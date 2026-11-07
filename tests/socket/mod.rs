@@ -26,9 +26,8 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
 
     let client_addr = laddrs[0];
 
-    let senddata = SendData::new(b"hello world!".to_vec());
     listener
-        .send_data(Some(client_addr), senddata.clone())
+        .send_to(client_addr, b"hello world!", SendOptions::new())
         .await
         .unwrap();
 
@@ -66,7 +65,7 @@ async fn socket_connect_basic_send_recv_req_info_on_and_off() {
 
     // Again send the data to client
     listener
-        .send_data(Some(client_addr), senddata)
+        .send_to(client_addr, b"hello world!", SendOptions::new())
         .await
         .unwrap();
 
@@ -114,15 +113,14 @@ async fn socket_send_recv_nxtinfo_test() {
 
     let client_addr = laddrs[0];
 
-    let senddata = SendData::new(b"hello world!".to_vec());
     listener
-        .send_data(Some(client_addr), senddata.clone())
+        .send_to(client_addr, b"hello world!", SendOptions::new())
         .await
         .unwrap();
 
     // Send again
     listener
-        .send_data(Some(client_addr), senddata.clone())
+        .send_to(client_addr, b"hello world!", SendOptions::new())
         .await
         .unwrap();
 

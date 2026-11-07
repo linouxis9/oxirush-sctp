@@ -104,17 +104,13 @@ async fn the_associations_of_an_endpoint_take_turns() {
         identities.push(identity);
     }
     let (writer, _) = driver::spawn(endpoint, DriverConfig::default()).unwrap();
-    let busy = SendOptions::new().association(identities[0]);
+    let options = SendOptions::new();
     for index in 0..5000 {
-        writer.send(numbered(index), busy).await.unwrap();
+        let message = numbered(index);
+        writer.send(identities[0], message, options).await.unwrap();
     }
-    writer
-        .send(
-            b"the other".to_vec(),
-            SendOptions::new().association(identities[1]),
-        )
-        .await
-        .unwrap();
+    let other = b"the other".to_vec();
+    writer.send(identities[1], other, options).await.unwrap();
     let quiet = clients.pop().unwrap();
     let busy = clients.pop().unwrap();
     let started = Instant::now();
@@ -360,7 +356,7 @@ async fn next_payload(reader: &mut driver::Reader) -> Vec<u8> {
 }
 
 /// Until the counters of `writer` say that `sent` messages were sent and `failed` failed.
-async fn settled(writer: &driver::Writer, sent: u64, failed: u64) -> driver::Overload {
+async fn settled<S>(writer: &driver::Writer<S>, sent: u64, failed: u64) -> driver::Overload {
     let deadline = Instant::now() + WAIT;
     loop {
         let overload = writer.overload();
@@ -467,13 +463,15 @@ async fn the_messages_to_an_association_that_an_endpoint_lacks_fail_alone() {
     let (endpoint, peer, assoc_id) = endpoint_and_peer().await;
     let (writer, _reader) = driver::spawn(endpoint, DriverConfig::default()).unwrap();
     // Queued at once, for one batch: those to the association that is not first
+    let options = SendOptions::new();
     for _ in 0..3 {
-        let options = SendOptions::new().association(assoc_id + 100);
-        writer.try_send(b"lost".to_vec(), options).unwrap();
+        let lacking = assoc_id + 100;
+        writer.try_send(lacking, b"lost".to_vec(), options).unwrap();
     }
     for _ in 0..2 {
-        let options = SendOptions::new().association(assoc_id);
-        writer.try_send(b"kept".to_vec(), options).unwrap();
+        writer
+            .try_send(assoc_id, b"kept".to_vec(), options)
+            .unwrap();
     }
     let overload = settled(&writer, 2, 3).await;
     assert_eq!((overload.queued, overload.queued_octets), (0, 0));

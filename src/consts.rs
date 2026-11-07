@@ -40,7 +40,6 @@ pub(crate) const SCTP_NXTINFO: libc::c_int = 4;
 // Receving RCVINFO and NXTINFO
 pub(crate) const SCTP_RECVRCVINFO: libc::c_int = 32;
 pub(crate) const SCTP_RECVNXTINFO: libc::c_int = 33;
-pub(crate) const SCTP_DEFAULT_SNDINFO: libc::c_int = 34;
 
 // Get SCTP Status
 pub(crate) const SCTP_STATUS: libc::c_int = 14;
@@ -65,8 +64,6 @@ pub(crate) const SCTP_DELAYED_SACK: libc::c_int = 16;
 pub(crate) const SCTP_ABORT: u16 = 1 << 2;
 // Flag of a send without a message that shuts the association down (`MSG_FIN`)
 pub(crate) const SCTP_EOF: u16 = 0x200;
-// Flag of a send to every association of a one-to-many socket
-pub(crate) const SCTP_SENDALL: u16 = 1 << 6;
 
 // The values of `SO_MEMINFO`, and the two of them that a batch of sends reads
 pub(crate) const SK_MEMINFO_VARS: usize = 9;

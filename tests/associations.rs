@@ -104,17 +104,6 @@ async fn borrowed_send_converts_host_ppid_without_changing_legacy_wire_order() {
         .await
         .unwrap();
     expect_message(&peer, payload, 60).await;
-    // The low-level send information has the identifier as a number too.
-    client
-        .send_data(SendData::new(payload.to_vec()).with_info(SendInfo {
-            sid: 2,
-            ppid: 18,
-            flags: SendInfo::UNORDERED,
-            ..Default::default()
-        }))
-        .await
-        .unwrap();
-    expect_message(&peer, payload, 18).await;
 }
 
 #[tokio::test]
@@ -139,31 +128,13 @@ async fn one_to_many_connected_endpoint_can_connect_another_peer() {
         (assoc_a, b"peer A".as_slice(), &peer_a),
         (assoc_b, b"peer B".as_slice(), &peer_b),
     ] {
-        client
-            .send(
-                payload,
-                SendOptions::new()
-                    .stream(2)
-                    .ppid(60)
-                    .unordered(true)
-                    .association(assoc_id),
-            )
-            .await
-            .unwrap();
+        let options = SendOptions::new().stream(2).ppid(60).unordered(true);
+        client.send(assoc_id, payload, options).await.unwrap();
         expect_message(peer, payload, 60).await;
     }
     drop(peer_a);
-    client
-        .send(
-            b"still B",
-            SendOptions::new()
-                .stream(2)
-                .ppid(60)
-                .unordered(true)
-                .association(assoc_b),
-        )
-        .await
-        .unwrap();
+    let options = SendOptions::new().stream(2).ppid(60).unordered(true);
+    client.send(assoc_b, b"still B", options).await.unwrap();
     expect_message(&peer_b, b"still B", 60).await;
     let c = server();
     let assoc_c = client.connect(&[c.local_addrs().unwrap()[0]]).unwrap();
@@ -171,17 +142,7 @@ async fn one_to_many_connected_endpoint_can_connect_another_peer() {
         .await
         .unwrap()
         .unwrap();
-    client
-        .send(
-            b"new C",
-            SendOptions::new()
-                .stream(2)
-                .ppid(60)
-                .unordered(true)
-                .association(assoc_c),
-        )
-        .await
-        .unwrap();
+    client.send(assoc_c, b"new C", options).await.unwrap();
     expect_message(&peer_c, b"new C", 60).await;
 }
 
@@ -205,22 +166,12 @@ async fn one_to_many_endpoint_can_initiate_multiple_outgoing_associations() {
         .await
         .unwrap()
         .unwrap();
-    for (address, assoc_id, payload, peer) in [
-        (addr_a, assoc_a, b"peer A".as_slice(), &peer_a),
-        (addr_b, assoc_b, b"peer B".as_slice(), &peer_b),
+    for (address, payload, peer) in [
+        (addr_a, b"peer A".as_slice(), &peer_a),
+        (addr_b, b"peer B".as_slice(), &peer_b),
     ] {
-        client
-            .send_to(
-                address,
-                payload,
-                SendOptions::new()
-                    .stream(2)
-                    .ppid(18)
-                    .unordered(true)
-                    .association(assoc_id),
-            )
-            .await
-            .unwrap();
+        let options = SendOptions::new().stream(2).ppid(18).unordered(true);
+        client.send_to(address, payload, options).await.unwrap();
         expect_message(peer, payload, 18).await;
     }
 }
@@ -365,9 +316,7 @@ async fn send_failure_notification_preserves_payload_and_metadata() {
         panic!("not a send failure");
     };
     assert_eq!(failure.payload, b"undelivered");
-    assert_eq!(failure.snd_info.sid, 2);
-    assert_eq!(failure.snd_info.ppid, 60);
-    assert_eq!(failure.snd_info.context, 42);
+    assert_eq!((failure.stream, failure.ppid, failure.context), (2, 60, 42));
     assert!(!failure.sent, "the message was never transmitted");
 }
 

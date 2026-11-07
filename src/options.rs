@@ -2,7 +2,7 @@
 use crate::internal::{SocketCore, sys};
 use crate::{
     AssociationId, AssociationParams, AssociationStats, Event, InitParams, PeerAddress,
-    PeerAddressParams, RtoInfo, SackInfo, SendInfo, SubscribeEventAssocId,
+    PeerAddressParams, RtoInfo, SackInfo, SubscribeEventAssocId,
 };
 use std::net::SocketAddr;
 use std::os::fd::AsFd;
@@ -107,11 +107,6 @@ impl SocketOptions<'_> {
     /// Enable metadata describing the next queued message (`SCTP_NXTINFO`).
     pub fn request_nxtinfo(&self, on: bool) -> std::io::Result<()> {
         sys::request_nxtinfo_internal(self.core.as_fd(), on)
-    }
-
-    /// Set what a message is sent with when a send supplies no `SendInfo`.
-    pub fn set_default_sendinfo(&self, info: SendInfo) -> std::io::Result<()> {
-        sys::sctp_set_default_sendinfo_internal(self.core.as_fd(), info)
     }
 
     /// Send small messages as soon as congestion permits, without Nagle-like bundling delays.

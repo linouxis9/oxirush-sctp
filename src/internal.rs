@@ -1,6 +1,7 @@
 //! One registered descriptor and its record state, shared by the public socket roles.
+use crate::types::internal::SndInfoWire;
 use crate::{
-    AssocChangeState, AssociationId, ConnState, Event, Notification, NotificationOrData, SendInfo,
+    AssocChangeState, AssociationId, ConnState, Event, Notification, NotificationOrData,
     SendOptions, SocketToAssociation, SubscribeEventAssocId,
 };
 use std::net::SocketAddr;
@@ -66,6 +67,24 @@ std::thread_local! {
 // twice its octets for a longer one, and three times when it is cut in small chunks.
 fn queued_at_most(octets: usize) -> usize {
     octets.saturating_mul(3).saturating_add(2048)
+}
+
+// A message of a batch of sends: the association that it goes to, which a one-to-one socket
+// ignores, its payload and its options.
+pub(crate) trait Outgoing {
+    fn parts(&self) -> (AssociationId, &[u8], SendOptions);
+}
+
+impl Outgoing for (&[u8], SendOptions) {
+    fn parts(&self) -> (AssociationId, &[u8], SendOptions) {
+        (0, self.0, self.1)
+    }
+}
+
+impl Outgoing for (AssociationId, &[u8], SendOptions) {
+    fn parts(&self) -> (AssociationId, &[u8], SendOptions) {
+        *self
+    }
 }
 
 // What one batch of reads gave.
@@ -413,18 +432,9 @@ impl SocketCore {
     // Abort the associations whose messages in assembly went past the limit of the endpoint.
     fn abort_past_the_limit(fd: BorrowedFd<'_>, partials: &mut Partials) {
         for assoc_id in partials.take_aborts() {
-            let info = SendInfo {
-                flags: crate::consts::SCTP_ABORT,
-                assoc_id,
-                ..Default::default()
-            };
+            let info = SndInfoWire::control(crate::consts::SCTP_ABORT, assoc_id);
             // An association that cannot be aborted is past saving: nothing more to do.
-            let _ = sys::sctp_sendmsg_once(
-                fd,
-                None,
-                b"messages in assembly past the limit",
-                Some(&info),
-            );
+            let _ = sys::sctp_sendmsg_once(fd, None, b"messages in assembly past the limit", info);
         }
     }
 
@@ -575,12 +585,12 @@ impl SocketCore {
     pub(crate) fn poll_send_many(
         &self,
         cx: &mut Context<'_>,
-        messages: &[(&[u8], SendOptions)],
+        messages: &[impl Outgoing],
     ) -> Poll<std::io::Result<usize>> {
-        let Some((first, options)) = messages.first() else {
+        let Some((assoc_id, first, options)) = messages.first().map(Outgoing::parts) else {
             return Poll::Ready(Ok(0));
         };
-        if messages.iter().any(|(payload, _)| payload.is_empty()) {
+        if messages.iter().any(|message| message.parts().1.is_empty()) {
             return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "a message has one octet at least: SCTP has no empty message",
@@ -603,8 +613,7 @@ impl SocketCore {
                             .err()
                             .unwrap_or_else(|| std::io::Error::from_raw_os_error(libc::EPIPE))));
                     }
-                    let info = options.info();
-                    if let Some(stream) = self.stream_out_of_range(&error, Some(&info)) {
+                    if let Some(stream) = self.stream_out_of_range(&error, assoc_id, options) {
                         return Poll::Ready(Err(stream));
                     }
                     if error.raw_os_error() == Some(libc::EMSGSIZE) {
@@ -617,10 +626,7 @@ impl SocketCore {
         }
     }
 
-    pub(crate) async fn send_many(
-        &self,
-        messages: &[(&[u8], SendOptions)],
-    ) -> std::io::Result<usize> {
+    pub(crate) async fn send_many(&self, messages: &[impl Outgoing]) -> std::io::Result<usize> {
         std::future::poll_fn(|cx| self.poll_send_many(cx, messages)).await
     }
 
@@ -632,14 +638,13 @@ impl SocketCore {
     // Nothing else sends them, not even the acknowledgement of all that went before. So a
     // message goes with the flag only when the kernel is sure to take the next, which goes
     // to the same association: the send buffer has room for both, as `SO_MEMINFO` counts it,
-    // the next has no flag that makes it more than a message, and goes to a stream that the
-    // association has. The last message that a batch sends then has no flag, and nothing
+    // and the next goes to a stream that the association has. The last message that a batch sends then has no flag, and nothing
     // that it took is held back after it, unless the system runs out of memory for SCTP in
     // the middle of it.
     fn send_batch_once(
         &self,
         fd: BorrowedFd<'_>,
-        messages: &[(&[u8], SendOptions)],
+        messages: &[impl Outgoing],
     ) -> std::io::Result<usize> {
         let _sending = self.sending.lock().unwrap_or_else(PoisonError::into_inner);
         FLAGS.with_borrow_mut(|flags| Self::send_flagged(fd, messages, flags))
@@ -648,7 +653,7 @@ impl SocketCore {
     // `send_batch_once`, with a vector of the thread for the flags.
     fn send_flagged(
         fd: BorrowedFd<'_>,
-        messages: &[(&[u8], SendOptions)],
+        messages: &[impl Outgoing],
         flags: &mut Vec<bool>,
     ) -> std::io::Result<usize> {
         let bundling = messages.len() > 1;
@@ -657,8 +662,6 @@ impl SocketCore {
         } else {
             (0, 0)
         };
-        let special =
-            crate::consts::SCTP_EOF | crate::consts::SCTP_ABORT | crate::consts::SCTP_SENDALL;
         flags.clear();
         // What the messages so far take of the send buffer, at most
         let mut used = 0_usize;
@@ -667,35 +670,37 @@ impl SocketCore {
         // status was asked for
         let mut streams = 0_u32;
         let mut asked = false;
-        for (index, (payload, options)) in messages.iter().enumerate() {
-            let info = options.info();
+        let mut previous = None;
+        for (index, message) in messages.iter().enumerate() {
+            let (assoc_id, payload, options) = message.parts();
             used = used.saturating_add(queued_at_most(payload.len()));
-            if index > 0 && messages[index - 1].1.assoc_id() != info.assoc_id {
+            if previous.is_some_and(|previous| previous != assoc_id) {
                 (streams, asked) = (0, false);
             }
-            streams = streams.max(u32::from(info.sid) + 1);
-            let Some(next) = messages
-                .get(index + 1)
-                .map(|(payload, options)| (payload, options.info()))
-                .filter(|(payload, next)| {
-                    bundling
-                        && next.assoc_id == info.assoc_id
-                        && next.flags & special == 0
-                        && payload.len() <= size
-                        && used.saturating_add(queued_at_most(payload.len())) <= free
-                })
+            previous = Some(assoc_id);
+            streams = streams.max(u32::from(options.stream_id) + 1);
+            let Some(next) =
+                messages
+                    .get(index + 1)
+                    .map(Outgoing::parts)
+                    .filter(|(next, payload, _)| {
+                        bundling
+                            && *next == assoc_id
+                            && payload.len() <= size
+                            && used.saturating_add(queued_at_most(payload.len())) <= free
+                    })
             else {
                 flags.push(false);
                 continue;
             };
-            let next = next.1;
-            if u32::from(next.sid) >= streams && !asked {
+            let next = next.2.stream_id;
+            if u32::from(next) >= streams && !asked {
                 asked = true;
-                if let Ok(status) = sys::sctp_get_status_internal(fd, info.assoc_id) {
+                if let Ok(status) = sys::sctp_get_status_internal(fd, assoc_id) {
                     streams = streams.max(u32::from(status.outstreams));
                 }
             }
-            flags.push(u32::from(next.sid) < streams);
+            flags.push(u32::from(next) < streams);
         }
         let mut sent = 0;
         while sent < messages.len() {
@@ -907,33 +912,34 @@ impl SocketCore {
         sys::sctp_subscribe_events_internal(self.as_fd(), &others, assoc_id, on)
     }
 
+    // Sends `payload` with `options`, to `to` or to association `assoc_id`, which a one-to-one
+    // socket ignores.
     pub(crate) async fn send(
         &self,
         to: Option<SocketAddr>,
+        assoc_id: AssociationId,
         payload: &[u8],
-        info: Option<&SendInfo>,
+        options: SendOptions,
     ) -> std::io::Result<()> {
-        std::future::poll_fn(|cx| self.poll_send(cx, to, payload, info)).await
+        std::future::poll_fn(|cx| self.poll_send(cx, to, assoc_id, payload, options)).await
     }
 
     pub(crate) fn poll_send(
         &self,
         cx: &mut Context<'_>,
         to: Option<SocketAddr>,
+        assoc_id: AssociationId,
         payload: &[u8],
-        info: Option<&SendInfo>,
+        options: SendOptions,
     ) -> Poll<std::io::Result<()>> {
-        // SCTP has no empty message, and Linux answers a bare `EINVAL`. A send that only
-        // aborts an association or shuts it down has none on purpose.
-        let controls = info.is_some_and(|info| {
-            info.flags & (crate::consts::SCTP_ABORT | crate::consts::SCTP_EOF) != 0
-        });
-        if payload.is_empty() && !controls {
+        // SCTP has no empty message, and Linux answers a bare `EINVAL`.
+        if payload.is_empty() {
             return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "a message has one octet at least: SCTP has no empty message",
             )));
         }
+        let info = SndInfoWire::new(options, assoc_id);
         loop {
             // After the end, the same answer at each call: the error of an association that
             // was aborted or lost, and a broken pipe for one that was shut down.
@@ -955,7 +961,7 @@ impl SocketCore {
                             .err()
                             .unwrap_or_else(|| std::io::Error::from_raw_os_error(libc::EPIPE))));
                     }
-                    if let Some(stream) = self.stream_out_of_range(error, info) {
+                    if let Some(stream) = self.stream_out_of_range(error, assoc_id, options) {
                         return Poll::Ready(Err(stream));
                     }
                     if error.raw_os_error() == Some(libc::EMSGSIZE) {
@@ -988,16 +994,20 @@ impl SocketCore {
     fn stream_out_of_range(
         &self,
         error: &std::io::Error,
-        info: Option<&SendInfo>,
+        assoc_id: AssociationId,
+        options: SendOptions,
     ) -> Option<std::io::Error> {
-        let info = info.filter(|_| error.raw_os_error() == Some(libc::EINVAL))?;
-        let status = sys::sctp_get_status_internal(self.as_fd(), info.assoc_id).ok()?;
-        (info.sid >= status.outstreams).then(|| {
+        if error.raw_os_error() != Some(libc::EINVAL) {
+            return None;
+        }
+        let status = sys::sctp_get_status_internal(self.as_fd(), assoc_id).ok()?;
+        let stream = options.stream_id;
+        (stream >= status.outstreams).then(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
-                    "stream {} is not one of the {} outbound streams of the association",
-                    info.sid, status.outstreams
+                    "stream {stream} is not one of the {} outbound streams of the association",
+                    status.outstreams
                 ),
             )
         })

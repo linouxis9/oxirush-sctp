@@ -104,26 +104,24 @@ pub(crate) struct SndInfoWire {
     pub(crate) assoc_id: AssociationId,
 }
 
-impl From<&crate::SendInfo> for SndInfoWire {
-    fn from(info: &crate::SendInfo) -> Self {
+impl SndInfoWire {
+    // A message with `options` to association `assoc_id`, which a one-to-one socket ignores.
+    pub(crate) fn new(options: crate::SendOptions, assoc_id: AssociationId) -> Self {
         Self {
-            sid: info.sid,
-            flags: info.flags,
-            ppid: info.ppid.to_be(),
-            context: info.context,
-            assoc_id: info.assoc_id,
+            sid: options.stream_id,
+            flags: u16::from(options.unordered),
+            ppid: options.ppid.to_be(),
+            context: options.context,
+            assoc_id,
         }
     }
-}
 
-impl From<SndInfoWire> for crate::SendInfo {
-    fn from(wire: SndInfoWire) -> Self {
+    // A send of no message that only has `flags`: `SCTP_ABORT` or `SCTP_EOF`.
+    pub(crate) fn control(flags: u16, assoc_id: AssociationId) -> Self {
         Self {
-            sid: wire.sid,
-            flags: wire.flags,
-            ppid: u32::from_be(wire.ppid),
-            context: wire.context,
-            assoc_id: wire.assoc_id,
+            flags,
+            assoc_id,
+            ..Self::default()
         }
     }
 }
@@ -351,19 +349,22 @@ mod tests {
         assert_eq!(align_of::<PeerAddressParamsInternal>(), 4);
     }
 
-    /// The send information goes in its wire form with the payload protocol identifier in
-    /// network byte order, and comes back from it as it was.
+    /// The options of a send go in their wire form with the payload protocol identifier in
+    /// network byte order, and unordered as the flag `SCTP_UNORDERED`, 1.
     #[test]
-    fn the_send_information_comes_back_from_its_wire_form() {
-        let info = crate::SendInfo {
-            sid: 2,
-            flags: crate::SendInfo::UNORDERED,
-            ppid: 60,
-            context: 7,
-            assoc_id: 9,
-        };
-        let wire = SndInfoWire::from(&info);
-        assert_eq!(wire.ppid, 60_u32.to_be());
-        assert_eq!(crate::SendInfo::from(wire), info);
+    fn the_options_of_a_send_go_in_their_wire_form() {
+        let options = crate::SendOptions::new()
+            .stream(2)
+            .ppid(60)
+            .unordered(true)
+            .context(7);
+        let wire = SndInfoWire::new(options, 9);
+        assert_eq!(
+            (wire.sid, wire.flags, wire.ppid, wire.context, wire.assoc_id),
+            (2, 1, 60_u32.to_be(), 7, 9)
+        );
+        assert_eq!(SndInfoWire::new(crate::SendOptions::new(), 0).flags, 0);
+        let abort = SndInfoWire::control(crate::consts::SCTP_ABORT, 9);
+        assert_eq!((abort.sid, abort.flags, abort.assoc_id), (0, 4, 9));
     }
 }
