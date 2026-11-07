@@ -65,9 +65,9 @@ loopback interface, on cores 2 and 3, at ea7c778, measured on a quiet
 machine on 2026-10-18.
 
 A message sent on one end of an association and received on the other, one
-at a time on one thread: 8.0 µs for 200 octets and 7.8 µs with `recv_into`,
-the ping-pong of `compare.sh` below, and 35 µs for 64 KiB and 33 µs with
-`recv_into`, the lowest of five runs of `messages`. More than nine tenths of
+at a time on one thread: 8.0 µs for 200 octets, the ping-pong of
+`compare.sh` below, and 35 µs for 64 KiB, the lowest of five runs of
+`messages`. More than nine tenths of
 that time is in the system calls.
 The sender has `set_nodelay(true)`. Without it a message shorter than a
 packet waits for the acknowledgement of the one before, which the peer may
@@ -101,14 +101,12 @@ three runs of a loop differed by 11 % at most, for C with 100 associations.
 |---|---|---:|---:|---:|---:|---:|---:|---:|
 | Ping-pong, 200 octets | C | 7,694 | 35,694 | 25,729 | 0 | 0 | 1.9 MiB | about the same |
 | | oxirush-sctp | 7,999 | 37,624 | 27,981 | 1 | 200 | 3.8 MiB | |
-| | oxirush-sctp, `recv_into` | 7,846 | 36,770 | 27,505 | 0 | 0 | 3.8 MiB | about the same |
 | | tokio-sctp 0.2.0 | 8,283 | 38,903 | 27,877 | 0 | 0 | 3.7 MiB | about the same |
 | | async-sctp 1.0.0 | 8,698 | 40,881 | 31,430 | 1 | 65,536 | 3.7 MiB | about the same |
 | | lksctp 0.1.0 | 8,137 | 38,262 | 27,373 | 0 | 0 | 3.7 MiB | about the same |
 | | sctp-rs 0.3.1 | 7,998 | 37,587 | 28,428 | 5 | 4,648 | 3.7 MiB | about the same |
 | Ping-pong, 16 KiB | C | 10,094 | 47,833 | 31,380 | 0 | 0 | 1.9 MiB | about the same |
 | | oxirush-sctp | 11,170 | 54,904 | 36,240 | 1 | 16,384 | 3.8 MiB | |
-| | oxirush-sctp, `recv_into` | 10,882 | 53,625 | 34,110 | 0 | 0 | 3.7 MiB | about the same |
 | | tokio-sctp 0.2.0 | 10,809 | 53,220 | 34,064 | 0 | 0 | 3.8 MiB | about the same |
 | | async-sctp 1.0.0 | 11,724 | 57,761 | 37,994 | 1 | 65,536 | 3.8 MiB | about the same |
 | | lksctp 0.1.0 | 10,814 | 53,420 | 33,617 | 0 | 0 | 3.8 MiB | about the same |

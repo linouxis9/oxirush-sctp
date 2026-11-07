@@ -1,8 +1,8 @@
 //! One-to-many SCTP association endpoint.
 use crate::internal::{SocketCore, sys};
 use crate::{
-    AssociationId, BindxFlags, ConnStatus, ConnectedSocket, NotificationOrData, ReceivedInto,
-    SendData, SendOptions, SocketOptions,
+    AssociationId, BindxFlags, ConnStatus, ConnectedSocket, NotificationOrData, SendData,
+    SendOptions, SocketOptions,
 };
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
@@ -88,17 +88,6 @@ impl OneToManyEndpoint {
     pub fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<std::io::Result<NotificationOrData>> {
         self.core
             .poll_recv(cx)
-            .map(|received| received?.ok_or_else(shut_down))
-    }
-
-    /// [`recv_into`][Self::recv_into] as a poll, as [`poll_recv`][Self::poll_recv] is.
-    pub fn poll_recv_into(
-        &self,
-        cx: &mut Context<'_>,
-        buffer: &mut [u8],
-    ) -> Poll<std::io::Result<ReceivedInto>> {
-        self.core
-            .poll_recv_into(cx, buffer)
             .map(|received| received?.ok_or_else(shut_down))
     }
 
@@ -206,13 +195,6 @@ impl OneToManyEndpoint {
         self.core
             .send(to, &data.payload, data.snd_info.as_ref())
             .await
-    }
-
-    /// Receive the next message or notification into `buffer`, without an allocation when
-    /// one read gives a message whole. A message longer than the buffer is discarded and
-    /// reported as `InvalidData`.
-    pub async fn recv_into(&self, buffer: &mut [u8]) -> std::io::Result<ReceivedInto> {
-        self.core.recv_into(buffer).await?.ok_or_else(shut_down)
     }
 
     /// Abort one association: its peer learns of it at once, with `reason` as the reason of

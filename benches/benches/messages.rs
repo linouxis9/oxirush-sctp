@@ -19,7 +19,7 @@
 //! writes `flamegraph.svg` instead.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use oxirush_sctp::{NotificationOrData, ReceivedInto, SendOptions, Socket, SocketToAssociation};
+use oxirush_sctp::{NotificationOrData, SendOptions, Socket, SocketToAssociation};
 use pprof::criterion::{Output, PProfProfiler};
 use std::hint::black_box;
 use std::time::Duration;
@@ -62,29 +62,6 @@ fn send_recv(criterion: &mut Criterion) {
                         .expect("sent");
                     match receiver.recv().await.expect("received") {
                         Some(NotificationOrData::Data(data)) => data.payload.len(),
-                        _ => 0,
-                    }
-                })
-            })
-        });
-    }
-    group.finish();
-
-    // The same into a buffer of the caller, which a message of the peer does not allocate
-    let mut group = criterion.benchmark_group("send-recv-into");
-    let mut buffer = vec![0_u8; 128 * 1024];
-    for octets in SIZES {
-        let message = vec![0x5a; octets];
-        group.throughput(Throughput::Bytes(octets as u64));
-        group.bench_function(BenchmarkId::from_parameter(octets), |bencher| {
-            bencher.iter(|| {
-                runtime.block_on(async {
-                    sender
-                        .send(black_box(&message), options)
-                        .await
-                        .expect("sent");
-                    match receiver.recv_into(&mut buffer).await.expect("received") {
-                        Some(ReceivedInto::Data { len, .. }) => len,
                         _ => 0,
                     }
                 })

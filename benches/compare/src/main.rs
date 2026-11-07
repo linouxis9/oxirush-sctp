@@ -14,8 +14,7 @@
 //! for them. It prints the time a message, the allocations and their octets a message, and
 //! the peak of the resident memory.
 //!
-//! The implementations: `oxirush-sctp` (`send` and `recv`), `oxirush-sctp-into` (`recv_into`),
-//! `oxirush-sctp-many` (`send_many` and `recv_many`, 64 a call, `stream` only),
+//! The implementations: `oxirush-sctp` (`send` and `recv`), `oxirush-sctp-many` (`send_many` and `recv_many`, 64 a call, `stream` only),
 //! `tokio-sctp` 0.2.0, `async-sctp` 1.0.0, `lksctp` 0.1.0 and `sctp-rs` 0.3.1.
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -147,27 +146,6 @@ impl Sctp for Oxirush {
     async fn recv(&self, _: &mut Vec<u8>) -> std::io::Result<usize> {
         match self.0.recv().await? {
             Some(oxirush_sctp::NotificationOrData::Data(message)) => Ok(message.payload.len()),
-            other => Err(std::io::Error::other(format!("{other:?}"))),
-        }
-    }
-}
-
-struct OxirushInto(oxirush_sctp::ConnectedSocket);
-
-impl Sctp for OxirushInto {
-    async fn pair() -> std::io::Result<(Self, Self)> {
-        let (client, server) = oxirush_pair().await?;
-        Ok((Self(client), Self(server)))
-    }
-
-    fn send(&self, message: &[u8]) -> impl Future<Output = std::io::Result<()>> + Send {
-        self.0.send(message, oxirush_options())
-    }
-
-    async fn recv(&self, buffer: &mut Vec<u8>) -> std::io::Result<usize> {
-        buffer.resize(1 << 17, 0);
-        match self.0.recv_into(buffer).await? {
-            Some(oxirush_sctp::ReceivedInto::Data { len, .. }) => Ok(len),
             other => Err(std::io::Error::other(format!("{other:?}"))),
         }
     }
@@ -540,7 +518,6 @@ fn main() {
     let associations: usize = args.get(4).map_or(1, |value| value.parse().unwrap());
     let measured = match implementation {
         "oxirush-sctp" => run::<Oxirush>(case, octets, messages, associations),
-        "oxirush-sctp-into" => run::<OxirushInto>(case, octets, messages, associations),
         "oxirush-sctp-many" if case == "stream" => stream_many(octets, messages, associations),
         "tokio-sctp" => run::<TokioSctp>(case, octets, messages, associations),
         "async-sctp" => run::<AsyncSctp>(case, octets, messages, associations),

@@ -1,8 +1,8 @@
 //! A socket owning one SCTP association.
 use crate::internal::{SocketCore, sys};
 use crate::{
-    BindxFlags, ConnStatus, NotificationOrData, PeerAddress, ReceivedData, ReceivedInto, SendData,
-    SendOptions, SocketOptions,
+    BindxFlags, ConnStatus, NotificationOrData, PeerAddress, ReceivedData, SendData, SendOptions,
+    SocketOptions,
 };
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
@@ -209,15 +209,6 @@ impl ConnectedSocket {
         self.core.poll_recv(cx)
     }
 
-    /// [`recv_into`][Self::recv_into] as a poll, as [`poll_recv`][Self::poll_recv] is.
-    pub fn poll_recv_into(
-        &self,
-        cx: &mut Context<'_>,
-        buffer: &mut [u8],
-    ) -> Poll<std::io::Result<Option<ReceivedInto>>> {
-        self.core.poll_recv_into(cx, buffer)
-    }
-
     /// [`send`][Self::send] as a poll: `Pending` until the send buffer has room, and the
     /// waker of `cx` is woken then. A message is sent whole or not at all.
     pub fn poll_send(
@@ -377,14 +368,6 @@ impl ConnectedSocket {
         self.core
             .send(None, &data.payload, data.snd_info.as_ref())
             .await
-    }
-
-    /// Receive the next message into `buffer`, without an allocation when one read gives it
-    /// whole, which is the usual case. It ends and fails as [`recv`][Self::recv] does. A
-    /// message longer than the buffer is discarded and reported as `InvalidData`: give a
-    /// buffer as long as the longest message that the peer may send.
-    pub async fn recv_into(&self, buffer: &mut [u8]) -> std::io::Result<Option<ReceivedInto>> {
-        self.core.recv_into(buffer).await
     }
 
     /// Close the association without losing what was sent: shut it down for writing, then

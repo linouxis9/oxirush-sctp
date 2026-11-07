@@ -162,51 +162,6 @@ async fn a_sender_with_nothing_left_to_send_is_a_typed_notification() {
 }
 
 #[tokio::test]
-async fn a_message_is_received_into_the_buffer_of_the_caller() {
-    let (client, peer) = pair().await;
-    peer.options()
-        .subscribe_events(&[Event::Shutdown], SubscribeEventAssocId::All)
-        .unwrap();
-    let mut buffer = [0_u8; 2048];
-
-    client
-        .send(b"into the buffer", SendOptions::new().stream(1).ppid(60))
-        .await
-        .unwrap();
-    let Some(ReceivedInto::Data { len, rcv_info, .. }) = peer.recv_into(&mut buffer).await.unwrap()
-    else {
-        panic!("not a message");
-    };
-    assert_eq!(&buffer[..len], b"into the buffer");
-    let info = rcv_info.unwrap();
-    assert_eq!((info.sid, info.ppid), (1, 60));
-
-    // A message longer than the buffer is discarded, and the one after it arrives
-    client.send(&[7; 3000], SendOptions::new()).await.unwrap();
-    client.send(b"next", SendOptions::new()).await.unwrap();
-    let error = peer.recv_into(&mut buffer).await.unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}");
-    let Some(ReceivedInto::Data { len, .. }) = peer.recv_into(&mut buffer).await.unwrap() else {
-        panic!("not a message");
-    };
-    assert_eq!(&buffer[..len], b"next");
-
-    // A notification, then the end, as `recv` has them
-    drop(client);
-    let received = peer.recv_into(&mut buffer).await.unwrap();
-    assert!(
-        matches!(
-            received,
-            Some(ReceivedInto::Notification(Notification::Shutdown(_)))
-        ),
-        "{received:?}"
-    );
-    for _ in 0..2 {
-        assert_eq!(peer.recv_into(&mut buffer).await.unwrap(), None);
-    }
-}
-
-#[tokio::test]
 async fn a_socket_prints_its_addresses() {
     let (client, peer) = pair().await;
     let printed = format!("{client:?}");
@@ -516,24 +471,4 @@ async fn an_endpoint_shuts_an_association_down_with_an_empty_send() {
     endpoint.send_data(None, data).await.unwrap();
     let end = tokio::time::timeout(Duration::from_secs(2), peer.recv()).await;
     assert!(matches!(end, Ok(Ok(None))), "{end:?}");
-}
-
-/// `recv_into` takes a message of the limit and discards a longer one; with an empty buffer,
-/// it discards a message, longer than the buffer.
-#[tokio::test]
-async fn recv_into_takes_a_message_of_the_limit() {
-    let (client, peer) = pair().await;
-    peer.options().set_max_message_size(5);
-    for message in [&b"12345"[..], b"123456", b"x"] {
-        client.send(message, SendOptions::new()).await.unwrap();
-    }
-    let mut buffer = [0; 64];
-    match peer.recv_into(&mut buffer).await.unwrap() {
-        Some(ReceivedInto::Data { len, .. }) => assert_eq!(&buffer[..len], b"12345"),
-        other => panic!("{other:?}"),
-    }
-    let error = peer.recv_into(&mut buffer).await.unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}");
-    let error = peer.recv_into(&mut []).await.unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}");
 }

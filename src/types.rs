@@ -157,29 +157,6 @@ impl ReceivedData {
     }
 }
 
-/// A message received into a buffer of the caller, by
-/// [`ConnectedSocket::recv_into`][crate::ConnectedSocket::recv_into] or
-/// [`OneToManyEndpoint::recv_into`][crate::OneToManyEndpoint::recv_into].
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ReceivedInto {
-    /// A message, whose octets are the first `len` of the buffer.
-    Data {
-        /// Octets of the message.
-        len: usize,
-
-        /// Address of the peer that sent the message. `None` when the kernel gives no address.
-        from: Option<std::net::SocketAddr>,
-
-        /// Ancillary information about the message. `None` when
-        /// [`request_rcvinfo`][crate::SocketOptions::request_rcvinfo] turned it off.
-        rcv_info: Option<RcvInfo>,
-    },
-
-    /// A notification. The buffer is as it was.
-    Notification(Notification),
-}
-
 /// Structure Representing Data to be Sent.
 ///
 /// This structure contains actual payload and optional ancillary data.

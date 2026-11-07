@@ -95,9 +95,7 @@
 //! - A received message longer than `options().max_message_size()`, 4 MiB by
 //!   default, is discarded and reported as an `InvalidData` error. The next
 //!   `recv` returns the message after it. A notification is never discarded.
-//! - `recv_into` receives into a buffer of the caller, without an allocation
-//!   when one read gives the message whole.
-//! - `poll_recv`, `poll_recv_into`, `poll_send`, `poll_send_to` and
+//! - `poll_recv`, `poll_send`, `poll_send_to` and
 //!   `poll_accept` are the calls as polls, for a `Stream` or a future of a
 //!   program's own: they wait for the socket to be readable or writable, and end
 //!   and fail as the async calls do. A one-to-one socket subscribes to its
@@ -315,8 +313,8 @@ pub use types::{
     AssocChangeState, AssociationChange, AssociationId, AssociationParams, AssociationStats,
     BindxFlags, ConnState, ConnStatus, Event, EventSubscriptionError, InitParams, Notification,
     NotificationOrData, NxtInfo, PartialDelivery, PathState, PeerAddress, PeerAddressChange,
-    PeerAddressParams, PeerAddressState, RcvInfo, ReceivedData, ReceivedInto, RemoteError, RtoInfo,
-    SackInfo, SendData, SendFailure, SendInfo, SendOptions, Shutdown, SocketToAssociation,
+    PeerAddressParams, PeerAddressState, RcvInfo, ReceivedData, RemoteError, RtoInfo, SackInfo,
+    SendData, SendFailure, SendInfo, SendOptions, Shutdown, SocketToAssociation,
     SubscribeEventAssocId,
 };
 

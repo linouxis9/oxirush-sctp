@@ -1,7 +1,7 @@
 //! One registered descriptor and its record state, shared by the public socket roles.
 use crate::{
-    AssocChangeState, AssociationId, ConnState, Event, Notification, NotificationOrData,
-    ReceivedInto, SendInfo, SendOptions, SocketToAssociation, SubscribeEventAssocId,
+    AssocChangeState, AssociationId, ConnState, Event, Notification, NotificationOrData, SendInfo,
+    SendOptions, SocketToAssociation, SubscribeEventAssocId,
 };
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
@@ -15,7 +15,7 @@ pub(crate) mod fuzzing;
 mod notifications;
 mod receive;
 pub(crate) mod sys;
-use receive::{DEFAULT_MAX_MESSAGE_SIZE, PartialMessage, Partials};
+use receive::{DEFAULT_MAX_MESSAGE_SIZE, Partials};
 
 #[derive(Debug)]
 pub(crate) struct SocketCore {
@@ -350,7 +350,9 @@ impl SocketCore {
     }
 
     // The next message or notification. `None` is the end of an association that was shut
-    // down, which a one-to-one socket alone has.
+    // down, which a one-to-one socket alone has. Not `poll_recv` in a `poll_fn`: the
+    // readiness that a poll waits for keeps one waker, and of two tasks that receive at once
+    // one would never wake; `ready` wakes each task that waits.
     pub(crate) async fn recv(&self) -> std::io::Result<Option<NotificationOrData>> {
         if let Some(error) = self.take_pending() {
             return Err(error);
@@ -396,38 +398,6 @@ impl SocketCore {
             {
                 return Poll::Ready(result);
             }
-        }
-    }
-
-    // `recv_into` as a poll.
-    pub(crate) fn poll_recv_into(
-        &self,
-        cx: &mut Context<'_>,
-        buffer: &mut [u8],
-    ) -> Poll<std::io::Result<Option<ReceivedInto>>> {
-        if let Some(error) = self.take_pending() {
-            return Poll::Ready(Err(error));
-        }
-        loop {
-            if self.end().is_none() {
-                let mut guard = ready!(self.fd.poll_read_ready(cx))?;
-                if self.end().is_none() {
-                    match guard.try_io(|inner| self.receive_direct(inner.as_fd(), buffer)) {
-                        Ok(Ok(Direct::Data(received))) => return Poll::Ready(Ok(Some(received))),
-                        Ok(Ok(Direct::Assembling)) => {}
-                        Ok(Ok(Direct::Other(result))) => match self.note_received(result) {
-                            Some(result) => {
-                                return Poll::Ready(result.and_then(|r| into_buffer(r, buffer)));
-                            }
-                            None => continue,
-                        },
-                        Ok(Err(_)) | Err(_) => continue,
-                    }
-                }
-            }
-            return self
-                .poll_recv(cx)
-                .map(|result| result.and_then(|received| into_buffer(received, buffer)));
         }
     }
 
@@ -766,83 +736,6 @@ impl SocketCore {
             .set_max_assembly(octets);
     }
 
-    // The next message, into the buffer of the caller when one read gives it whole: no
-    // allocation and no copy then. Anything else goes the way of `recv`, and a message is
-    // copied to the buffer once it is whole.
-    pub(crate) async fn recv_into(
-        &self,
-        buffer: &mut [u8],
-    ) -> std::io::Result<Option<ReceivedInto>> {
-        if let Some(error) = self.take_pending() {
-            return Err(error);
-        }
-        loop {
-            if self.end().is_none() {
-                let mut guard = self.fd.ready(Interest::READABLE | Interest::ERROR).await?;
-                if self.end().is_none() {
-                    // An error of `try_io` is a read that would block: it has cleared
-                    // the readiness, and the loop waits again
-                    match guard.try_io(|inner| self.receive_direct(inner.as_fd(), buffer)) {
-                        Ok(Ok(Direct::Data(received))) => return Ok(Some(received)),
-                        Ok(Ok(Direct::Assembling)) => {}
-                        Ok(Ok(Direct::Other(result))) => match self.note_received(result) {
-                            Some(result) => return into_buffer(result?, buffer),
-                            None => continue,
-                        },
-                        Ok(Err(_)) | Err(_) => continue,
-                    }
-                }
-            }
-            return into_buffer(self.recv().await?, buffer);
-        }
-    }
-
-    // One read into the buffer of the caller, when no message is being assembled. The
-    // only error is that of a read that would block.
-    fn receive_direct(&self, fd: BorrowedFd<'_>, buffer: &mut [u8]) -> std::io::Result<Direct> {
-        let mut partials = self.partials.lock().unwrap_or_else(PoisonError::into_inner);
-        if !partials.is_empty() || buffer.is_empty() {
-            return Ok(Direct::Assembling);
-        }
-        let piece = match sys::sctp_recvmsg_once(fd, buffer) {
-            Ok(piece) => piece,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
-                return Ok(Direct::Assembling);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Err(error),
-            Err(error) => return Ok(Direct::Other(Err(error))),
-        };
-        if piece.len == 0 && !piece.notification {
-            return Ok(Direct::Other(Ok(None)));
-        }
-        if piece.end_of_record && piece.notification {
-            let notification = notifications::notification_from_message(&buffer[..piece.len]);
-            return Ok(Direct::Other(Ok(Some(NotificationOrData::Notification(
-                notification,
-            )))));
-        }
-        if piece.end_of_record {
-            let limit = self.max_message_size();
-            if piece.len > limit {
-                return Ok(Direct::Other(Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "discarded a message of {} octets, longer than {limit}",
-                        piece.len
-                    ),
-                ))));
-            }
-            return Ok(Direct::Data(ReceivedInto::Data {
-                len: piece.len,
-                from: piece.from,
-                rcv_info: piece.rcv_info,
-            }));
-        }
-        // The first part of a longer message: the assembler goes on from it
-        partials.begin(PartialMessage::begun(&buffer[..piece.len], &piece));
-        Ok(Direct::Assembling)
-    }
-
     // How the association of a one-to-one socket has ended, once a call has learned of it:
     // `Ok` for one that was shut down, and the error of one that was aborted or lost.
     fn end(&self) -> Option<std::io::Result<()>> {
@@ -1078,47 +971,6 @@ impl SocketCore {
     }
 }
 
-// What one read into the buffer of a caller gave.
-enum Direct {
-    // A whole message, in the buffer.
-    Data(ReceivedInto),
-    // The end of the stream, an error or a notification, for `note_received`.
-    Other(std::io::Result<Option<NotificationOrData>>),
-    // Nothing for the caller yet: a message is being assembled.
-    Assembling,
-}
-
-// What `recv` returned, with a message copied to the buffer of a caller.
-fn into_buffer(
-    received: Option<NotificationOrData>,
-    buffer: &mut [u8],
-) -> std::io::Result<Option<ReceivedInto>> {
-    Ok(match received {
-        None => None,
-        Some(NotificationOrData::Notification(notification)) => {
-            Some(ReceivedInto::Notification(notification))
-        }
-        Some(NotificationOrData::Data(message)) => {
-            let len = message.payload.len();
-            let Some(room) = buffer.get_mut(..len) else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "discarded a message of {len} octets, longer than the buffer of {}",
-                        buffer.len()
-                    ),
-                ));
-            };
-            room.copy_from_slice(&message.payload);
-            Some(ReceivedInto::Data {
-                len,
-                from: message.from,
-                rcv_info: message.rcv_info,
-            })
-        }
-    })
-}
-
 impl SocketCore {
     // The `EMSGSIZE` of a message longer than the send buffer, said in words.
     fn too_long(&self, octets: usize) -> std::io::Error {
@@ -1170,6 +1022,7 @@ impl AsRawFd for SocketCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use receive::PartialMessage;
 
     /// Without the receive information, an endpoint could not tell apart the parts of the
     /// messages that it assembles: it keeps it while it has some.
@@ -1294,27 +1147,6 @@ mod tests {
                 core.recv().await.unwrap()
             };
             assert_eq!(payload(received), b"whole", "recv_many: {many}");
-        }
-    }
-
-    /// `recv_into` goes on with a message in assembly, which a cancelled call left, rather
-    /// than read the next part on its own.
-    #[tokio::test]
-    async fn recv_into_goes_on_with_the_message_in_assembly() {
-        let (listener, address) = listening(SocketToAssociation::OneToOne);
-        let peer = peer_that_sent(address, b"before").await;
-        let (core, _) = listener.accept().await.unwrap();
-        // After the notification that the association came up
-        assert_eq!(payload(core.recv().await.unwrap()), b"before");
-        core.partials
-            .lock()
-            .unwrap()
-            .begin(first_part(b"first ", None));
-        peer.send(b"last", crate::SendOptions::new()).await.unwrap();
-        let mut buffer = [0; 64];
-        match core.recv_into(&mut buffer).await.unwrap() {
-            Some(ReceivedInto::Data { len, .. }) => assert_eq!(&buffer[..len], b"first last"),
-            other => panic!("{other:?}"),
         }
     }
 

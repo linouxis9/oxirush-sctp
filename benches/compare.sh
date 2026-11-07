@@ -28,8 +28,8 @@ perf=yes
 sudo -n perf stat -e cycles true >/dev/null 2>&1 || perf=no
 
 # case octets messages associations, then the implementations
-cases='pingpong 200 200000 1 c oxirush-sctp oxirush-sctp-into tokio-sctp async-sctp lksctp sctp-rs
-pingpong 16384 40000 1 c oxirush-sctp oxirush-sctp-into tokio-sctp async-sctp lksctp sctp-rs
+cases='pingpong 200 200000 1 c oxirush-sctp tokio-sctp async-sctp lksctp sctp-rs
+pingpong 16384 40000 1 c oxirush-sctp tokio-sctp async-sctp lksctp sctp-rs
 stream 200 600000 1 c c-many oxirush-sctp oxirush-sctp-many tokio-sctp async-sctp lksctp sctp-rs
 stream 200 600000 100 c c-many oxirush-sctp oxirush-sctp-many tokio-sctp async-sctp lksctp sctp-rs'
 

@@ -55,14 +55,11 @@ async fn messages_go_both_ways_through_the_polls() {
     poll_fn(|cx| peer.poll_send(cx, b"answer", options))
         .await
         .unwrap();
-    let mut buffer = [0; 64];
-    let received = poll_fn(|cx| client.poll_recv_into(cx, &mut buffer))
-        .await
-        .unwrap();
-    let Some(ReceivedInto::Data { len, .. }) = received else {
+    let received = poll_fn(|cx| client.poll_recv(cx)).await.unwrap();
+    let Some(NotificationOrData::Data(answer)) = received else {
         panic!("{received:?}");
     };
-    assert_eq!(&buffer[..len], b"answer");
+    assert_eq!(answer.payload, b"answer");
     // A connected socket has one association.
     let elsewhere = SendOptions::new().association(7);
     let error = poll_fn(|cx| client.poll_send(cx, b"x", elsewhere))
@@ -73,7 +70,7 @@ async fn messages_go_both_ways_through_the_polls() {
     peer.shutdown(std::net::Shutdown::Both).unwrap();
     let ended = tokio::time::timeout(WAIT, until_the_end(&client)).await;
     assert_eq!(ended.expect("the end comes"), None);
-    let received = poll_fn(|cx| client.poll_recv_into(cx, &mut buffer)).await;
+    let received = poll_fn(|cx| client.poll_recv(cx)).await;
     assert!(matches!(received, Ok(None)), "{received:?}");
 }
 
@@ -215,14 +212,11 @@ async fn an_endpoint_sends_and_receives_through_the_polls() {
         .await
         .unwrap();
     peer.send(b"last", SendOptions::new()).await.unwrap();
-    let mut buffer = [0; 64];
-    let received = poll_fn(|cx| endpoint.poll_recv_into(cx, &mut buffer))
-        .await
-        .unwrap();
-    let ReceivedInto::Data { len, .. } = received else {
+    let received = poll_fn(|cx| endpoint.poll_recv(cx)).await.unwrap();
+    let NotificationOrData::Data(last) = received else {
         panic!("{received:?}");
     };
-    assert_eq!(&buffer[..len], b"last");
+    assert_eq!(last.payload, b"last");
     let Some(NotificationOrData::Data(again)) = peer.recv().await.unwrap() else {
         panic!("not data");
     };
