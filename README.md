@@ -466,7 +466,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   partial reliability and stream reconfiguration.
 - The associations of a `OneToManyEndpoint` share the receive buffer of the
   socket, unless `net.sctp.rcvbuf_policy` is 1: one that fills it makes the
-  others wait. A `Listener` gives each association a socket of its own.
+  others wait. So does a message that comes in parts, longer than a packet
+  or than what the receiver had room for: the messages of the other
+  associations come after its last part. A `Listener` gives each association
+  a socket of its own.
 - They share its send buffer too: unless `net.sctp.sndbuf_policy` is 1,
   Linux wakes the endpoint once for each of its associations when one of
   them has data acknowledged. To 100 associations, a message took 34 µs of

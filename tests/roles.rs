@@ -321,34 +321,25 @@ async fn long_and_short(
     result
 }
 
-/// On a one-to-many endpoint, the parts of the messages of several associations come in
-/// turns, and each is assembled apart: a message that arrives in many parts holds back none
-/// of the other associations. With Linux's default (`SCTP_FRAGMENT_INTERLEAVE` 0) and one
-/// assembler, the short message waited for the long one.
+/// On a one-to-many endpoint, the parts of a message come one after the other, as Linux has
+/// it by default (`SCTP_FRAGMENT_INTERLEAVE` 0): the short message of one association waits
+/// for the long one of another. A `Listener` gives each association a socket.
 #[tokio::test]
-async fn a_long_message_of_one_association_holds_back_none_of_the_others_on_an_endpoint() {
+async fn a_long_message_of_one_association_holds_back_the_others_on_an_endpoint() {
     const LONG: usize = 512 << 10;
     let Some((endpoint, slow, quick)) = endpoint_with_two_clients(BUFFER, LONG).await else {
         return;
     };
     let (lengths, short) = long_and_short(endpoint, slow, quick, LONG).await;
     eprintln!("{lengths:?}, the short message in {short:?}");
-    assert_eq!(
-        lengths,
-        [15, LONG],
-        "the short message waited for the long one"
-    );
-    assert!(
-        short < std::time::Duration::from_millis(500),
-        "the short message took {short:?}"
-    );
+    assert_eq!(lengths, [LONG, 15]);
 }
 
 const BUFFER: usize = 64 << 10;
 
 /// A peer that aborts in the middle of a long message leaves nothing of it to the endpoint:
-/// the parts go with the notification that the kernel gave up their delivery, which the
-/// endpoint subscribes to for itself and does not pass on, and the other associations go on.
+/// the parts go when what comes next is not the next part, and the other associations go
+/// on.
 #[tokio::test]
 async fn a_peer_that_aborts_in_the_middle_of_a_message_leaves_the_others_alone() {
     const LONG: usize = 1 << 20;
@@ -407,52 +398,4 @@ async fn a_peer_that_aborts_in_the_middle_of_a_message_leaves_the_others_alone()
             other => panic!("{other:?}"),
         }
     }
-}
-
-/// Peers together cannot make an endpoint hold more than its limit of messages in assembly:
-/// past it, the endpoint aborts the association whose message is the longest, says so once,
-/// and drops what comes of that message. The other associations go on.
-#[tokio::test]
-async fn past_its_limit_of_messages_in_assembly_an_endpoint_aborts_the_longest() {
-    const LONG: usize = 1 << 20;
-    let Some((endpoint, slow, quick)) = endpoint_with_two_clients(8 << 10, LONG).await else {
-        return;
-    };
-    endpoint.options().set_max_assembly(64 << 10);
-    assert_eq!(endpoint.options().max_assembly(), 64 << 10);
-    let receiving = tokio::spawn(async move {
-        let mut received = Vec::new();
-        loop {
-            let next = tokio::time::timeout(std::time::Duration::from_secs(5), endpoint.recv())
-                .await
-                .expect("the endpoint says that it aborted, and gets the next message");
-            let done = matches!(
-                &next,
-                Ok(NotificationOrData::Data(message)) if message.payload == b"after"
-            );
-            received.push(next.map_err(|error| (error.kind(), error.to_string())));
-            if done {
-                return received;
-            }
-        }
-    });
-    slow.send(&vec![0x5a; LONG], SendOptions::new())
-        .await
-        .unwrap();
-    // The peer whose association was aborted learns of it.
-    let ended = tokio::time::timeout(std::time::Duration::from_secs(5), slow.recv())
-        .await
-        .expect("the abort reaches the peer");
-    assert_eq!(
-        ended.unwrap_err().kind(),
-        std::io::ErrorKind::ConnectionReset
-    );
-    quick.send(b"after", SendOptions::new()).await.unwrap();
-    let received = receiving.await.unwrap();
-    let [Err((kind, text)), Ok(NotificationOrData::Data(after))] = &received[..] else {
-        panic!("{received:?}");
-    };
-    assert_eq!(*kind, std::io::ErrorKind::InvalidData);
-    assert!(text.starts_with("aborted association "), "{text}");
-    assert_eq!(after.payload, b"after");
 }

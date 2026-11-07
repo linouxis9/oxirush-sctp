@@ -291,15 +291,13 @@ async fn the_highest_dscp_is_taken() {
     assert_eq!(socket.options().dscp().unwrap(), 63);
 }
 
-/// An endpoint holds 4 MiB of a message and 64 MiB of the messages that it assembles, by
-/// default.
+/// An endpoint holds 4 MiB of a message by default.
 #[tokio::test]
-async fn the_limits_of_an_endpoint_by_default() {
+async fn the_limit_of_an_endpoint_by_default() {
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let endpoint = socket.into_endpoint(1).unwrap();
     assert_eq!(endpoint.options().max_message_size(), 4 << 20);
-    assert_eq!(endpoint.options().max_assembly(), 64 << 20);
 }
 
 /// Each role prints its local address and its descriptor.

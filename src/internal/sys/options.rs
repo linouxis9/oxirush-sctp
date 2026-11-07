@@ -66,17 +66,6 @@ pub(crate) fn sctp_subscribe_events_internal(
     Ok(())
 }
 
-/// `SCTP_FRAGMENT_INTERLEAVE` level 1: the parts of the messages of several associations
-/// come in turns.
-pub(crate) fn set_fragment_interleave_internal(fd: BorrowedFd<'_>) -> std::io::Result<()> {
-    setsockopt(
-        fd,
-        SOL_SCTP,
-        crate::consts::SCTP_FRAGMENT_INTERLEAVE,
-        &libc::c_int::from(true),
-    )
-}
-
 /// `SCTP_RECVRCVINFO`: the receive information of each message.
 pub(crate) fn request_rcvinfo_internal(fd: BorrowedFd<'_>) -> std::io::Result<()> {
     setsockopt(fd, SOL_SCTP, SCTP_RECVRCVINFO, &libc::c_int::from(true))
