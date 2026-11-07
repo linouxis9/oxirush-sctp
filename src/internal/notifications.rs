@@ -25,7 +25,6 @@ pub(crate) fn notification_from_message(data: &[u8]) -> Notification {
     };
 
     if data.len() < 2 {
-        tracing::warn!("Notification of {} octets.", data.len());
         return unsupported();
     }
     let kind = u16_at(0);
@@ -98,13 +97,7 @@ pub(crate) fn notification_from_message(data: &[u8]) -> Notification {
                 assoc_id: i32_at(8),
             }
         }
-        _ => {
-            tracing::debug!(
-                "Unsupported notification received: type {kind:x}, {} octets.",
-                data.len()
-            );
-            unsupported()
-        }
+        _ => unsupported(),
     }
 }
 
@@ -397,27 +390,18 @@ mod tests {
         ));
     }
 
-    /// A notification shorter than its type is a warning; one that has its type and is too
-    /// short for the rest is unsupported without one, and so is one of a type that the crate
-    /// does not know, which it logs for debugging with its type and length.
+    /// A notification shorter than its header, or of a type that the crate does not know,
+    /// is unsupported, with its octets.
     #[test]
-    fn what_is_logged_of_a_notification_that_is_not_read() {
-        use crate::logged::{logged, warnings};
-        let (_, events) = logged(|| notification_from_message(&[1]));
-        assert_eq!(warnings(&events), ["Notification of 1 octets."]);
-        let (_, events) = logged(|| notification_from_message(&[1, 0]));
-        assert_eq!(warnings(&events), Vec::<&str>::new());
-        let header = notification(Event::Association, 8);
-        let (_, events) = logged(|| notification_from_message(&header));
-        assert_eq!(
-            events,
-            [(
-                tracing::Level::DEBUG,
-                format!(
-                    "Unsupported notification received: type {:x}, 8 octets.",
-                    Event::Association as u16
-                )
-            )]
-        );
+    fn a_notification_that_is_not_read_is_unsupported() {
+        for data in [vec![1], vec![1, 0], notification(Event::Association, 8)] {
+            assert!(
+                matches!(
+                    notification_from_message(&data),
+                    Notification::Unsupported { data: ref octets, .. } if *octets == data
+                ),
+                "{data:?}"
+            );
+        }
     }
 }

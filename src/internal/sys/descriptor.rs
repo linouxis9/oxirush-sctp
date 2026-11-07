@@ -12,16 +12,10 @@ pub(crate) fn sctp_peeloff_internal(
     fd: BorrowedFd<'_>,
     assoc_id: AssociationId,
 ) -> std::io::Result<OwnedFd> {
-    tracing::debug!("Peeling off socket for Association ID: {assoc_id:?}");
-
     use crate::types::internal::{PeeloffArg, PeeloffFlagsArg};
 
     // The peeled off socket is non-blocking, and closed on `exec`.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
     let flags = (libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC) as libc::c_uint;
-
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    let flags = 0;
 
     let mut peeloff_arg = PeeloffFlagsArg {
         p_arg: PeeloffArg::from_assoc_id(assoc_id),
@@ -43,14 +37,10 @@ pub(crate) fn sctp_peeloff_internal(
         );
         if result < 0 {
             let error = std::io::Error::last_os_error();
-            tracing::debug!("Error: {error} during `sctp_peeloff` using `getsockopt`.");
             Err(error)
         } else {
             // Safety: the kernel returned a new descriptor, which nothing else owns.
             let fd = OwnedFd::from_raw_fd(peeloff_arg.p_arg.sd);
-
-            #[cfg(not(any(target_os = "linux", target_os = "android")))]
-            set_fd_non_blocking_cloexec(fd.as_raw_fd())?;
 
             Ok(fd)
         }
@@ -62,18 +52,11 @@ pub(crate) fn sctp_socket_internal(
     assoc: crate::SocketToAssociation,
 ) -> std::io::Result<OwnedFd> {
     let socket_type = match assoc {
-        crate::SocketToAssociation::OneToOne => {
-            tracing::debug!("Creating TCP Style Socket.");
-            libc::SOCK_STREAM
-        }
-        crate::SocketToAssociation::OneToMany => {
-            tracing::debug!("Creating UDP Style Socket.");
-            libc::SOCK_SEQPACKET
-        }
+        crate::SocketToAssociation::OneToOne => libc::SOCK_STREAM,
+        crate::SocketToAssociation::OneToMany => libc::SOCK_SEQPACKET,
     };
     // The socket is non-blocking, and closed on `exec` so that child processes do not keep its
     // associations open.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
     let socket_type = socket_type | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC;
 
     unsafe {
@@ -84,9 +67,6 @@ pub(crate) fn sctp_socket_internal(
         // Safety: `socket` returned a new descriptor, which nothing else owns.
         let fd = OwnedFd::from_raw_fd(rawfd);
 
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        set_fd_non_blocking_cloexec(fd.as_raw_fd())?;
-
         Ok(fd)
     }
 }
@@ -96,7 +76,6 @@ pub(crate) fn sctp_listen_internal(fd: BorrowedFd<'_>, backlog: i32) -> std::io:
     let result = unsafe { libc::listen(fd.as_raw_fd(), backlog) };
     if result < 0 {
         let error = std::io::Error::last_os_error();
-        tracing::debug!("Error: {error} during `sctp_listen`.");
         Err(error)
     } else {
         Ok(())
@@ -115,8 +94,6 @@ pub(crate) fn initiate_connect(
     }
     super::check_addresses(fd, addrs)?;
     let mut addrs_u8: Vec<u8> = vec![];
-
-    tracing::debug!("Connecting to {addrs:?} using `getsockopt`");
 
     for addr in addrs {
         let ossockaddr: OsSocketAddr = (*addr).into();
@@ -151,7 +128,6 @@ pub(crate) fn initiate_connect(
         if result < 0 {
             let last_error = std::io::Error::last_os_error();
             if last_error.raw_os_error() != Some(libc::EINPROGRESS) {
-                tracing::debug!("Error: '{last_error}' while connecting using `getsockopt`.");
                 return Err(last_error);
             }
         }
@@ -171,7 +147,6 @@ pub(crate) fn accept_once(fd: BorrowedFd<'_>) -> std::io::Result<(OwnedFd, Socke
     let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of_val(&address) as libc::socklen_t;
     // Safety: both output buffers outlive the call and have their declared sizes.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
     let result = unsafe {
         libc::accept4(
             fd.as_raw_fd(),
@@ -180,21 +155,11 @@ pub(crate) fn accept_once(fd: BorrowedFd<'_>) -> std::io::Result<(OwnedFd, Socke
             libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
         )
     };
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    let result = unsafe {
-        libc::accept(
-            fd.as_raw_fd(),
-            &mut address as *mut _ as *mut libc::sockaddr,
-            &mut len,
-        )
-    };
     if result < 0 {
         return Err(std::io::Error::last_os_error());
     }
     // Safety: accept returned a new descriptor owned only here.
     let accepted = unsafe { OwnedFd::from_raw_fd(result) };
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    set_fd_non_blocking_cloexec(accepted.as_raw_fd())?;
     // Safety: accept initialized the address bytes indicated by len.
     let address =
         unsafe { OsSocketAddr::copy_from_raw(&address as *const _ as *const libc::sockaddr, len) }
@@ -211,7 +176,6 @@ pub(crate) fn shutdown_internal(
 ) -> std::io::Result<()> {
     use std::net::Shutdown;
 
-    tracing::debug!("Calling 'shutdown' on socket with flags: {how:?}");
     let flags = match how {
         Shutdown::Read => libc::SHUT_RD,
         Shutdown::Write => libc::SHUT_WR,
@@ -222,28 +186,6 @@ pub(crate) fn shutdown_internal(
     // the underlying systemcall will error.
     unsafe {
         let result = libc::shutdown(fd.as_raw_fd(), flags);
-        if result < 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
-fn set_fd_non_blocking_cloexec(fd: RawFd) -> std::io::Result<()> {
-    // Set Non Blocking
-    unsafe {
-        let result = libc::fcntl(fd, libc::F_GETFL, 0);
-        if result < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let flags = result | libc::O_NONBLOCK;
-        let result = libc::fcntl(fd, libc::F_SETFL, flags);
-        if result < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let result = libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
         if result < 0 {
             Err(std::io::Error::last_os_error())
         } else {

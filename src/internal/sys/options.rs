@@ -193,7 +193,6 @@ pub(crate) fn sctp_setup_init_params_internal(
     fd: BorrowedFd<'_>,
     params: InitParams,
 ) -> std::io::Result<()> {
-    tracing::debug!("Setting up `init_params` using `setsockopt`");
     let init_params = InitMsg {
         ostreams: params.outbound_streams,
         istreams: params.inbound_streams,
@@ -232,8 +231,6 @@ pub(crate) fn set_fragment_interleave_internal(
 }
 
 pub(crate) fn request_rcvinfo_internal(fd: BorrowedFd<'_>, on: bool) -> std::io::Result<()> {
-    tracing::debug!("Requesting `rcv_info` along with received data on the socket.");
-
     let enable: libc::socklen_t = u32::from(on);
     let enable_size = std::mem::size_of::<libc::socklen_t>();
 
@@ -255,8 +252,6 @@ pub(crate) fn request_rcvinfo_internal(fd: BorrowedFd<'_>, on: bool) -> std::io:
 }
 
 pub(crate) fn request_nxtinfo_internal(fd: BorrowedFd<'_>, on: bool) -> std::io::Result<()> {
-    tracing::debug!("Requesting `nxt_info` along with received data on the socket.");
-
     let enable: libc::socklen_t = u32::from(on);
     let enable_size = std::mem::size_of::<libc::socklen_t>();
 
@@ -278,7 +273,6 @@ pub(crate) fn request_nxtinfo_internal(fd: BorrowedFd<'_>, on: bool) -> std::io:
 }
 
 pub(crate) fn sctp_set_nodelay_internal(fd: BorrowedFd<'_>, nodelay: bool) -> std::io::Result<()> {
-    tracing::debug!("Setting `SCTP_NODELAY` to {nodelay}.");
     setsockopt_internal(fd, SOL_SCTP, SCTP_NODELAY, &libc::c_int::from(nodelay))
 }
 
@@ -292,7 +286,6 @@ pub(crate) fn set_linger_internal(
     fd: BorrowedFd<'_>,
     linger: Option<std::time::Duration>,
 ) -> std::io::Result<()> {
-    tracing::debug!("Setting `SO_LINGER` to {linger:?}.");
     if linger.is_some_and(|duration| !duration.is_zero()) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -310,7 +303,6 @@ pub(crate) fn sctp_set_rto_info_internal(
     fd: BorrowedFd<'_>,
     rto_info: RtoInfo,
 ) -> std::io::Result<()> {
-    tracing::debug!("Setting `SCTP_RTOINFO` to {rto_info:?}.");
     let wire = RtoInfoWire {
         assoc_id: rto_info.assoc_id,
         initial: rto_info.initial,
@@ -503,7 +495,6 @@ pub(crate) fn buffer_size_internal(
 }
 
 pub(crate) fn set_reuseaddr_internal(fd: BorrowedFd<'_>, reuseaddr: bool) -> std::io::Result<()> {
-    tracing::debug!("Setting `SO_REUSEADDR` to {reuseaddr}.");
     setsockopt_internal(
         fd,
         libc::SOL_SOCKET,
@@ -601,8 +592,6 @@ pub(crate) fn sctp_get_status_internal(
     fd: BorrowedFd<'_>,
     assoc_id: AssociationId,
 ) -> std::io::Result<ConnStatus> {
-    tracing::debug!("Calling `sctp_get_status_internal`.");
-
     // Safety: `ConnStatusInternal` holds integers only, so any bytes are a valid value.
     let sctp_status = unsafe {
         let mut sctp_status = std::mem::MaybeUninit::<ConnStatusInternal>::zeroed().assume_init();

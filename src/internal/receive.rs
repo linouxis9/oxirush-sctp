@@ -177,11 +177,6 @@ impl Partials {
             self.dropping.remove(0);
         }
         self.dropping.push(assoc_id);
-        tracing::warn!(
-            "Aborting association {assoc_id}: the endpoint held {held} octets of messages in \
-             assembly, past its limit of {}, {octets} of them of its message.",
-            self.max_assembly
-        );
         Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
@@ -355,22 +350,11 @@ fn assemble(
         message.payload.truncate(start + piece.len);
 
         if piece.len == 0 && !piece.notification {
-            if message.received > 0 {
-                tracing::warn!(
-                    "End of stream after {} octets of a message.",
-                    message.received
-                );
-            }
-            tracing::debug!("Received end of stream.");
             return Ok(None);
         }
 
         let continued = message.received > 0;
         if continued && !continues(&message, &piece, one_association) {
-            tracing::warn!(
-                "Dropping {} octets of a message whose delivery was aborted.",
-                message.received
-            );
             message.payload.drain(..start);
             message.received = 0;
         }
@@ -423,12 +407,10 @@ fn finish(
         ));
     }
     if message.notification {
-        tracing::debug!("Received Notification.");
         return Ok(Some(NotificationOrData::Notification(
             notification_from_message(&message.payload),
         )));
     }
-    tracing::debug!("Received Data.");
     // The buffer had room for the largest read, 4 KiB at least, which a
     // program that keeps many short messages would pay for each
     message.payload.shrink_to_fit();
@@ -477,7 +459,6 @@ fn push(
     one_association: bool,
 ) -> std::io::Result<Option<Option<NotificationOrData>>> {
     if piece.len == 0 && !piece.notification {
-        tracing::debug!("Received end of stream.");
         partials.clear();
         return Ok(Some(None));
     }
@@ -486,14 +467,8 @@ fn push(
     }
     let message = match partials.take(piece) {
         Some(message) if continues(&message, piece, one_association) => Some(message),
-        Some(message) => {
-            tracing::warn!(
-                "Dropping {} octets of a message whose delivery was aborted.",
-                message.received
-            );
-            None
-        }
-        None => None,
+        // A message whose delivery was aborted is dropped.
+        _ => None,
     };
     let Some(mut message) = message else {
         return match begin(octets, piece, max_message_size)? {
@@ -587,7 +562,6 @@ fn first_read(
 fn begin(octets: &[u8], piece: &Piece, max_message_size: usize) -> std::io::Result<First> {
     {
         if piece.len == 0 && !piece.notification {
-            tracing::debug!("Received end of stream.");
             return Ok(First::Whole(None));
         }
         let limit = if piece.notification {
@@ -613,12 +587,10 @@ fn begin(octets: &[u8], piece: &Piece, max_message_size: usize) -> std::io::Resu
             ));
         }
         if piece.notification {
-            tracing::debug!("Received Notification.");
             return Ok(First::Whole(Some(NotificationOrData::Notification(
                 notification_from_message(octets),
             ))));
         }
-        tracing::debug!("Received Data.");
         Ok(First::Whole(Some(NotificationOrData::Data(ReceivedData {
             payload: octets.to_vec(),
             from: piece.from,
@@ -1454,47 +1426,34 @@ mod tests {
         assert!(!printed.contains("payload"), "{printed}");
     }
 
-    /// The end of the stream in the middle of a message is a warning, which says how much of
-    /// the message it cut; at the beginning of one it is none.
+    /// The end of the stream ends a message that it cuts, and one that has no part yet.
     #[test]
-    fn the_end_of_the_stream_in_a_message_is_a_warning() {
-        let ((), events) = crate::logged::logged(|| {
-            let read = reader(vec![data(b"partial", false, None), data(b"", false, None)]);
-            assert_eq!(
-                receive_message(&mut Partials::default(), 100, false, read).unwrap(),
-                None
-            );
-        });
+    fn the_end_of_the_stream_ends_a_message() {
+        let read = reader(vec![data(b"partial", false, None), data(b"", false, None)]);
         assert_eq!(
-            crate::logged::warnings(&events),
-            ["End of stream after 7 octets of a message."]
+            receive_message(&mut Partials::default(), 100, false, read).unwrap(),
+            None
         );
-        let ((), events) = crate::logged::logged(|| {
-            let mut partials = Partials::default();
-            partials.begin(PartialMessage::default());
-            let read = reader(vec![data(b"", false, None)]);
-            assert_eq!(
-                receive_message(&mut partials, 100, false, read).unwrap(),
-                None
-            );
-        });
-        assert_eq!(crate::logged::warnings(&events), Vec::<&str>::new());
+        let mut partials = Partials::default();
+        partials.begin(PartialMessage::default());
+        let read = reader(vec![data(b"", false, None)]);
+        assert_eq!(
+            receive_message(&mut partials, 100, false, read).unwrap(),
+            None
+        );
     }
 
     /// A message of which nothing was received is begun by the next part, from whatever
-    /// address, without the warning of a message whose delivery was given up.
+    /// address.
     #[test]
-    fn a_message_of_no_octets_is_begun_without_a_warning() {
-        let ((), events) = crate::logged::logged(|| {
-            let mut partials = Partials::default();
-            partials.begin(PartialMessage::default());
-            let mut piece = data(b"whole", true, of(7));
-            if let Step::Piece(_, piece) = &mut piece {
-                piece.from = Some("192.0.2.1:38412".parse().unwrap());
-            }
-            let received = receive_message(&mut partials, 100, false, reader(vec![piece]));
-            assert_eq!(payload(received.unwrap()), b"whole");
-        });
-        assert_eq!(crate::logged::warnings(&events), Vec::<&str>::new());
+    fn a_message_of_no_octets_is_begun_by_the_next_part() {
+        let mut partials = Partials::default();
+        partials.begin(PartialMessage::default());
+        let mut piece = data(b"whole", true, of(7));
+        if let Step::Piece(_, piece) = &mut piece {
+            piece.from = Some("192.0.2.1:38412".parse().unwrap());
+        }
+        let received = receive_message(&mut partials, 100, false, reader(vec![piece]));
+        assert_eq!(payload(received.unwrap()), b"whole");
     }
 }

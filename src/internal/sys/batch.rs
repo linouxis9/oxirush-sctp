@@ -3,7 +3,6 @@ use super::message::ancillary_info;
 use crate::SendOptions;
 use crate::consts::MSG_NOTIFICATION;
 use crate::internal::receive::Piece;
-use crate::types::CmsgType;
 use crate::types::internal::SndInfoWire;
 use os_socketaddr::OsSocketAddr;
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -86,7 +85,7 @@ fn send_from(
         unsafe {
             let mut header: libc::cmsghdr = std::mem::zeroed();
             header.cmsg_level = libc::IPPROTO_SCTP;
-            header.cmsg_type = CmsgType::SndInfo as i32;
+            header.cmsg_type = crate::consts::SCTP_SNDINFO;
             header.cmsg_len = length as _;
             std::ptr::write(control.bytes.as_mut_ptr().cast::<libc::cmsghdr>(), header);
             // The payload protocol identifier goes in network byte order
@@ -240,10 +239,7 @@ pub(crate) fn sctp_recvmmsg_once(
         // `msg_controllen` is not a `usize` on every target.
         #[allow(clippy::unnecessary_cast)]
         let control_len = (message.msg_controllen as usize).min(256);
-        let (rcv_info, nxt_info) = ancillary_info(
-            &slots.controls[index].bytes[..control_len],
-            message.msg_flags,
-        );
+        let (rcv_info, nxt_info) = ancillary_info(&slots.controls[index].bytes[..control_len]);
         // Safety: the kernel wrote `msg_namelen` octets of an address into the storage, which
         // has room for every address.
         let from = unsafe {

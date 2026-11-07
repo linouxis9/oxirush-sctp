@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Constants used by lower level `libc` APIs
 //!
 //! These constants come from `linux/sctp.h`
@@ -8,7 +7,6 @@ pub(crate) static SCTP_SOCKOPT_BINDX_ADD: libc::c_int = 100;
 pub(crate) static SCTP_SOCKOPT_BINDX_REM: libc::c_int = 101;
 
 // peel off a one to many socket
-pub(crate) static SCTP_SOCKOPT_PEELOFF: libc::c_int = 102;
 pub(crate) static SCTP_SOCKOPT_PEELOFF_FLAGS: libc::c_int = 122;
 
 // get peer/localaddrs
@@ -16,7 +14,6 @@ pub(crate) static SCTP_GET_PEER_ADDRS: libc::c_int = 108;
 pub(crate) static SCTP_GET_LOCAL_ADDRS: libc::c_int = 109;
 
 // To connect to an SCTP server.
-pub(crate) static SCTP_SOCKOPT_CONNECTX: libc::c_int = 110;
 pub(crate) static SCTP_SOCKOPT_CONNECTX3: libc::c_int = 111;
 
 // To subscribe to SCTP Events
@@ -24,10 +21,6 @@ pub(crate) static SCTP_EVENT: libc::c_int = 127;
 
 //
 pub(crate) static MSG_NOTIFICATION: u32 = 0x8000;
-
-// Notification Types Constants
-pub(crate) const SCTP_ASSOC_CHANGE: u16 = (1 << 15) + 0x0001;
-pub(crate) const SCTP_SHUTDOWN: u16 = (1 << 15) + 0x0005;
 
 // Retransmission timeout parameters
 pub(crate) const SCTP_RTOINFO: libc::c_int = 0;
@@ -37,6 +30,12 @@ pub(crate) const SCTP_INITMSG: libc::c_int = 2;
 
 // Disable Nagle-like bundling delays
 pub(crate) const SCTP_NODELAY: libc::c_int = 3;
+
+// The types of the control messages (`enum sctp_cmsg_type`) that the crate
+// sends and reads
+pub(crate) const SCTP_SNDINFO: libc::c_int = 2;
+pub(crate) const SCTP_RCVINFO: libc::c_int = 3;
+pub(crate) const SCTP_NXTINFO: libc::c_int = 4;
 
 // Receving RCVINFO and NXTINFO
 pub(crate) const SCTP_RECVRCVINFO: libc::c_int = 32;

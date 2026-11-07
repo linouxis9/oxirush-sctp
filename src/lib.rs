@@ -72,8 +72,8 @@
 //!   panic without it.
 //! - Rust 1.88 or later.
 //!
-//! The crate makes the system calls itself, without `libsctp`. Diagnostics go
-//! through [`tracing`](https://crates.io/crates/tracing).
+//! The crate makes the system calls itself, without `libsctp`, and reports
+//! through its errors and notifications: it logs nothing.
 //!
 //! # Socket types
 //!
@@ -344,9 +344,6 @@ pub mod fuzzing {
 }
 
 mod consts;
-
-#[cfg(test)]
-mod logged;
 
 mod types;
 

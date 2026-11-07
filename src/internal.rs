@@ -451,14 +451,13 @@ impl SocketCore {
                 assoc_id,
                 ..Default::default()
             };
-            if let Err(error) = sys::sctp_sendmsg_once(
+            // An association that cannot be aborted is past saving: nothing more to do.
+            let _ = sys::sctp_sendmsg_once(
                 fd,
                 None,
                 b"messages in assembly past the limit",
                 Some(&info),
-            ) {
-                tracing::warn!("Could not abort association {assoc_id}: {error}");
-            }
+            );
         }
     }
 

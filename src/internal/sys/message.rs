@@ -1,7 +1,6 @@
 //! Individual message syscalls and their initialized ancillary buffers.
 use crate::consts::MSG_NOTIFICATION;
 use crate::internal::receive::Piece;
-use crate::types::CmsgType;
 use crate::types::internal::{NxtInfoWire, RcvInfoWire, SndInfoWire};
 use crate::{NxtInfo, RcvInfo, SendInfo};
 use os_socketaddr::OsSocketAddr;
@@ -39,8 +38,7 @@ pub(crate) fn sctp_recvmsg_once(fd: BorrowedFd<'_>, buffer: &mut [u8]) -> std::i
             return Err(std::io::Error::last_os_error());
         }
         let control_len = (recvmsg_header.msg_controllen as usize).min(msg_control.bytes.len());
-        let (rcv_info, nxt_info) =
-            ancillary_info(&msg_control.bytes[..control_len], recvmsg_header.msg_flags);
+        let (rcv_info, nxt_info) = ancillary_info(&msg_control.bytes[..control_len]);
         let from = OsSocketAddr::copy_from_raw(
             std::ptr::addr_of!(from) as *const libc::sockaddr,
             recvmsg_header.msg_namelen,
@@ -57,14 +55,7 @@ pub(crate) fn sctp_recvmsg_once(fd: BorrowedFd<'_>, buffer: &mut [u8]) -> std::i
     }
 }
 
-pub(crate) fn ancillary_info(
-    mut control: &[u8],
-    flags: libc::c_int,
-) -> (Option<RcvInfo>, Option<NxtInfo>) {
-    if flags & libc::MSG_CTRUNC != 0 {
-        tracing::warn!("Control messages truncated, `RcvInfo` or `NxtInfo` may be missing.");
-    }
-
+pub(crate) fn ancillary_info(mut control: &[u8]) -> (Option<RcvInfo>, Option<NxtInfo>) {
     let mut rcv_info = None;
     let mut nxt_info = None;
     // Native headers contain integers only. Reading them unaligned after validating their
@@ -79,7 +70,7 @@ pub(crate) fn ancillary_info(
         }
         let data = &control[header_len..len];
         if header.cmsg_level == libc::IPPROTO_SCTP
-            && header.cmsg_type == CmsgType::RcvInfo as i32
+            && header.cmsg_type == crate::consts::SCTP_RCVINFO
             && data.len() >= std::mem::size_of::<RcvInfoWire>()
         {
             // Safety: the structure consists of integers, and its complete native layout is
@@ -87,7 +78,7 @@ pub(crate) fn ancillary_info(
             let wire = unsafe { std::ptr::read_unaligned(data.as_ptr().cast::<RcvInfoWire>()) };
             rcv_info = Some(RcvInfo::from(wire));
         } else if header.cmsg_level == libc::IPPROTO_SCTP
-            && header.cmsg_type == CmsgType::NxtInfo as i32
+            && header.cmsg_type == crate::consts::SCTP_NXTINFO
             && data.len() >= std::mem::size_of::<NxtInfoWire>()
         {
             // Safety: the structure consists of integers, and its complete native layout is
@@ -159,7 +150,7 @@ pub(crate) fn sctp_sendmsg_once(
         let cmsg_hdr = libc::CMSG_FIRSTHDR(&sendmsg_header);
         if !cmsg_hdr.is_null() {
             (*cmsg_hdr).cmsg_level = libc::IPPROTO_SCTP;
-            (*cmsg_hdr).cmsg_type = CmsgType::SndInfo as i32;
+            (*cmsg_hdr).cmsg_type = crate::consts::SCTP_SNDINFO;
             (*cmsg_hdr).cmsg_len =
                 libc::CMSG_LEN(std::mem::size_of::<SndInfoWire>().try_into().unwrap())
                     .try_into()
@@ -175,11 +166,7 @@ pub(crate) fn sctp_sendmsg_once(
         }
 
         // Report a closed association as `EPIPE` without raising `SIGPIPE`.
-        #[cfg(any(target_os = "linux", target_os = "android"))]
         let flags = libc::MSG_NOSIGNAL;
-
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        let flags = 0 as libc::c_int;
 
         let result = libc::sendmsg(
             fd.as_raw_fd(),
@@ -301,23 +288,20 @@ mod tests {
         bytes.extend(cmsg(libc::SOL_SOCKET, 999, &[1, 2, 3]));
         bytes.extend(cmsg(
             libc::IPPROTO_SCTP,
-            CmsgType::RcvInfo as _,
+            crate::consts::SCTP_RCVINFO,
             &rcv_bytes(&rcv),
         ));
         bytes.extend(cmsg(libc::IPPROTO_SCTP, 999, &[4]));
         bytes.extend(cmsg(
             libc::IPPROTO_SCTP,
-            CmsgType::NxtInfo as _,
+            crate::consts::SCTP_NXTINFO,
             &nxt_bytes(&nxt),
         ));
         assert_eq!(
-            ancillary_info(&bytes[1..], 0),
+            ancillary_info(&bytes[1..]),
             (Some(rcv.clone()), Some(nxt.clone()))
         );
-        assert_eq!(
-            ancillary_info(&bytes[1..], libc::MSG_CTRUNC),
-            (Some(rcv), Some(nxt))
-        );
+        assert_eq!(ancillary_info(&bytes[1..]), (Some(rcv), Some(nxt)));
     }
 
     #[test]
@@ -326,9 +310,13 @@ mod tests {
             assoc_id: 7,
             ..Default::default()
         };
-        let valid = cmsg(libc::IPPROTO_SCTP, CmsgType::RcvInfo as _, &rcv_bytes(&rcv));
+        let valid = cmsg(
+            libc::IPPROTO_SCTP,
+            crate::consts::SCTP_RCVINFO,
+            &rcv_bytes(&rcv),
+        );
         for len in 0..valid.len() {
-            let parsed = ancillary_info(&valid[..len], 0);
+            let parsed = ancillary_info(&valid[..len]);
             let required =
                 unsafe { libc::CMSG_LEN(std::mem::size_of::<RcvInfoWire>() as u32) as usize };
             assert_eq!(
@@ -349,11 +337,11 @@ mod tests {
             unsafe {
                 std::ptr::write_unaligned(invalid.as_mut_ptr().cast::<libc::cmsghdr>(), header);
             }
-            assert_eq!(ancillary_info(&invalid, 0), (None, None));
+            assert_eq!(ancillary_info(&invalid), (None, None));
         }
-        let mut bytes = cmsg(libc::IPPROTO_SCTP, CmsgType::RcvInfo as _, &[0; 3]);
+        let mut bytes = cmsg(libc::IPPROTO_SCTP, crate::consts::SCTP_RCVINFO, &[0; 3]);
         bytes.extend(valid);
-        assert_eq!(ancillary_info(&bytes, 0), (Some(rcv), None));
+        assert_eq!(ancillary_info(&bytes), (Some(rcv), None));
     }
 
     /// A control message of a header alone is skipped, and so is one of another level or
@@ -368,36 +356,27 @@ mod tests {
             assoc_id: 8,
             ..Default::default()
         };
-        let mut bytes = cmsg(libc::IPPROTO_SCTP, CmsgType::RcvInfo as _, &[]);
+        let mut bytes = cmsg(libc::IPPROTO_SCTP, crate::consts::SCTP_RCVINFO, &[]);
         bytes.extend(cmsg(libc::SOL_SOCKET, 1, &[0x5a; 40]));
         bytes.extend(cmsg(libc::IPPROTO_SCTP, 999, &[0x5a; 40]));
-        assert_eq!(ancillary_info(&bytes, 0), (None, None));
+        assert_eq!(ancillary_info(&bytes), (None, None));
         bytes.extend(cmsg(
             libc::IPPROTO_SCTP,
-            CmsgType::RcvInfo as _,
+            crate::consts::SCTP_RCVINFO,
             &rcv_bytes(&rcv),
         ));
         bytes.extend(cmsg(
             libc::IPPROTO_SCTP,
-            CmsgType::NxtInfo as _,
+            crate::consts::SCTP_NXTINFO,
             &nxt_bytes(&nxt),
         ));
-        assert_eq!(ancillary_info(&bytes, 0), (Some(rcv), Some(nxt)));
+        assert_eq!(ancillary_info(&bytes), (Some(rcv), Some(nxt)));
     }
 
-    /// Control messages that the kernel truncated are a warning, and those that it did not are
-    /// none.
+    /// Control messages that the kernel truncated give what they have.
     #[test]
-    fn truncated_control_messages_are_a_warning() {
-        use crate::logged::{logged, warnings};
-        let (parsed, events) = logged(|| ancillary_info(&[], libc::MSG_CTRUNC));
-        assert_eq!(parsed, (None, None));
-        assert_eq!(
-            warnings(&events),
-            ["Control messages truncated, `RcvInfo` or `NxtInfo` may be missing."]
-        );
-        let (_, events) = logged(|| ancillary_info(&[], libc::MSG_EOR));
-        assert_eq!(warnings(&events), Vec::<&str>::new());
+    fn truncated_control_messages_give_what_they_have() {
+        assert_eq!(ancillary_info(&[]), (None, None));
     }
 
     #[test]

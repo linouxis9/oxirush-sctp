@@ -1048,21 +1048,6 @@ impl AssocChangeState {
     }
 }
 
-/// Constants related to `enum sctp_cmsg_type`
-#[repr(i32)]
-#[allow(dead_code)]
-pub(crate) enum CmsgType {
-    Init = 0,
-    SndRcv,
-    SndInfo,
-    RcvInfo,
-    NxtInfo,
-    PrInfo,
-    AuthInfo,
-    DstAddrV4,
-    DstAddrV6,
-}
-
 /// State of an association (`enum sctp_sstat_state`, RFC 9260 Section 4).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]

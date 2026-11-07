@@ -9,9 +9,8 @@ pub fn notification(octets: &[u8]) -> Notification {
 }
 
 /// The receive information of any control messages.
-pub fn ancillary(control: &[u8], truncated: bool) -> (Option<RcvInfo>, Option<NxtInfo>) {
-    let flags = if truncated { libc::MSG_CTRUNC } else { 0 };
-    sys::ancillary_info(control, flags)
+pub fn ancillary(control: &[u8]) -> (Option<RcvInfo>, Option<NxtInfo>) {
+    sys::ancillary_info(control)
 }
 
 /// Assembles messages from the parts that `script` describes, as `recv` does from what

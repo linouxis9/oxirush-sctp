@@ -63,7 +63,7 @@ tokio = { version = "1", features = ["macros", "rt"] }
 
 The crate has no Cargo feature. It needs Linux 5.0 or later with SCTP,
 which `sudo modprobe sctp` loads, and a Tokio runtime with the I/O driver.
-Its diagnostics go through [`tracing`](https://crates.io/crates/tracing).
+It reports through its errors and notifications, and logs nothing.
 
 The minimum supported Rust version is 1.88.
 
