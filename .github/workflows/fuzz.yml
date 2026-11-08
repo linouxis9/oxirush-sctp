@@ -130,6 +130,7 @@ jobs:
           - { target: notification, max_len: 512 }
           - { target: ancillary, max_len: 512 }
           - { target: receive, max_len: 512 }
+          - { target: addresses, max_len: 512 }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

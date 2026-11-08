@@ -3,6 +3,7 @@ use super::receive::{Piece, receive_message};
 use super::{notifications, sys};
 use crate::types::internal::RcvInfoWire;
 use crate::{Notification, NotificationOrData};
+use std::net::SocketAddr;
 
 /// A notification of any octets.
 pub fn notification(octets: &[u8]) -> Notification {
@@ -12,6 +13,15 @@ pub fn notification(octets: &[u8]) -> Notification {
 /// The receive information of any control messages, as `Debug` prints it.
 pub fn ancillary(control: &[u8]) -> String {
     format!("{:?}", sys::ancillary_info(control))
+}
+
+/// The addresses of a `struct sctp_getaddrs` of any octets, as `getpaddrs` and
+/// `getladdrs` read what the kernel returns, and the addresses read, packed again as
+/// `bindx` packs them.
+pub fn addresses(returned: &[u8]) -> (std::io::Result<Vec<SocketAddr>>, Option<Vec<u8>>) {
+    let read = sys::unpacked(returned);
+    let again = read.as_ref().ok().map(|addrs| sys::packed(addrs));
+    (read, again)
 }
 
 /// Assembles messages from the parts that `script` describes, as `recv` does from what

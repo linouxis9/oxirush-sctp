@@ -529,9 +529,9 @@ sudo modprobe sctp
 cargo test
 ```
 
-The tests open associations over the loopback interface. CI runs three
-`cargo fuzz` targets for a minute each: what the kernel hands over is read
-without a panic. Each Rust block of this page is checked with what it prints
+The tests open associations over the loopback interface. CI runs four
+`cargo fuzz` targets for a minute each, and an hour each night: what the
+kernel hands over is read without a panic and within its octets. Each Rust block of this page is checked with what it prints
 ([`readme/`](readme/build.rs) says how).
 
 [The documentation](https://docs.rs/oxirush-sctp) has the terms, the

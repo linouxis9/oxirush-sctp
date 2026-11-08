@@ -35,3 +35,10 @@ path = "fuzz_targets/receive.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "addresses"
+path = "fuzz_targets/addresses.rs"
+test = false
+doc = false
+bench = false
