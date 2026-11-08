@@ -530,7 +530,7 @@ cargo test
 ```
 
 The tests open associations over the loopback interface. CI runs four
-`cargo fuzz` targets for a minute each, and an hour each night: what the
+`cargo fuzz` targets for a minute each, and an hour each day: what the
 kernel hands over is read without a panic and within its octets. Each Rust block of this page is checked with what it prints
 ([`readme/`](readme/build.rs) says how).
 
