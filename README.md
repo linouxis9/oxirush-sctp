@@ -57,7 +57,7 @@ Each example is followed by its output.
 
 ```toml
 [dependencies]
-oxirush-sctp = "0.1"
+oxirush-sctp = "0.2"
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
@@ -403,8 +403,8 @@ peer: "pong"
 ```
 
 `connect` starts an association without waiting for it, `send_to` sends to
-an address, and `peeloff` moves one association to a `ConnectedSocket` of
-its own.
+an address, `shutdown` and `abort` end one association, and `peeloff` moves
+one to a `ConnectedSocket` of its own.
 
 ## Many messages a call
 

@@ -1,6 +1,6 @@
 [package]
 name = "oxirush-sctp"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Async SCTP for Tokio on the Linux kernel stack (RFC 6458): one-to-one and one-to-many sockets, multihoming, notifications, and batched sends and receives."

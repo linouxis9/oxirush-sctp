@@ -78,7 +78,10 @@
 //! On a one-to-many socket, `connect` starts an association without waiting
 //! for it: subscribe to `Event::Association` to learn whether it came up.
 //! `send_to` sends to an address, and starts an association if there is none.
-//! `peeloff` moves one association to a [`ConnectedSocket`] of its own.
+//! `shutdown` and `abort` end one association, and `peeloff` moves one to a
+//! [`ConnectedSocket`] of its own. The parts of a message come one after the
+//! other: while a long message of one association comes in parts, the
+//! messages of the others wait.
 //!
 //! `bindx` binds several local addresses and `connectx` gives several
 //! addresses of the peer. The addresses of one call share a port, which the
