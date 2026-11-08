@@ -149,8 +149,9 @@ pub(super) fn receive_message(
             return Ok(None);
         }
 
-        let continued = message.received > 0;
-        if continued && !continues(&message, &piece) {
+        // What does not continue the message begins another: a message of no octets has
+        // nothing to drop
+        if !continues(&message, &piece) {
             message.payload.drain(..start);
             message.received = 0;
         }
@@ -889,6 +890,27 @@ mod tests {
             .map(|received| payload(received.unwrap()))
             .collect();
         assert_eq!(payloads, [b"whole".to_vec(), b"first last".to_vec()]);
+        assert!(partial.is_none());
+    }
+
+    /// In a batch of reads too, the end of the stream ends the message that it cuts.
+    #[test]
+    fn the_end_of_the_stream_in_a_batch_ends_a_message() {
+        let part = |octets: &'static [u8]| {
+            let piece = Piece {
+                len: octets.len(),
+                notification: false,
+                end_of_record: false,
+                info: RcvInfoWire::default(),
+                from: None,
+            };
+            (octets, piece)
+        };
+        let pieces = [part(b"partial"), part(b"")];
+        let (mut partial, mut received) = (None, Vec::new());
+        let pieces = pieces.iter().map(|(octets, piece)| (*octets, piece));
+        receive_batch(&mut partial, 100, pieces, &mut received);
+        assert!(matches!(received[..], [Ok(None)]), "{received:?}");
         assert!(partial.is_none());
     }
 

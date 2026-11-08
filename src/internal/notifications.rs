@@ -24,13 +24,14 @@ pub(crate) fn notification_from_message(data: &[u8]) -> Notification {
         data: data.to_vec(),
     };
 
-    if data.len() < 2 {
+    // A notification has its header, whose length is its own
+    let declared = data
+        .get(4..8)
+        .map(|octets| u32::from_ne_bytes(octets.try_into().unwrap()));
+    if declared.map(|length| length as usize) != Some(data.len()) {
         return unsupported();
     }
     let kind = u16_at(0);
-    if data.len() < 8 || u32_at(4) as usize != data.len() {
-        return unsupported();
-    }
 
     match kind {
         kind if kind == Event::Address as u16 && data.len() == 148 => {
