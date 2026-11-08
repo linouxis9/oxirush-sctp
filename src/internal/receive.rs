@@ -893,6 +893,31 @@ mod tests {
         assert!(partial.is_none());
     }
 
+    /// In a batch of reads too, a message of exactly the limit is whole, in parts.
+    #[test]
+    fn a_message_of_the_limit_is_whole_in_a_batch() {
+        let part = |octets: &'static [u8], end_of_record| {
+            let piece = Piece {
+                len: octets.len(),
+                notification: false,
+                end_of_record,
+                info: of(7).unwrap(),
+                from: None,
+            };
+            (octets, piece)
+        };
+        let pieces = [part(b"01234", false), part(b"56789", true)];
+        let (mut partial, mut received) = (None, Vec::new());
+        let pieces = pieces.iter().map(|(octets, piece)| (*octets, piece));
+        receive_batch(&mut partial, 10, pieces, &mut received);
+        let payloads: Vec<Vec<u8>> = received
+            .into_iter()
+            .map(|received| payload(received.unwrap()))
+            .collect();
+        assert_eq!(payloads, [b"0123456789".to_vec()]);
+        assert!(partial.is_none());
+    }
+
     /// In a batch of reads too, the end of the stream ends the message that it cuts.
     #[test]
     fn the_end_of_the_stream_in_a_batch_ends_a_message() {
