@@ -14,14 +14,7 @@ pub(crate) fn sctp_bindx_internal(
 ) -> std::io::Result<()> {
     check_addresses(fd, addrs)?;
 
-    let mut addrs_u8: Vec<u8> = vec![];
-
-    for addr in addrs {
-        let ossockaddr: OsSocketAddr = (*addr).into();
-        let slice = ossockaddr.as_ref();
-        addrs_u8.extend(slice);
-    }
-
+    let addrs_u8 = packed(addrs);
     let addrs_len = addrs_u8.len();
 
     let flags = match flags {
@@ -115,49 +108,65 @@ fn sctp_getaddrs_internal(
         } else {
             getaddrs_size as usize
         };
-        let returned = &addrs_buff[..returned_size.min(capacity)];
-        if returned.len() < HEADER_SIZE {
-            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
-        }
-        let addr_count = u32::from_ne_bytes(returned[4..8].try_into().unwrap());
-
-        // Now for each of the 'addresses', we get the family and then interpret each of the
-        // addresses accordingly, checking that it is within what the kernel returned.
-        let mut peeraddrs = vec![];
-        let mut offset = HEADER_SIZE;
-        for _ in 0..addr_count {
-            let rest = &returned[offset..];
-            if rest.len() < std::mem::size_of::<libc::sockaddr>() {
-                return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
-            }
-            // Safety: `rest` holds at least a `sockaddr`, read without alignment requirement.
-            let sa_family =
-                unsafe { std::ptr::read_unaligned(rest.as_ptr() as *const libc::sockaddr) }
-                    .sa_family;
-            let len = match sa_family as i32 {
-                libc::AF_INET => std::mem::size_of::<libc::sockaddr_in>(),
-                libc::AF_INET6 => std::mem::size_of::<libc::sockaddr_in6>(),
-                // Unsupported Family - should never come here.
-                _ => return Err(std::io::Error::from_raw_os_error(libc::EINVAL)),
-            };
-            if rest.len() < len {
-                return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
-            }
-            // Safety: `rest` holds `len` octets, which `copy_from_raw` copies.
-            let os_socketaddr = unsafe {
-                OsSocketAddr::copy_from_raw(
-                    rest.as_ptr() as *const libc::sockaddr,
-                    len as libc::socklen_t,
-                )
-            };
-            let socketaddr = os_socketaddr
-                .into_addr()
-                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
-            peeraddrs.push(socketaddr);
-            offset += len;
-        }
-        return Ok(peeraddrs);
+        return unpacked(&addrs_buff[..returned_size.min(capacity)]);
     }
+}
+
+/// The addresses of `addrs`, packed one after the other as native socket addresses, as
+/// `sctp_bindx` takes them.
+pub(crate) fn packed(addrs: &[SocketAddr]) -> Vec<u8> {
+    let mut packed = vec![];
+    for addr in addrs {
+        let ossockaddr: OsSocketAddr = (*addr).into();
+        packed.extend(ossockaddr.as_ref());
+    }
+    packed
+}
+
+/// The addresses of a `struct sctp_getaddrs` that the kernel returned: the association
+/// ID, the number of addresses and the packed addresses, each of a family that says its
+/// length and within what was returned.
+pub(crate) fn unpacked(returned: &[u8]) -> std::io::Result<Vec<SocketAddr>> {
+    const HEADER_SIZE: usize = 8;
+    let invalid = || std::io::Error::from_raw_os_error(libc::EINVAL);
+    if returned.len() < HEADER_SIZE {
+        return Err(invalid());
+    }
+    let addr_count = u32::from_ne_bytes(returned[4..8].try_into().unwrap());
+
+    // Now for each of the 'addresses', we get the family and then interpret each of the
+    // addresses accordingly, checking that it is within what the kernel returned.
+    let mut peeraddrs = vec![];
+    let mut offset = HEADER_SIZE;
+    for _ in 0..addr_count {
+        let rest = &returned[offset..];
+        if rest.len() < std::mem::size_of::<libc::sockaddr>() {
+            return Err(invalid());
+        }
+        // Safety: `rest` holds at least a `sockaddr`, read without alignment requirement.
+        let sa_family =
+            unsafe { std::ptr::read_unaligned(rest.as_ptr() as *const libc::sockaddr) }.sa_family;
+        let len = match sa_family as i32 {
+            libc::AF_INET => std::mem::size_of::<libc::sockaddr_in>(),
+            libc::AF_INET6 => std::mem::size_of::<libc::sockaddr_in6>(),
+            // Unsupported Family - should never come here.
+            _ => return Err(invalid()),
+        };
+        if rest.len() < len {
+            return Err(invalid());
+        }
+        // Safety: `rest` holds `len` octets, which `copy_from_raw` copies.
+        let os_socketaddr = unsafe {
+            OsSocketAddr::copy_from_raw(
+                rest.as_ptr() as *const libc::sockaddr,
+                len as libc::socklen_t,
+            )
+        };
+        let socketaddr = os_socketaddr.into_addr().ok_or_else(invalid)?;
+        peeraddrs.push(socketaddr);
+        offset += len;
+    }
+    Ok(peeraddrs)
 }
 
 // What Linux refuses of the addresses of one call with a bare `EINVAL`, said in words: an
