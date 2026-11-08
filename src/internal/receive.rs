@@ -725,8 +725,12 @@ mod tests {
                 received: limit,
                 ..Default::default()
             });
+            let mut reads = 0;
             assert_eq!(
                 receive_message(&mut partial, limit, |buffer| {
+                    // A read that would block ends the call
+                    reads += 1;
+                    assert_eq!(reads, 1, "a read that would block is tried again");
                     super::super::sys::sctp_recvmsg_once(socket.as_fd(), buffer)
                 })
                 .unwrap_err()
@@ -806,6 +810,17 @@ mod tests {
         ]);
         let received = receive_message(&mut None, 100, read).unwrap();
         assert_eq!(payload(received), b"whole");
+    }
+
+    /// A first read that fails otherwise, as one that would block, is that error, and is not
+    /// tried again.
+    #[test]
+    fn a_first_read_that_would_block_is_that_error() {
+        let mut partial = None;
+        let read = reader(vec![Step::Error(std::io::ErrorKind::WouldBlock)]);
+        let error = receive_message(&mut partial, 100, read).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(partial.is_none());
     }
 
     /// A part of another message of the association drops the message in parts, whose

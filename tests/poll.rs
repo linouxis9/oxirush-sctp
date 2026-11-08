@@ -44,7 +44,8 @@ async fn messages_go_both_ways_through_the_polls() {
     poll_fn(|cx| client.poll_send(cx, b"request", options))
         .await
         .unwrap();
-    let Some(NotificationOrData::Data(message)) = poll_fn(|cx| peer.poll_recv(cx)).await.unwrap()
+    let received = tokio::time::timeout(WAIT, poll_fn(|cx| peer.poll_recv(cx))).await;
+    let Some(NotificationOrData::Data(message)) = received.expect("the message comes").unwrap()
     else {
         panic!("not data");
     };
@@ -55,7 +56,10 @@ async fn messages_go_both_ways_through_the_polls() {
     poll_fn(|cx| peer.poll_send(cx, b"answer", options))
         .await
         .unwrap();
-    let received = poll_fn(|cx| client.poll_recv(cx)).await.unwrap();
+    let received = tokio::time::timeout(WAIT, poll_fn(|cx| client.poll_recv(cx)))
+        .await
+        .expect("the answer comes")
+        .unwrap();
     let Some(NotificationOrData::Data(answer)) = received else {
         panic!("{received:?}");
     };
@@ -190,14 +194,17 @@ async fn an_endpoint_sends_and_receives_through_the_polls() {
     poll_fn(|cx| endpoint.poll_send_to(cx, address, b"hello", options))
         .await
         .unwrap();
-    let (peer, _) = poll_fn(|cx| listener.poll_accept(cx)).await.unwrap();
-    let Some(NotificationOrData::Data(hello)) = peer.recv().await.unwrap() else {
+    let accepted = tokio::time::timeout(WAIT, poll_fn(|cx| listener.poll_accept(cx))).await;
+    let (peer, _) = accepted.expect("the association comes").unwrap();
+    let received = tokio::time::timeout(WAIT, peer.recv()).await;
+    let Some(NotificationOrData::Data(hello)) = received.expect("the message comes").unwrap()
+    else {
         panic!("not data");
     };
     assert_eq!(hello.payload, b"hello");
     peer.send(b"answer", SendOptions::new()).await.unwrap();
-    let NotificationOrData::Data(answer) = poll_fn(|cx| endpoint.poll_recv(cx)).await.unwrap()
-    else {
+    let received = tokio::time::timeout(WAIT, poll_fn(|cx| endpoint.poll_recv(cx))).await;
+    let NotificationOrData::Data(answer) = received.expect("the answer comes").unwrap() else {
         panic!("not data");
     };
     assert_eq!(answer.payload, b"answer");
@@ -206,12 +213,17 @@ async fn an_endpoint_sends_and_receives_through_the_polls() {
         .await
         .unwrap();
     peer.send(b"last", SendOptions::new()).await.unwrap();
-    let received = poll_fn(|cx| endpoint.poll_recv(cx)).await.unwrap();
+    let received = tokio::time::timeout(WAIT, poll_fn(|cx| endpoint.poll_recv(cx)))
+        .await
+        .expect("the message comes")
+        .unwrap();
     let NotificationOrData::Data(last) = received else {
         panic!("{received:?}");
     };
     assert_eq!(last.payload, b"last");
-    let Some(NotificationOrData::Data(again)) = peer.recv().await.unwrap() else {
+    let received = tokio::time::timeout(WAIT, peer.recv()).await;
+    let Some(NotificationOrData::Data(again)) = received.expect("the message comes").unwrap()
+    else {
         panic!("not data");
     };
     assert_eq!(again.payload, b"again");

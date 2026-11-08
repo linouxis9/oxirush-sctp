@@ -377,6 +377,36 @@ async fn the_reader_of_an_endpoint_passes_on_its_messages() {
     assert_eq!(next_payload(&mut reader).await, b"again");
 }
 
+/// The reader passes on several items a call, appended, in their order, and says how many.
+#[tokio::test]
+async fn the_reader_passes_on_several_items_a_call() {
+    let (client, server) = pair().await;
+    let (_writer, mut reader) = driver::spawn(server, DriverConfig::default()).unwrap();
+    for index in 0..3 {
+        client
+            .send(&numbered(index), SendOptions::new())
+            .await
+            .unwrap();
+    }
+    let mut received = Vec::new();
+    while received.len() < 3 {
+        let before = received.len();
+        let count = tokio::time::timeout(WAIT, reader.recv_many(&mut received, 64))
+            .await
+            .unwrap();
+        assert!(count > 0, "the reader ended");
+        assert_eq!(count, received.len() - before);
+    }
+    let numbers: Vec<u32> = received
+        .into_iter()
+        .map(|item| match item {
+            Ok(NotificationOrData::Data(message)) => number(&message.payload),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(numbers, [0, 1, 2]);
+}
+
 /// Once the last clone of its writer and its reader are dropped, the tasks of a driver end
 /// and let the socket go: the peer sees the end of the association.
 #[tokio::test]

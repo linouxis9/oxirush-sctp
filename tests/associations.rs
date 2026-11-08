@@ -98,7 +98,10 @@ async fn one_to_many_connected_endpoint_can_connect_another_peer() {
     let socket = Socket::new_v4(SocketToAssociation::OneToMany).unwrap();
     let client = socket.into_endpoint(2).unwrap();
     let assoc_a = client.connect(&[a.local_addrs().unwrap()[0]]).unwrap();
-    let (peer_a, _) = a.accept().await.unwrap();
+    let (peer_a, _) = tokio::time::timeout(std::time::Duration::from_secs(2), a.accept())
+        .await
+        .unwrap()
+        .unwrap();
     let assoc_b = client.connect(&[b.local_addrs().unwrap()[0]]).unwrap();
     let (peer_b, _) = tokio::time::timeout(std::time::Duration::from_secs(2), b.accept())
         .await

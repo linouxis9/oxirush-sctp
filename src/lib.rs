@@ -324,3 +324,27 @@ pub use types::{
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 struct _Readme;
+
+/// Runs the unit test `test` on a runtime of its own thread, for 5 s at most: a loop that
+/// never yields, which holds the thread and the timers of the runtime, fails the test instead
+/// of holding the run.
+#[cfg(test)]
+fn bounded<F: Future<Output = ()>>(test: impl FnOnce() -> F + Send + 'static) {
+    let (done, finished) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(test());
+        let _ = done.send(());
+    });
+    if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+        finished.recv_timeout(std::time::Duration::from_secs(5))
+    {
+        panic!("the test still runs after 5 s");
+    }
+    if let Err(panic) = thread.join() {
+        std::panic::resume_unwind(panic);
+    }
+}

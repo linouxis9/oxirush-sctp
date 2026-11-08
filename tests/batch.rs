@@ -16,6 +16,8 @@ async fn pair() -> (ConnectedSocket, ConnectedSocket) {
     let listener = socket.listen(1).unwrap();
     let client = Socket::new_v4(SocketToAssociation::OneToOne).unwrap();
     client.options().set_nodelay(true).unwrap();
+    // A batch that waits for acknowledgements makes the long tests take minutes
+    assert!(client.options().nodelay().unwrap());
     let client = client
         .connect(listener.local_addrs().unwrap()[0])
         .await
@@ -73,7 +75,9 @@ async fn a_batch_keeps_each_message_with_its_stream_and_its_order() {
         .collect();
     let mut sent = 0;
     while sent < messages.len() {
-        sent += client.send_many(&messages[sent..]).await.unwrap();
+        let count = client.send_many(&messages[sent..]).await.unwrap();
+        assert!(count > 0);
+        sent += count;
     }
     let (got, calls) = received(&server, messages.len()).await;
     // The messages of a stream come in their order.
@@ -150,7 +154,12 @@ async fn a_batch_that_fills_the_send_buffer_holds_nothing_back() {
             let mut out = Vec::new();
             match tokio::time::timeout(Duration::from_secs(2), server.recv_many(&mut out, 64)).await
             {
-                Ok(result) => got += result.unwrap(),
+                Ok(result) => {
+                    let count = result.unwrap();
+                    assert_eq!(count, out.len());
+                    assert!(count > 0, "the association ended after {got} messages");
+                    got += count;
+                }
                 Err(_) => panic!("{got} of the {sent} messages of {octets} octets came"),
             }
         }
@@ -175,7 +184,12 @@ async fn a_message_to_a_stream_that_the_association_lacks_ends_the_batch_before_
     while got < 2 {
         let mut out = Vec::new();
         match tokio::time::timeout(Duration::from_secs(2), server.recv_many(&mut out, 64)).await {
-            Ok(result) => got += result.unwrap(),
+            Ok(result) => {
+                let count = result.unwrap();
+                assert_eq!(count, out.len());
+                assert!(count > 0, "the association ended after {got} messages");
+                got += count;
+            }
             Err(_) => panic!("{got} of the 2 messages before the refused one came"),
         }
     }
@@ -202,7 +216,9 @@ async fn a_message_longer_than_a_slot_is_assembled_between_short_ones() {
     let reader = tokio::spawn(async move { received(&server, lengths.len()).await.0 });
     let mut sent = 0;
     while sent < messages.len() {
-        sent += client.send_many(&messages[sent..]).await.unwrap();
+        let count = client.send_many(&messages[sent..]).await.unwrap();
+        assert!(count > 0);
+        sent += count;
     }
     let got = reader.await.unwrap();
     let got: Vec<&[u8]> = got
@@ -218,7 +234,8 @@ async fn a_message_longer_than_a_slot_is_assembled_between_short_ones() {
 async fn recv_many_waits_for_a_first_message() {
     let (client, server) = pair().await;
     let mut out = Vec::new();
-    assert_eq!(server.recv_many(&mut out, 0).await.unwrap(), 0);
+    let none = tokio::time::timeout(WAIT, server.recv_many(&mut out, 0)).await;
+    assert_eq!(none.expect("limit 0 returns at once").unwrap(), 0);
     let waiting = tokio::time::timeout(Duration::from_millis(100), server.recv_many(&mut out, 8));
     assert!(
         waiting.await.is_err(),
@@ -253,10 +270,12 @@ async fn the_end_of_the_association_comes_after_its_last_messages() {
     client.close(WAIT).await.unwrap();
     let mut out = Vec::new();
     loop {
+        let before = out.len();
         let got = tokio::time::timeout(WAIT, server.recv_many(&mut out, 64))
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(got, out.len() - before);
         if got == 0 {
             break;
         }
@@ -296,11 +315,15 @@ async fn a_message_over_the_limit_in_a_batch_is_reported_after_the_others() {
     let mut out = Vec::new();
     let mut errors = 0;
     while out.len() < 2 {
+        let before = out.len();
         match tokio::time::timeout(WAIT, server.recv_many(&mut out, 64))
             .await
             .unwrap()
         {
-            Ok(got) => assert!(got > 0),
+            Ok(got) => {
+                assert!(got > 0);
+                assert_eq!(got, out.len() - before);
+            }
             Err(error) => {
                 assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
                 errors += 1;
@@ -308,7 +331,10 @@ async fn a_message_over_the_limit_in_a_batch_is_reported_after_the_others() {
         }
     }
     if errors == 0 {
-        let error = server.recv_many(&mut out, 64).await.unwrap_err();
+        let error = tokio::time::timeout(WAIT, server.recv_many(&mut out, 64))
+            .await
+            .expect("the error comes")
+            .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
     let payloads: Vec<&[u8]> = out
@@ -342,10 +368,12 @@ async fn an_endpoint_sends_and_receives_the_batches_of_several_associations() {
     let mut out = Vec::new();
     while associations.len() < 4 {
         out.clear();
-        tokio::time::timeout(WAIT, endpoint.recv_many(&mut out, 64))
+        let got = tokio::time::timeout(WAIT, endpoint.recv_many(&mut out, 64))
             .await
             .unwrap()
             .unwrap();
+        assert!(got > 0);
+        assert_eq!(got, out.len());
         for item in &out {
             if let NotificationOrData::Data(message) = item {
                 associations.push(message.assoc_id);
@@ -368,7 +396,9 @@ async fn an_endpoint_sends_and_receives_the_batches_of_several_associations() {
         .collect();
     let mut sent = 0;
     while sent < messages.len() {
-        sent += endpoint.send_many(&messages[sent..]).await.unwrap();
+        let count = endpoint.send_many(&messages[sent..]).await.unwrap();
+        assert!(count > 0);
+        sent += count;
     }
     for (association, client) in clients.iter().enumerate() {
         let (got, _) = received(client, 10).await;

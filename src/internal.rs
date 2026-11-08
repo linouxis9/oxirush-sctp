@@ -939,12 +939,13 @@ mod tests {
         for notification in [false, true] {
             let core = SocketCore::new(libc::AF_INET, SocketToAssociation::OneToMany).unwrap();
             let mut partial = None;
-            let mut first = true;
+            let mut reads = 0;
             let error = receive::receive_message(&mut partial, 100, |buffer| {
-                if !first {
+                reads += 1;
+                assert!(reads <= 2, "a read that would block is tried again");
+                if reads == 2 {
                     return Err(std::io::ErrorKind::WouldBlock.into());
                 }
-                first = false;
                 buffer[..7].copy_from_slice(b"partial");
                 Ok(receive::Piece {
                     len: 7,
@@ -1012,20 +1013,106 @@ mod tests {
 
     /// A message of a batch goes with `MSG_MORE` when the next is to a stream that the
     /// association has, and not when the next is to one that it lacks, which the kernel
-    /// refuses: nothing that it took is held back for that one.
+    /// refuses: nothing that it took is held back for that one. A batch that sent nothing
+    /// and tried again would loop for good: the test has a thread of its own.
+    #[test]
+    fn a_message_before_one_to_a_stream_that_the_association_lacks_is_not_held() {
+        crate::bounded(|| async {
+            let (_listener, address) = listening(SocketToAssociation::OneToOne);
+            let peer = peer_that_sent(address, b"before").await;
+            let streams = peer.status().unwrap().outstreams;
+            let messages = [
+                (&b"first"[..], crate::SendOptions::new()),
+                (b"second", crate::SendOptions::new().stream(1)),
+                (b"refused", crate::SendOptions::new().stream(streams)),
+            ];
+            let mut flags = Vec::new();
+            let sent = SocketCore::send_flagged(peer.as_fd(), &messages, &mut flags);
+            assert_eq!(sent.unwrap(), 2);
+            assert_eq!(flags, [true, false, false]);
+        });
+    }
+
+    fn does_not_block_and_closes_on_exec(fd: BorrowedFd<'_>) {
+        // Safety: `fcntl` only reads the flags of the descriptor.
+        let (descriptor, status) = unsafe {
+            (
+                libc::fcntl(fd.as_raw_fd(), libc::F_GETFD),
+                libc::fcntl(fd.as_raw_fd(), libc::F_GETFL),
+            )
+        };
+        assert!(descriptor & libc::FD_CLOEXEC != 0, "not closed on exec");
+        assert!(status & libc::O_NONBLOCK != 0, "blocking");
+    }
+
+    /// A socket of the crate does not block and is closed on `exec`, and so is one that it
+    /// accepts. The unit tests run first: the other tests hang on a socket that blocks.
+    #[test]
+    fn a_socket_and_the_one_it_accepts_do_not_block() {
+        crate::bounded(|| async {
+            let (listener, address) = listening(SocketToAssociation::OneToOne);
+            does_not_block_and_closes_on_exec(listener.as_fd());
+            let _peer = peer_that_sent(address, b"hello").await;
+            let (accepted, _) = listener.accept().await.unwrap();
+            does_not_block_and_closes_on_exec(accepted.as_fd());
+        });
+    }
+
+    /// A read says whether it gives a notification or the octets of a message, and whether
+    /// they end it: the message of the peer comes after the association change of the
+    /// beginning, if any, whole.
+    #[test]
+    fn a_read_says_what_it_gives_and_where_a_message_ends() {
+        crate::bounded(|| async {
+            let (listener, address) = listening(SocketToAssociation::OneToOne);
+            let _peer = peer_that_sent(address, b"whole").await;
+            let (accepted, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0; 1024];
+            let mut pieces: Vec<(bool, bool, Vec<u8>)> = Vec::new();
+            while pieces.last().is_none_or(|(notification, ..)| *notification) {
+                let mut guard = accepted.fd.readable().await.unwrap();
+                let read = guard.try_io(|fd| sys::sctp_recvmsg_once(fd.as_fd(), &mut buffer));
+                if let Ok(piece) = read {
+                    let piece = piece.unwrap();
+                    let octets = buffer[..piece.len].to_vec();
+                    pieces.push((piece.notification, piece.end_of_record, octets));
+                }
+            }
+            let (message, changes) = pieces.split_last().unwrap();
+            assert_eq!(message, &(false, true, b"whole".to_vec()));
+            for (_, end_of_record, octets) in changes {
+                assert!(*end_of_record);
+                let change = notifications::notification_from_message(octets);
+                assert!(
+                    matches!(change, Notification::AssociationChange(_)),
+                    "{change:?}"
+                );
+            }
+        });
+    }
+
+    /// A message is no sign of the end: it is passed on, on an endpoint and on a socket of one
+    /// association alike.
     #[tokio::test]
-    async fn a_message_before_one_to_a_stream_that_the_association_lacks_is_not_held() {
-        let (_listener, address) = listening(SocketToAssociation::OneToOne);
-        let peer = peer_that_sent(address, b"before").await;
-        let streams = peer.status().unwrap().outstreams;
-        let messages = [
-            (&b"first"[..], crate::SendOptions::new()),
-            (b"second", crate::SendOptions::new().stream(1)),
-            (b"refused", crate::SendOptions::new().stream(streams)),
-        ];
-        let mut flags = Vec::new();
-        let sent = SocketCore::send_flagged(peer.as_fd(), &messages, &mut flags);
-        assert_eq!(sent.unwrap(), 2);
-        assert_eq!(flags, [true, false, false]);
+    async fn a_message_is_passed_on() {
+        for style in [
+            SocketToAssociation::OneToMany,
+            SocketToAssociation::OneToOne,
+        ] {
+            let core = SocketCore::new(libc::AF_INET, style).unwrap();
+            let message = NotificationOrData::Data(crate::ReceivedData {
+                payload: b"message".to_vec(),
+                stream: 1,
+                ppid: 60,
+                assoc_id: 7,
+                unordered: false,
+                from: None,
+            });
+            let passed = core.note_received(Ok(Some(message.clone())));
+            assert!(
+                matches!(&passed, Some(Ok(Some(received))) if *received == message),
+                "{passed:?}"
+            );
+        }
     }
 }

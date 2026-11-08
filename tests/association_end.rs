@@ -590,7 +590,8 @@ async fn closing_or_aborting_an_association_that_the_peer_aborted() {
         .await
         .unwrap();
     client.send(b"hello", SendOptions::new()).await.unwrap();
-    let NotificationOrData::Data(message) = endpoint.recv().await.unwrap() else {
+    let received = tokio::time::timeout(Duration::from_secs(2), endpoint.recv()).await;
+    let NotificationOrData::Data(message) = received.expect("the message comes").unwrap() else {
         panic!("not the message of the client")
     };
     let peeled = endpoint.peeloff(message.assoc_id).unwrap();

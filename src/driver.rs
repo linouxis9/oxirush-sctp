@@ -1170,31 +1170,108 @@ mod tests {
     }
 
     /// A batch takes the associations in turns, a few messages of each a turn, and no more
-    /// than its size.
+    /// than its size: one that went on past it would never end.
     #[test]
     fn a_batch_takes_the_associations_in_turns_up_to_its_size() {
-        let mut config = DriverConfig::default();
-        (config.batch, config.per_association) = (5, 4);
-        let mut pending = Pending::default();
-        for byte in 0..4 {
-            pending.push_back(1, queued(byte));
-            pending.push_back(2, queued(10 + byte));
-        }
-        let mut batch = Vec::new();
-        let mut taken = |pending: &mut Pending| {
-            batch.clear();
-            pending.batch(&config, &mut batch);
-            batch
-                .iter()
-                .map(|(key, message)| (*key, message.payload[0]))
-                .collect::<Vec<_>>()
+        crate::bounded(|| async {
+            let mut config = DriverConfig::default();
+            (config.batch, config.per_association) = (5, 4);
+            let mut pending = Pending::default();
+            for byte in 0..4 {
+                pending.push_back(1, queued(byte));
+                pending.push_back(2, queued(10 + byte));
+            }
+            let mut batch = Vec::new();
+            let mut taken = |pending: &mut Pending| {
+                batch.clear();
+                pending.batch(&config, &mut batch);
+                batch
+                    .iter()
+                    .map(|(key, message)| (*key, message.payload[0]))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                taken(&mut pending),
+                [(1, 0), (1, 1), (1, 2), (1, 3), (2, 10)]
+            );
+            assert_eq!(taken(&mut pending), [(2, 11), (2, 12), (2, 13)]);
+            assert!(pending.turns.is_empty() && pending.queues.is_empty());
+        });
+    }
+
+    /// A message put back is the next of its association, whose turn comes first when it had
+    /// no other.
+    #[test]
+    fn a_message_put_back_is_the_next() {
+        let config = DriverConfig {
+            batch: 8,
+            per_association: 8,
+            ..Default::default()
         };
-        assert_eq!(
-            taken(&mut pending),
-            [(1, 0), (1, 1), (1, 2), (1, 3), (2, 10)]
-        );
-        assert_eq!(taken(&mut pending), [(2, 11), (2, 12), (2, 13)]);
-        assert!(pending.turns.is_empty() && pending.queues.is_empty());
+        let mut pending = Pending::default();
+        pending.push_back(1, queued(1));
+        pending.push_back(2, queued(10));
+        pending.push_front(1, queued(0));
+        pending.push_front(3, queued(20));
+        let mut batch = Vec::new();
+        pending.batch(&config, &mut batch);
+        let taken: Vec<(Key, u8)> = batch
+            .iter()
+            .map(|(key, message)| (*key, message.payload[0]))
+            .collect();
+        assert_eq!(taken, [(3, 20), (1, 0), (1, 1), (2, 10)]);
+    }
+
+    /// What leaves the queue, sent or lost, gives back its place and its octets of room.
+    #[test]
+    fn what_leaves_the_queue_gives_its_room_back() {
+        let config = DriverConfig {
+            max_queued: 100,
+            ..Default::default()
+        };
+        let writer = writer(config);
+        for _ in 0..3 {
+            writer.try_send(vec![0; 30], SendOptions::new()).unwrap();
+        }
+        let full = writer.try_send(vec![0; 30], SendOptions::new());
+        assert!(matches!(full, Err(SendError::Full)), "{full:?}");
+        let lost = Queued {
+            permits: 30,
+            ..queued(0)
+        };
+        writer.shared.left(1, 30, &[lost]);
+        let overload = writer.overload();
+        let counts = (overload.queued, overload.queued_octets);
+        assert_eq!((counts, overload.sent, overload.failed), ((1, 30), 1, 1));
+        writer.try_send(vec![0; 70], SendOptions::new()).unwrap();
+    }
+
+    /// The writer's task sends what is queued, and waits for more when it has sent all: one
+    /// that looped instead would hold the thread of its runtime, which the test has of its
+    /// own.
+    #[test]
+    fn the_writer_waits_for_more_after_it_has_sent_all() {
+        crate::bounded(|| async {
+            let socket = crate::Socket::new_v4(crate::SocketToAssociation::OneToOne).unwrap();
+            socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let listener = socket.listen(1).unwrap();
+            let client = crate::Socket::new_v4(crate::SocketToAssociation::OneToOne).unwrap();
+            let client = client.connect(listener.local_addr().unwrap()).await;
+            let (server, _) = listener.accept().await.unwrap();
+            let (writer, _reader) = spawn(client.unwrap(), DriverConfig::default()).unwrap();
+            for payload in [&b"first"[..], b"second"] {
+                writer
+                    .send(payload.to_vec(), SendOptions::new())
+                    .await
+                    .unwrap();
+                match server.recv().await.unwrap() {
+                    Some(NotificationOrData::Data(message)) => assert_eq!(message.payload, payload),
+                    other => panic!("{other:?}"),
+                }
+                // The task finds the queue empty, and waits
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
     }
 
     /// The messages of an association that is dropped leave its turns and the others stay;
