@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The test of a message longer than 4 MiB is skipped, with a message, where Linux
+  refuses the memory of its send (ENOMEM): other programs hold the SCTP memory of
+  the host, which `net.sctp.sctp_mem` bounds. Any other error still fails it.
+
 ## 0.2.0 - 2026-11-08
 
 ### Added

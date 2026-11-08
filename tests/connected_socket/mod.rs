@@ -535,6 +535,32 @@ async fn recv_cancelled_in_the_middle_of_a_message_loses_nothing() {
     }
 }
 
+/// Whether Linux refused a send for the memory of the host: ENOMEM, which a long send gets
+/// while other programs hold the SCTP memory that `net.sctp.sctp_mem` bounds, whatever the
+/// crate does.
+fn refused_for_host_memory(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ENOMEM)
+}
+
+/// A send of 4 MiB that Linux refuses for the memory of the host skips the test, and no
+/// other error does.
+#[test]
+fn only_the_memory_of_the_host_skips_a_send_of_4_mib() {
+    use std::io::{Error, ErrorKind};
+    assert!(refused_for_host_memory(&Error::from_raw_os_error(
+        libc::ENOMEM
+    )));
+    for other in [libc::EINVAL, libc::EMSGSIZE, libc::EAGAIN, libc::ENOBUFS] {
+        assert!(!refused_for_host_memory(&Error::from_raw_os_error(other)));
+    }
+    assert!(!refused_for_host_memory(&Error::from(
+        ErrorKind::OutOfMemory
+    )));
+    assert!(!refused_for_host_memory(&Error::from(
+        ErrorKind::InvalidData
+    )));
+}
+
 #[tokio::test]
 async fn recv_rejects_messages_longer_than_4_mib() {
     let max = 4 << 20;
@@ -544,7 +570,7 @@ async fn recv_rejects_messages_longer_than_4_mib() {
     for len in [max + 1, max] {
         let payload = long_payload(len);
         let send = sending.send(&payload, SendOptions::new());
-        let ((), received) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             // A failed send must stop the transfer: there will be no message to receive.
             // Keep receive errors as values, since an oversized message should be rejected.
             tokio::try_join!(send, async {
@@ -559,8 +585,17 @@ async fn recv_rejects_messages_longer_than_4_mib() {
                 sending.status(),
                 receiving.status(),
             )
-        })
-        .unwrap();
+        });
+        let ((), received) = match sent {
+            Err(error) if refused_for_host_memory(&error) => {
+                eprintln!(
+                    "Linux refused the memory of a send of {len} octets ({error}): other \
+                     programs hold the SCTP memory of the host (`net.sctp.sctp_mem`); skipping"
+                );
+                return;
+            }
+            sent => sent.unwrap(),
+        };
         match received {
             Err(error) if len > max => {
                 assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}")
