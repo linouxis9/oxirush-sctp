@@ -58,6 +58,9 @@ exclude_re = [
     # error that Linux gives the socket with it, which this arm reads, is what the next
     # call reads in its place, and that call records the same end.
     'src/internal\.rs:.*: delete match arm AssocChangeState::CommLost in SocketCore::note_received$',
+    # The notifications of a socket of one association other than its association changes,
+    # which the arm before this one takes: `quiet` keeps back association changes alone.
+    'src/internal\.rs:.*: replace match guard self\.quiet\(notification\) with false in SocketCore::note_received$',
     # After the end, the socket is shut down for reading: a read gives what the kernel
     # holds, InvalidData for a message past the limit, or the end, and no other error.
     'src/internal\.rs:.*: replace match guard error\.kind\(\) == std::io::ErrorKind::InvalidData with true in SocketCore::after_the_end$',
