@@ -20,9 +20,8 @@
 //!     let server = async {
 //!         let (association, _peer) = listener.accept().await?;
 //!         if let Some(NotificationOrData::Data(message)) = association.recv().await? {
-//!             let text = String::from_utf8_lossy(&message.payload);
-//!             let (stream, ppid) = (message.stream, message.ppid);
-//!             println!("server: {text:?} on stream {stream:?} with PPID {ppid:?}");
+//!             assert_eq!(&message.payload[..], b"ping");
+//!             assert_eq!((message.stream, message.ppid), (1, 60));
 //!             association.send(b"pong", options).await?;
 //!         }
 //!         std::io::Result::Ok(())
@@ -32,7 +31,7 @@
 //!         let association = socket.connect(address).await?;
 //!         association.send(b"ping", options).await?;
 //!         if let Some(NotificationOrData::Data(message)) = association.recv().await? {
-//!             println!("client: {:?}", String::from_utf8_lossy(&message.payload));
+//!             assert_eq!(&message.payload[..], b"pong");
 //!         }
 //!         std::io::Result::Ok(())
 //!     };
@@ -41,15 +40,10 @@
 //! }
 //! ```
 //!
-//! ```text
-//! server: "ping" on stream 1 with PPID 60
-//! client: "pong"
-//! ```
-//!
 //! # Tasks
 //!
 //! The [README](https://github.com/linouxis9/oxirush-sctp#readme) has a
-//! program for each, with what it prints.
+//! program for each, with what it gives.
 //!
 //! | Task | Items |
 //! |------|-------|

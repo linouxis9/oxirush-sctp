@@ -25,9 +25,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = async {
         let (association, _peer) = listener.accept().await?;
         if let Some(NotificationOrData::Data(message)) = association.recv().await? {
-            let text = String::from_utf8_lossy(&message.payload);
-            let (stream, ppid) = (message.stream, message.ppid);
-            println!("server: {text:?} on stream {stream:?} with PPID {ppid:?}");
+            assert_eq!(&message.payload[..], b"ping");
+            assert_eq!((message.stream, message.ppid), (1, 60));
             association.send(b"pong", options).await?;
         }
         std::io::Result::Ok(())
@@ -37,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let association = socket.connect(address).await?;
         association.send(b"ping", options).await?;
         if let Some(NotificationOrData::Data(message)) = association.recv().await? {
-            println!("client: {:?}", String::from_utf8_lossy(&message.payload));
+            assert_eq!(&message.payload[..], b"pong");
         }
         std::io::Result::Ok(())
     };
@@ -46,12 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-```text
-server: "ping" on stream 1 with PPID 60
-client: "pong"
-```
-
-Each example is followed by its output.
+Each example shows what it gives with `assert_eq!`, and runs as a test of the crate.
 
 ## Installation
 
@@ -99,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gnb = gnb.connect(listener.local_addr()?).await?;
     let (amf, _) = listener.accept().await?;
     let status = amf.status()?;
-    println!("{:?}, {} streams each way", status.state, status.outstreams);
+    assert_eq!((format!("{:?}", status.state), status.outstreams), ("Established".into(), 4));
 
     // A writer, which every task that sends can clone, and a reader, for
     // each side. A writer sends what was queued in batches of 64 at most
@@ -122,29 +116,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             streams[usize::from(message.stream)] += 1;
         }
     }
-    println!("AMF: {streams:?} messages on streams 0 to 3");
+    assert_eq!(streams, [1, 334, 333, 333]);
     amf_writer
         .send(b"NG SETUP RESPONSE".to_vec(), setup)
         .await?;
     if let Some(Ok(NotificationOrData::Data(message))) = gnb_reader.recv().await {
-        println!("gNB: {:?}", String::from_utf8_lossy(&message.payload));
+        assert_eq!(&message.payload[..], b"NG SETUP RESPONSE");
     }
 
     // What the writer sent and refused, and whether its queue is in overload
     let overload = gnb_writer.overload();
-    println!(
-        "gNB writer: {} sent, {} refused, in overload {}",
-        overload.sent, overload.refused, overload.overloaded
-    );
+    assert_eq!((overload.sent, overload.refused, overload.overloaded), (1001, 0, false));
     Ok(())
 }
-```
-
-```text
-Established, 4 streams each way
-AMF: [1, 334, 333, 333] messages on streams 0 to 3
-gNB: "NG SETUP RESPONSE"
-gNB writer: 1001 sent, 0 refused, in overload false
 ```
 
 An association carries the messages of its protocol, such as NGAP on the
@@ -177,27 +161,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (association, _) = listener.accept().await?;
     // `None` is the end of the association
+    let mut seen = Vec::new();
     while let Some(received) = association.recv().await? {
-        match received {
+        seen.push(match received {
             NotificationOrData::Notification(Notification::AssociationChange(change)) => {
-                println!("association change: {:?}", change.state)
+                format!("association change: {:?}", change.state)
             }
             NotificationOrData::Notification(Notification::Shutdown(_)) => {
-                println!("the peer shuts the association down")
+                "the peer shuts the association down".to_string()
             }
-            NotificationOrData::Data(message) => println!("{} octets", message.payload.len()),
-            other => println!("{other:?}"),
-        }
+            NotificationOrData::Data(message) => format!("{} octets", message.payload.len()),
+            other => format!("{other:?}"),
+        });
     }
+    assert_eq!(
+        seen,
+        [
+            "association change: CommUp",
+            "5 octets",
+            "the peer shuts the association down",
+            "association change: ShutdownComplete",
+        ],
+    );
     Ok(())
 }
-```
-
-```text
-association change: CommUp
-5 octets
-the peer shuts the association down
-association change: ShutdownComplete
 ```
 
 `Event::Address` subscribes to `Notification::PeerAddressChange`, the
@@ -227,7 +214,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (association, peer) = connected(&listener).await?;
     drop(peer);
     for _ in 0..2 {
-        println!("closed: {:?}", association.recv().await?);
+        assert!(association.recv().await?.is_none());
     }
 
     // The peer aborts, as a socket does that is dropped with a linger of
@@ -236,15 +223,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     peer.options().set_linger(Some(Duration::ZERO))?;
     drop(peer);
     let end = association.recv().await.map(|_| ());
-    println!("aborted: {:?}", end.map_err(|error| error.kind()));
+    assert_eq!(end.map_err(|error| error.kind()), Err(std::io::ErrorKind::ConnectionReset));
     Ok(())
 }
-```
-
-```text
-closed: None
-closed: None
-aborted: Err(ConnectionReset)
 ```
 
 Once an association has ended, every call of `recv` returns `None` if it
@@ -292,13 +273,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let id = client.status()?.assoc_id;
     let (accepted, _) = listener.accept().await?;
 
-    println!("client: {:?}", ips(&client.local_addrs()?));
-    println!("server: {:?}", ips(&client.peer_addrs()?));
-    println!("the server sees: {:?}", ips(&accepted.peer_addrs()?));
-    println!(
-        "primary path: {}",
-        client.status()?.peer_primary.address.ip()
-    );
+    let (one, two, three): (IpAddr, IpAddr, IpAddr) =
+        ("127.0.0.1".parse()?, "127.0.0.2".parse()?, "127.0.0.3".parse()?);
+    assert_eq!(ips(&client.local_addrs()?), [one, three]);
+    assert_eq!(ips(&client.peer_addrs()?), [one, two]);
+    assert_eq!(ips(&accepted.peer_addrs()?), [one, three]);
+    assert_eq!(client.status()?.peer_primary.address.ip(), one);
 
     // Probe every path each second instead of each 30 seconds
     for address in client.peer_addrs()? {
@@ -306,24 +286,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         path.heartbeat_interval = Duration::from_secs(1);
         client.options().set_peer_address_params(path)?;
         let path = client.options().peer_address_params(id, address)?;
-        println!(
-            "{}: heartbeat every {:?}, lost after {} retransmissions",
-            address.ip(),
-            path.heartbeat_interval,
-            path.path_max_retrans
-        );
+        assert_eq!((path.heartbeat_interval, path.path_max_retrans), (Duration::from_secs(1), 5));
     }
     Ok(())
 }
-```
-
-```text
-client: [127.0.0.1, 127.0.0.3]
-server: [127.0.0.1, 127.0.0.2]
-the server sees: [127.0.0.1, 127.0.0.3]
-primary path: 127.0.0.1
-127.0.0.1: heartbeat every 1s, lost after 5 retransmissions
-127.0.0.2: heartbeat every 1s, lost after 5 retransmissions
 ```
 
 ## Options and status
@@ -351,23 +317,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (association, _) = listener.accept().await?;
 
     let status = association.status()?;
-    println!(
-        "{:?}, {} outgoing and {} incoming streams",
-        status.state, status.outstreams, status.instreams
-    );
+    assert_eq!(format!("{:?}", status.state), "Established");
+    assert_eq!((status.outstreams, status.instreams), (4, 4));
     let options = association.options();
-    println!(
-        "nodelay {}, messages of {} octets at most",
-        options.nodelay()?,
-        options.max_message_size()
-    );
+    assert!(options.nodelay()?);
+    assert_eq!(options.max_message_size(), 65536);
     Ok(())
 }
-```
-
-```text
-Established, 4 outgoing and 4 incoming streams
-nodelay true, messages of 65536 octets at most
 ```
 
 ## One socket for many associations
@@ -387,19 +343,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A message comes with its association, which the answer names
     if let NotificationOrData::Data(message) = endpoint.recv().await? {
-        println!("endpoint: {:?}", String::from_utf8_lossy(&message.payload));
+        assert_eq!(&message.payload[..], b"ping");
         endpoint.send(message.assoc_id, b"pong", SendOptions::new()).await?;
     }
     if let Some(NotificationOrData::Data(message)) = peer.recv().await? {
-        println!("peer: {:?}", String::from_utf8_lossy(&message.payload));
+        assert_eq!(&message.payload[..], b"pong");
     }
     Ok(())
 }
-```
-
-```text
-endpoint: "ping"
-peer: "pong"
 ```
 
 `connect` starts an association without waiting for it, `send_to` sends to
@@ -441,20 +392,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while received.len() < messages.len() {
         server.recv_many(&mut received, 64).await?;
     }
-    for item in &received {
-        if let NotificationOrData::Data(message) = item {
-            let text = String::from_utf8_lossy(&message.payload);
-            println!("{text:?} on stream {}", message.stream);
-        }
-    }
+    let data: Vec<_> = (received.iter())
+        .filter_map(|item| match item {
+            NotificationOrData::Data(message) => Some((&message.payload[..], message.stream)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(data, [(&b"one"[..], 0), (b"two", 1), (b"three", 1)]);
     Ok(())
 }
-```
-
-```text
-"one" on stream 0
-"two" on stream 1
-"three" on stream 1
 ```
 
 ## Limits
@@ -531,8 +477,9 @@ cargo test
 
 The tests open associations over the loopback interface. CI runs four
 `cargo fuzz` targets for a minute each, and an hour each day: what the
-kernel hands over is read without a panic and within its octets. Each Rust block of this page is checked with what it prints
-([`readme/`](readme/build.rs) says how).
+kernel hands over is read without a panic and within its octets. Each Rust
+block of this page checks what it gives with `assert_eq!`, and runs as a
+documentation test of the crate.
 
 [The documentation](https://docs.rs/oxirush-sctp) has the terms, the
 sections of RFC 6458 that the crate covers, the socket types, and the rules

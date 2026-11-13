@@ -8,6 +8,12 @@
   refuses the memory of its send (ENOMEM): other programs hold the SCTP memory of
   the host, which `net.sctp.sctp_mem` bounds. Any other error still fails it.
 
+### Removed
+
+- `readme/`, the package that compared what each block of the README and of the
+  front page of the documentation printed with the text under it: the blocks check
+  what they give with `assert_eq!`, and run as documentation tests.
+
 ## 0.2.0 - 2026-11-08
 
 ### Added
